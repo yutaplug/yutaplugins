@@ -1,5 +1,7 @@
 package com.github.yutaplug.customrichpresence
 
+import android.os.Handler
+import android.os.Looper
 import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
@@ -18,6 +20,10 @@ internal object PresenceController {
     var logger: Logger? = null
 
     private var applied = false
+    private val syncHandler = Handler(Looper.getMainLooper())
+    private val syncRunnable = Runnable {
+        if (settings?.getBool(KEY_ENABLED, false) == true) apply()
+    }
 
     fun startTimerIfNeeded() {
         val current = settings ?: return
@@ -27,6 +33,7 @@ internal object PresenceController {
     }
 
     fun apply(showErrors: Boolean = false) {
+        cancelSync()
         val current = settings ?: return
         if (!current.getBool(KEY_ENABLED, false)) return
 
@@ -98,6 +105,7 @@ internal object PresenceController {
     }
 
     fun clear(showToast: Boolean = false) {
+        cancelSync()
         if (!applied) return
         try {
             val localStatus = StoreStream.getPresences().localPresence?.status ?: ClientStatus.ONLINE
@@ -114,6 +122,16 @@ internal object PresenceController {
     }
 
     private fun String.limit(): String = take(MAX_TEXT_LENGTH)
+
+    fun scheduleSync() {
+        if (settings?.getBool(KEY_ENABLED, false) != true) return
+        syncHandler.removeCallbacks(syncRunnable)
+        syncHandler.postDelayed(syncRunnable, SYNC_DELAY_MS)
+    }
+
+    private fun cancelSync() {
+        syncHandler.removeCallbacks(syncRunnable)
+    }
 
     private fun sendRawPresence(status: ClientStatus, activity: Map<String, Any?>?): Boolean {
         val store = StoreStream.getGatewaySocket()
@@ -156,6 +174,7 @@ internal object PresenceController {
 
 private const val MAX_TEXT_LENGTH = 128
 private const val EMBEDDED_ACTIVITY_FLAG = 1 shl 8
+private const val SYNC_DELAY_MS = 500L
 internal const val KEY_ENABLED = "enabled"
 internal const val KEY_APPLICATION_ID = "applicationId"
 internal const val KEY_NAME = "name"

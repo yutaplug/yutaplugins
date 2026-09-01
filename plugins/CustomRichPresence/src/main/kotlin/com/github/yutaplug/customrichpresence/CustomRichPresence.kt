@@ -5,6 +5,7 @@ import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.entities.Plugin.SettingsTab
 import com.aliucord.patcher.after
+import com.discord.api.presence.ClientStatus
 import com.discord.stores.StoreGatewayConnection
 
 @AliucordPlugin(requiresRestart = false)
@@ -28,6 +29,16 @@ class CustomRichPresence : Plugin() {
             if (param.args[0] as Boolean) {
                 PresenceController.apply()
             }
+        }
+
+        patcher.after<StoreGatewayConnection>(
+            "presenceUpdate",
+            ClientStatus::class.java,
+            Long::class.javaObjectType,
+            List::class.java,
+            Boolean::class.javaObjectType,
+        ) {
+            PresenceController.scheduleSync()
         }
 
         PresenceController.apply()
