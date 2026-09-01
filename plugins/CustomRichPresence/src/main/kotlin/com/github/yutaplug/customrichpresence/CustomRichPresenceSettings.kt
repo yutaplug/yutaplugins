@@ -63,6 +63,18 @@ class CustomRichPresenceSettings(private val pluginSettings: SettingsAPI) : Bott
             addView(radio)
         }
 
+        val embedded = Utils.createCheckedSetting(
+            context,
+            CheckedSetting.ViewType.SWITCH,
+            "Use embedded activity payload",
+            "Enabled by default. Warning: disabling this is unsafe and may cause Discord to reject the activity.",
+        )
+        embedded.isChecked = pluginSettings.getBool(KEY_EMBEDDED, true)
+        embedded.setOnCheckedListener { checked ->
+            pluginSettings.setBool(KEY_EMBEDDED, checked)
+        }
+        addView(embedded)
+
         addView(textInput(context, "Details (optional)", KEY_DETAILS))
         addView(textInput(context, "State (optional)", KEY_STATE))
 
