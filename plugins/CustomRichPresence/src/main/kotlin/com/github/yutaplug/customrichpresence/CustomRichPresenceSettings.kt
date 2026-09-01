@@ -25,7 +25,7 @@ class CustomRichPresenceSettings(private val pluginSettings: SettingsAPI) : Bott
             context,
             CheckedSetting.ViewType.SWITCH,
             "Enable custom Rich Presence",
-            "Uses the activity configured below while Aliucord is connected.",
+            "Warning: this modifies your user activity through Discord's client and may risk your account. Use at your own risk.",
         )
         enabled.isChecked = pluginSettings.getBool(KEY_ENABLED, false)
         enabled.setOnCheckedListener { checked ->
@@ -66,7 +66,7 @@ class CustomRichPresenceSettings(private val pluginSettings: SettingsAPI) : Bott
         val embedded = Utils.createCheckedSetting(
             context,
             CheckedSetting.ViewType.SWITCH,
-            "Use embedded activity payload",
+            "Use embedded compatibility fields",
             "Enabled by default. Warning: disabling this is unsafe and may cause Discord to reject the activity.",
         )
         embedded.isChecked = pluginSettings.getBool(KEY_EMBEDDED, true)

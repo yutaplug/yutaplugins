@@ -5,21 +5,19 @@ import android.os.Looper
 import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
-import com.discord.api.presence.ClientStatus
-import com.discord.gateway.GatewaySocket
-import com.discord.gateway.io.Outgoing
-import com.discord.gateway.opcodes.Opcode
-import com.discord.stores.StoreGatewayConnection
+import com.discord.api.activity.Activity
+import com.discord.api.activity.ActivityAssets
+import com.discord.api.activity.ActivityPlatform
+import com.discord.api.activity.ActivityTimestamps
+import com.discord.api.activity.ActivityType
 import com.discord.stores.StoreStream
-import com.google.gson.Gson
-import java.lang.reflect.Method
-import java.util.Locale
 
 internal object PresenceController {
     var settings: SettingsAPI? = null
     var logger: Logger? = null
 
     private var applied = false
+    private var appliedType: ActivityType? = null
     private val syncHandler = Handler(Looper.getMainLooper())
     private val syncRunnable = Runnable {
         if (settings?.getBool(KEY_ENABLED, false) == true) apply()
@@ -51,7 +49,7 @@ internal object PresenceController {
             return
         }
 
-        val type = ACTIVITY_TYPES[current.getInt(KEY_TYPE, 0)] ?: 0
+        val type = ACTIVITY_TYPES[current.getInt(KEY_TYPE, 0)] ?: ActivityType.PLAYING
         val details = current.getString(KEY_DETAILS, "").trim().limit().ifEmpty { null }
         val state = current.getString(KEY_STATE, "").trim().limit().ifEmpty { null }
         val largeImage = current.getString(KEY_LARGE_IMAGE, "").trim().ifEmpty { null }
@@ -59,45 +57,46 @@ internal object PresenceController {
         val smallImage = current.getString(KEY_SMALL_IMAGE, "").trim().ifEmpty { null }
         val smallText = current.getString(KEY_SMALL_TEXT, "").trim().limit().ifEmpty { null }
         val embedded = current.getBool(KEY_EMBEDDED, true)
-        val activity = linkedMapOf<String, Any?>(
-            "name" to name,
-            "type" to type,
-            "created_at" to System.currentTimeMillis(),
-        )
-        applicationId?.let { activity["application_id"] = it }
-        details?.let { activity["details"] = it }
-        state?.let { activity["state"] = it }
-
-        if (largeImage != null || largeText != null || smallImage != null || smallText != null) {
-            val assets = linkedMapOf<String, Any?>()
-            largeImage?.let { assets["large_image"] = it }
-            largeText?.let { assets["large_text"] = it }
-            smallImage?.let { assets["small_image"] = it }
-            smallText?.let { assets["small_text"] = it }
-            activity["assets"] = assets
+        val assets = if (largeImage != null || largeText != null || smallImage != null || smallText != null) {
+            ActivityAssets(largeImage, largeText, smallImage, smallText)
+        } else {
+            null
         }
-
-        if (current.getBool(KEY_ELAPSED, true)) {
+        val timestamps = if (current.getBool(KEY_ELAPSED, true)) {
             startTimerIfNeeded()
-            activity["timestamps"] = linkedMapOf(
-                "start" to current.getLong(KEY_START_TIME, System.currentTimeMillis()).toString(),
-            )
+            ActivityTimestamps(current.getLong(KEY_START_TIME, System.currentTimeMillis()).toString(), null)
+        } else {
+            null
         }
 
-        if (embedded) {
-            activity["flags"] = EMBEDDED_ACTIVITY_FLAG
-            activity["platform"] = "embedded"
-        }
+        val activity = Activity(
+            name,
+            type,
+            null,
+            System.currentTimeMillis(),
+            timestamps,
+            applicationId,
+            details,
+            state,
+            null,
+            null,
+            assets,
+            if (embedded) EMBEDDED_ACTIVITY_FLAG else null,
+            null,
+            null,
+            null,
+            if (embedded) ActivityPlatform.ANDROID else null,
+            null,
+            null,
+        )
 
         try {
-            val localStatus = StoreStream.getPresences().localPresence?.status ?: ClientStatus.ONLINE
-            val sent = sendRawPresence(localStatus, activity)
-            if (sent) {
-                applied = true
-                if (showErrors) Utils.showToast("Custom Rich Presence applied")
-            } else if (showErrors) {
-                Utils.showToast("Discord is not connected yet")
+            StoreStream.getDispatcherYesThisIsIntentional().schedule {
+                StoreStream.getPresences().updateActivity(type, activity, true)
             }
+            applied = true
+            appliedType = type
+            if (showErrors) Utils.showToast("Custom Rich Presence applied")
         } catch (error: Throwable) {
             logger?.error("CustomRichPresence: failed to apply presence", error)
             if (showErrors) Utils.showToast("Could not apply Rich Presence")
@@ -108,13 +107,14 @@ internal object PresenceController {
         cancelSync()
         if (!applied) return
         try {
-            val localStatus = StoreStream.getPresences().localPresence?.status ?: ClientStatus.ONLINE
-            if (sendRawPresence(localStatus, null)) {
-                applied = false
-                if (showToast) Utils.showToast("Custom Rich Presence cleared")
-            } else if (showToast) {
-                Utils.showToast("Discord is not connected yet")
+            val type = appliedType ?: settings?.let { ACTIVITY_TYPES[it.getInt(KEY_TYPE, 0)] }
+                ?: ActivityType.PLAYING
+            StoreStream.getDispatcherYesThisIsIntentional().schedule {
+                StoreStream.getPresences().updateActivity(type, null, true)
             }
+            applied = false
+            appliedType = null
+            if (showToast) Utils.showToast("Custom Rich Presence cleared")
         } catch (error: Throwable) {
             logger?.error("CustomRichPresence: failed to clear presence", error)
             if (showToast) Utils.showToast("Could not clear Rich Presence")
@@ -133,42 +133,12 @@ internal object PresenceController {
         syncHandler.removeCallbacks(syncRunnable)
     }
 
-    private fun sendRawPresence(status: ClientStatus, activity: Map<String, Any?>?): Boolean {
-        val store = StoreStream.getGatewaySocket()
-        val socket = SOCKET_FIELD.get(store) as? GatewaySocket ?: return false
-        if (!socket.isSessionEstablished) return false
-
-        val payload = linkedMapOf<String, Any?>(
-            "status" to status.name.lowercase(Locale.ROOT),
-            "since" to null,
-            "activities" to if (activity == null) emptyList<Any>() else listOf(activity),
-            "afk" to false,
-        )
-        val outgoing = Outgoing(Opcode.PRESENCE_UPDATE, payload)
-        RAW_SEND.invoke(null, socket, outgoing, false, null, 6, null)
-        return true
-    }
-
     private val ACTIVITY_TYPES = mapOf(
-        0 to 0,
-        1 to 1,
-        2 to 2,
-        3 to 3,
-        5 to 5,
-    )
-
-    private val SOCKET_FIELD = StoreGatewayConnection::class.java.getDeclaredField("socket").apply {
-        isAccessible = true
-    }
-
-    private val RAW_SEND: Method = GatewaySocket::class.java.getDeclaredMethod(
-        "send\$default",
-        GatewaySocket::class.java,
-        Outgoing::class.java,
-        Boolean::class.javaPrimitiveType,
-        Gson::class.java,
-        Int::class.javaPrimitiveType,
-        Any::class.java,
+        0 to ActivityType.PLAYING,
+        1 to ActivityType.STREAMING,
+        2 to ActivityType.LISTENING,
+        3 to ActivityType.WATCHING,
+        5 to ActivityType.COMPETING,
     )
 }
 
