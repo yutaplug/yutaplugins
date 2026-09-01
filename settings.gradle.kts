@@ -28,5 +28,9 @@ include(":plugins")
 
 // Add each directory under ./plugins as a separate project
 rootDir.resolve("plugins")
-    .listFiles { file -> file.isDirectory && file.resolve("build.gradle.kts").exists() }!!
+    .listFiles { file ->
+        file.isDirectory && (
+            file.resolve("build.gradle.kts").exists() || file.resolve("build.gradle").exists()
+        )
+    }!!
     .forEach { include(":plugins:${it.name}") }
