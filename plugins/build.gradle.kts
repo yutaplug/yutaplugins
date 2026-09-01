@@ -38,10 +38,10 @@ subprojects {
 
     configure<AliucordExtension> {
         // TODO: Change to your name and user ID
-        author("yournamehere", 0L, hyperlink = true)
+        author("yutaplug", 0L, hyperlink = false)
 
         // TODO: Change to your repository
-        github("https://github.com/Aliucord/plugins-template")
+        github("https://github.com/yutaplug/yutaplugins")
     }
 
     configure<KtlintExtension> {
