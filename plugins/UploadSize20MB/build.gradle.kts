@@ -1,4 +1,4 @@
-version = "1.1.0"
+version = "1.1.1"
 description = "Backport Discord's 20 MB free upload limit"
 
 android {
