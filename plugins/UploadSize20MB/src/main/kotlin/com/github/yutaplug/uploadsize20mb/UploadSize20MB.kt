@@ -57,8 +57,10 @@ class UploadSize20MB : Plugin() {
         }
 
         patcher.instead<PremiumUtils>("getMaxFileSizeMB", User::class.java) { param ->
-            val user = param.args[0] as User
-            when (user.premiumTier) {
+            // DM validation can call this method without a User model. The
+            // original Discord implementation treats that as non-Nitro.
+            val user = param.args[0] as? User
+            when (user?.premiumTier) {
                 PremiumTier.TIER_0 -> NITRO_BASIC_UPLOAD_LIMIT_MB
                 PremiumTier.TIER_1 -> NITRO_CLASSIC_UPLOAD_LIMIT_MB
                 PremiumTier.TIER_2 -> NITRO_UPLOAD_LIMIT_MB
