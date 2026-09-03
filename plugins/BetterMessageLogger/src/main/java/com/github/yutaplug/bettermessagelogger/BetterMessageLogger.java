@@ -32,6 +32,7 @@ import com.discord.utilities.color.ColorCompat;
 import com.discord.utilities.drawable.DrawableCompat;
 
 import java.io.File;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.text.DateFormat;
@@ -57,6 +58,7 @@ import rx.subjects.BehaviorSubject;
 public class BetterMessageLogger extends Plugin {
     private static final String DB_NAME = "BetterMessageLogger.db";
     private static final String TXT_NAME = "BetterMessageLogger.txt";
+    private static final String DELETED_LABEL = " (deleted)";
     private static BetterMessageLogger instance;
 
     private final Map<Long, MessageRecord> records = new ConcurrentHashMap<>();
@@ -137,7 +139,7 @@ public class BetterMessageLogger extends Plugin {
                     long messageId = entry.getMessage().getId();
                     boundMessageItems.put(item, messageId);
                     boundMessages.put(messageId, entry.getMessage());
-                    applyDeletedLabel(item.itemView, isDeleted(messageId));
+                    scheduleDeletedLabel(item, messageId);
                 }));
 
         patcher.patch(WidgetChatListActions.class, "configureUI",
@@ -382,11 +384,17 @@ public class BetterMessageLogger extends Plugin {
         for (Map.Entry<WidgetChatListAdapterItemMessage, Long> bound : boundMessageItems.entrySet()) {
             WidgetChatListAdapterItemMessage item = bound.getKey();
             long messageId = bound.getValue();
-            View root = item.itemView;
-            root.post(() -> {
-                applyDeletedLabel(root, isDeleted(messageId));
-            });
+            scheduleDeletedLabel(item, messageId);
         }
+    }
+
+    private void scheduleDeletedLabel(WidgetChatListAdapterItemMessage item, long messageId) {
+        item.itemView.post(() -> {
+            // A RecyclerView item can be rebound before this callback runs.
+            Long boundId = boundMessageItems.get(item);
+            if (boundId == null || boundId != messageId) return;
+            applyDeletedLabel(item.itemView, isDeleted(messageId));
+        });
     }
 
     private void applyDeletedLabel(View root, boolean deleted) {
@@ -394,10 +402,38 @@ public class BetterMessageLogger extends Plugin {
         View view = textId == 0 ? null : root.findViewById(textId);
         if (!(view instanceof TextView)) return;
         TextView textView = (TextView) view;
+
+        // TextView.getText() is a copied SpannableString on Discord 126021. The real
+        // DraweeSpanStringBuilder, which owns the emoji image spans, is kept separately
+        // by SimpleDraweeSpanTextView, so mutate that builder instead of the copy.
+        com.facebook.drawee.span.DraweeSpanStringBuilder nativeBuilder = getNativeTextBuilder(textView);
+        if (nativeBuilder != null) {
+            applyDeletedLabel(textView, nativeBuilder, deleted);
+            return;
+        }
+
+        // Never replace a SimpleDraweeSpanTextView with a plain spannable: doing so drops
+        // the builder that keeps Discord's emoji drawables attached to the view.
+        if (textView instanceof com.discord.utilities.view.text.SimpleDraweeSpanTextView) return;
+
         CharSequence current = textView.getText();
-        SpannableStringBuilder builder = current instanceof SpannableStringBuilder
-                ? (SpannableStringBuilder) current : new SpannableStringBuilder(current == null ? "" : current);
+        if (current == null) current = "";
+        applyDeletedLabel(textView, current instanceof SpannableStringBuilder
+                ? (SpannableStringBuilder) current : new SpannableStringBuilder(current), deleted);
+    }
+
+    private void applyDeletedLabel(TextView textView, SpannableStringBuilder builder, boolean deleted) {
+
         DeletedLabelSpan[] oldLabels = builder.getSpans(0, builder.length(), DeletedLabelSpan.class);
+
+        if (!deleted && oldLabels.length == 0) return;
+        if (deleted && oldLabels.length == 1) {
+            int start = builder.getSpanStart(oldLabels[0]);
+            int end = builder.getSpanEnd(oldLabels[0]);
+            if (start == builder.length() - DELETED_LABEL.length() && end == builder.length()
+                    && DELETED_LABEL.contentEquals(builder.subSequence(start, end))) return;
+        }
+
         for (DeletedLabelSpan oldLabel : oldLabels) {
             int start = builder.getSpanStart(oldLabel);
             int end = builder.getSpanEnd(oldLabel);
@@ -406,7 +442,7 @@ public class BetterMessageLogger extends Plugin {
         }
         if (deleted) {
             int start = builder.length();
-            builder.append(" (deleted)");
+            builder.append(DELETED_LABEL);
             builder.setSpan(new DeletedLabelSpan(), start, builder.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         if (builder instanceof com.facebook.drawee.span.DraweeSpanStringBuilder
@@ -418,6 +454,20 @@ public class BetterMessageLogger extends Plugin {
         }
     }
 
+    private com.facebook.drawee.span.DraweeSpanStringBuilder getNativeTextBuilder(TextView textView) {
+        if (!(textView instanceof com.discord.utilities.view.text.SimpleDraweeSpanTextView)) return null;
+        try {
+            Field field = com.discord.utilities.view.text.SimpleDraweeSpanTextView.class
+                    .getDeclaredField("mDraweeStringBuilder");
+            field.setAccessible(true);
+            Object value = field.get(textView);
+            return value instanceof com.facebook.drawee.span.DraweeSpanStringBuilder
+                    ? (com.facebook.drawee.span.DraweeSpanStringBuilder) value : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     private void addHistoryAction(WidgetChatListActions sheet, MessageRecord record) {
         try {
             ViewGroup rows = getActionRows(sheet);
@@ -425,7 +475,7 @@ public class BetterMessageLogger extends Plugin {
             if (rows.findViewWithTag("BetterMessageLogger.EditHistory") != null) return;
             TextView action = createNativeAction(sheet, "BetterMessageLogger.EditHistory", "View Edit History",
                     "ic_history_white_24dp", ignored -> showHistory(sheet, record));
-            rows.addView(action, Math.min(1, rows.getChildCount()));
+            rows.addView(action, actionInsertionIndex(rows));
         } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException error) {
             logger.error("Could not add edit history action", error);
         }
@@ -440,10 +490,19 @@ public class BetterMessageLogger extends Plugin {
                 deleteLoggedMessage(record.id);
                 sheet.dismiss();
             });
-            rows.addView(action, Math.min(1, rows.getChildCount()));
+            rows.addView(action, actionInsertionIndex(rows));
         } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException error) {
             logger.error("Could not add logged message delete action", error);
         }
+    }
+
+    private int actionInsertionIndex(ViewGroup rows) {
+        // The 126021 layout puts the reaction emoji RecyclerView first. Insert after
+        // that exact child instead of relying on a hard-coded index from another build.
+        int reactionId = Utils.getResId("dialog_chat_actions_add_reaction_emojis_list", "id");
+        View reactions = reactionId == 0 ? null : rows.findViewById(reactionId);
+        int reactionIndex = reactions == null ? -1 : rows.indexOfChild(reactions);
+        return reactionIndex < 0 ? rows.getChildCount() : reactionIndex + 1;
     }
 
     private TextView createNativeAction(WidgetChatListActions sheet, String tag, String text, String iconName,
