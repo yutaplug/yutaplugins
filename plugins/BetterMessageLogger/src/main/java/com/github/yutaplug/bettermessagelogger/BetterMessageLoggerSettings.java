@@ -3,9 +3,12 @@ package com.github.yutaplug.bettermessagelogger;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Bundle;
 import android.text.InputType;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -16,6 +19,9 @@ import com.aliucord.Utils;
 import com.aliucord.api.SettingsAPI;
 import com.aliucord.widgets.BottomSheet;
 import com.discord.views.CheckedSetting;
+import com.discord.utilities.color.ColorCompat;
+import com.google.android.material.button.MaterialButton;
+import androidx.core.content.ContextCompat;
 
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -31,9 +37,14 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
     public void onViewCreated(View view, Bundle bundle) {
         super.onViewCreated(view, bundle);
         Context context = requireContext();
-        getLinearLayout().setPadding(20, 20, 20, 20);
+        getLinearLayout().setPadding(dp(context, 20), dp(context, 8), dp(context, 20), dp(context, 24));
 
-        CheckedSetting database = Utils.createCheckedSetting(context, CheckedSetting.ViewType.CHECK,
+        addIntro(context, "Keep deleted messages and edit history available in chat. "
+                + "Use the filters below to control what gets logged.");
+
+        addSectionHeader(context, "Storage", true);
+
+        CheckedSetting database = Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH,
                 "Enable database", "Persist logs in Aliucord/BetterMessageLogger.db");
         database.setChecked(settings.getBool("database", false));
         database.setOnCheckedListener(value -> {
@@ -43,36 +54,65 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         });
         addView(database);
 
-        addAction(context, "Clear database", "Delete all saved message logs", () -> {
+        addButton(context, "Clear saved logs", "ic_delete_24dp", () -> {
             BetterMessageLogger plugin = BetterMessageLogger.getInstance();
             if (plugin != null) plugin.clearDatabase();
         });
-        addAction(context, "Convert database to TXT", "Create Aliucord/BetterMessageLogger.txt", () -> {
+        addButton(context, "Export logs as TXT", "ic_copy_24dp", () -> {
             BetterMessageLogger plugin = BetterMessageLogger.getInstance();
             if (plugin != null) plugin.exportDatabase();
         });
 
-        addToggle(context, "Ignore own messages", "Remove your messages from the log", "ignoreOwn");
-        addToggle(context, "Ignore bot messages", "Remove bot messages from the log", "ignoreBots");
+        addSectionHeader(context, "Message filters", false);
+        addToggle(context, "Ignore my messages", "Do not save messages sent by your account", "ignoreOwn");
+        addToggle(context, "Ignore bot messages", "Do not save messages sent by bots", "ignoreBots");
+
+        addSectionHeader(context, "Excluded users", false);
         addAction(context, "Ignored user IDs", "Add a user ID to ignore (" + count("ignoredUsers") + ")",
                 () -> showIdDialog(context, "Ignored user ID", "ignoredUsers", "User ID"));
 
+        addSectionHeader(context, "Channel scope", false);
         addAction(context, "Blacklist channel IDs", "Do not log these channels (" + count("blackChannels") + ")",
                 () -> showIdDialog(context, "Blacklisted channel ID", "blackChannels", "Channel ID"));
         addAction(context, "Whitelist channel IDs", "Only log these channels when this list is non-empty ("
                 + count("whiteChannels") + ")", () -> showIdDialog(context, "Whitelisted channel ID", "whiteChannels", "Channel ID"));
+
+        addSectionHeader(context, "Server scope", false);
         addAction(context, "Blacklist server IDs", "Do not log these servers (" + count("blackServers") + ")",
                 () -> showIdDialog(context, "Blacklisted server ID", "blackServers", "Server ID"));
         addAction(context, "Whitelist server IDs", "Only log these servers when this list is non-empty ("
                 + count("whiteServers") + ")", () -> showIdDialog(context, "Whitelisted server ID", "whiteServers", "Server ID"));
+
+        addSectionHeader(context, "Direct messages", false);
         addAction(context, "Blacklist DM channel IDs", "Do not log these DMs (" + count("blackDms") + ")",
                 () -> showIdDialog(context, "Blacklisted DM channel ID", "blackDms", "DM channel ID"));
         addAction(context, "Whitelist DM channel IDs", "Only log these DMs when this list is non-empty ("
                 + count("whiteDms") + ")", () -> showIdDialog(context, "Whitelisted DM channel ID", "whiteDms", "DM channel ID"));
     }
 
+    private void addIntro(Context context, String text) {
+        TextView intro = new TextView(context);
+        intro.setText(text);
+        intro.setTextColor(themeColor(context, "colorTextMuted", Color.LTGRAY));
+        intro.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        intro.setLineSpacing(0, 1.1f);
+        intro.setPadding(0, 0, 0, dp(context, 4));
+        getLinearLayout().addView(intro, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private void addSectionHeader(Context context, String title, boolean first) {
+        TextView header = new TextView(context);
+        header.setText(title.toUpperCase(java.util.Locale.ROOT));
+        header.setTextColor(themeColor(context, "colorBrand", Color.rgb(88, 101, 242)));
+        header.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        header.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        header.setLetterSpacing(0.08f);
+        header.setPadding(0, first ? dp(context, 12) : dp(context, 24), 0, dp(context, 8));
+        getLinearLayout().addView(header, new LinearLayout.LayoutParams(-1, -2));
+    }
+
     private void addToggle(Context context, String title, String subtitle, String key) {
-        CheckedSetting setting = Utils.createCheckedSetting(context, CheckedSetting.ViewType.CHECK, title, subtitle);
+        CheckedSetting setting = Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, title, subtitle);
         setting.setChecked(settings.getBool(key, false));
         setting.setOnCheckedListener(value -> {
             settings.setBool(key, value);
@@ -83,13 +123,57 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
     }
 
     private void addAction(Context context, String title, String subtitle, Runnable action) {
-        TextView row = new TextView(context);
-        row.setText(title + "\n" + subtitle);
-        row.setTextColor(Color.WHITE);
-        row.setTextSize(16);
-        row.setPadding(20, 24, 20, 24);
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(context, 58));
+        row.setPaddingRelative(dp(context, 16), dp(context, 9), dp(context, 16), dp(context, 9));
+        row.setBackground(selectableBackground(context));
+
+        TextView titleView = new TextView(context);
+        titleView.setText(title);
+        titleView.setTextColor(themeColor(context, "colorHeaderPrimary", Color.WHITE));
+        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        row.addView(titleView, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView subtitleView = new TextView(context);
+        subtitleView.setText(subtitle);
+        subtitleView.setTextColor(themeColor(context, "colorTextMuted", Color.LTGRAY));
+        subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        subtitleView.setPadding(0, dp(context, 2), 0, 0);
+        row.addView(subtitleView, new LinearLayout.LayoutParams(-1, -2));
+
         row.setOnClickListener(ignored -> action.run());
-        addView(row);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(context, 4);
+        getLinearLayout().addView(row, params);
+    }
+
+    private void addButton(Context context, String title, String iconName, Runnable action) {
+        MaterialButton button = new MaterialButton(context);
+        button.setText(title);
+        button.setAllCaps(false);
+        button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        button.setMinHeight(dp(context, 48));
+        button.setContentDescription(title);
+        int iconId = Utils.getResId(iconName, "drawable");
+        if (iconId != 0) button.setIcon(ContextCompat.getDrawable(context, iconId));
+        button.setOnClickListener(ignored -> action.run());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(context, 6);
+        getLinearLayout().addView(button, params);
+    }
+
+    private android.graphics.drawable.Drawable selectableBackground(Context context) {
+        TypedValue value = new TypedValue();
+        if (context.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, value, true)
+                && value.resourceId != 0) return context.getDrawable(value.resourceId);
+        return null;
+    }
+
+    private int themeColor(Context context, String attribute, int fallback) {
+        int id = Utils.getResId(attribute, "attr");
+        return id == 0 ? fallback : ColorCompat.getThemedColor(context, id);
     }
 
     private int count(String key) {
