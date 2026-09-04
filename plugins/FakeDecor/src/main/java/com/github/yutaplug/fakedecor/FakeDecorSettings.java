@@ -1,12 +1,11 @@
 package com.github.yutaplug.fakedecor;
 
+import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
-import android.content.Intent;
-import android.net.Uri;
 import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -28,6 +27,7 @@ import java.util.Map;
 
 public final class FakeDecorSettings extends BottomSheet {
     private static final int PICK_DECORATION = 4831;
+
     private final SettingsAPI settings;
     private final FakeDecor plugin;
     private EditText assetInput;
@@ -46,24 +46,21 @@ public final class FakeDecorSettings extends BottomSheet {
                 dp(context, 20), dp(context, 24));
 
         addIntro(context, "Create and use custom avatar decorations on Discord. "
-                + "Your local selection is stored per Discord account.");
+                + "Your selection is saved separately for each Discord account.");
 
         addSectionHeader(context, "Local decoration", true);
-
-        TextInput asset = new TextInput(context, "Decoration hash or asset",
-                plugin.getSelectedAsset());
+        TextInput asset = new TextInput(context, "Decoration hash or asset", plugin.getSelectedAsset());
         assetInput = asset.getEditText();
         assetInput.setSingleLine(true);
         addContentView(asset, 6);
-
-        addAction(context, "Browse Decor presets", "Choose from the available preset decorations",
-                () -> plugin.fetchPresets(this));
 
         addAction(context, "Apply locally", "Use this decoration in messages, lists, and profiles", () -> {
             plugin.setSelectedAsset(assetInput.getText().toString());
             Utils.showToast(assetInput.getText().toString().trim().isEmpty()
                     ? "Decoration removed" : "Decoration applied; reopen the current view");
         });
+        addAction(context, "Browse Decor presets", "Choose from Decor's available preset decorations",
+                () -> plugin.fetchPresets(this));
 
         addSectionHeader(context, "Decor account", false);
         authorizationStatus = statusView(context);
@@ -72,9 +69,9 @@ public final class FakeDecorSettings extends BottomSheet {
 
         addAction(context, "Authorize with Discord",
                 "Open the system browser to connect the current Discord account",
-                () -> plugin.authorizeDecor(context, this));
+                () -> plugin.authorizeDecor(context));
         addAction(context, "Finish authorization",
-                "Complete authorization after copying the returned Decor token",
+                "Copy the returned token, then tap this button",
                 () -> plugin.finishBrowserAuthorization(context, this));
         addAction(context, "Disconnect Decor", "Remove the saved Decor access for this account", () -> {
             plugin.disconnectDecor();
@@ -82,21 +79,23 @@ public final class FakeDecorSettings extends BottomSheet {
         });
 
         addSectionHeader(context, "Cloud actions", false);
+        addAction(context, "My Decor decorations", "View, select, or delete decorations on your account",
+                () -> plugin.fetchOwnDecorations(this));
         addAction(context, "Sync from Decor", "Load the decoration currently saved to Decor",
                 plugin::refreshOwnDecoration);
-        addAction(context, "Sync selection to Decor", "Save your local selection to your Decor account",
+        addAction(context, "Sync selection to Decor", "Save this selection to your Decor account",
                 plugin::applyToDecorService);
-        addAction(context, "Upload custom decoration", "Upload an image and apply it to your account", () -> {
+        addAction(context, "Upload custom decoration", "Submit a PNG or APNG decoration for review", () -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
             intent.setType("image/*");
             startActivityForResult(intent, PICK_DECORATION);
         });
 
-        addSectionHeader(context, "How authorization works", false);
-        addIntro(context, "Cloud actions require a Decor account. Authorize in your system browser, "
-                + "copy the returned token, and tap Finish authorization. Local decorations and "
-                + "preset browsing work without an account.");
+        addSectionHeader(context, "About", false);
+        addIntro(context, "Decor is a separate service. Preset browsing and local selection work without "
+                + "an account; cloud actions require authorization. Uploaded decorations may need review "
+                + "before they can be selected.");
     }
 
     void refreshAuthState() {
@@ -113,10 +112,123 @@ public final class FakeDecorSettings extends BottomSheet {
     @Override
     public void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == PICK_DECORATION && resultCode == android.app.Activity.RESULT_OK
+        if (requestCode == PICK_DECORATION && resultCode == Activity.RESULT_OK
                 && data != null && data.getData() != null) {
             plugin.uploadDecoration(requireContext(), data.getData());
         }
+    }
+
+    public void showPresets(List<?> presets) {
+        List<String> labels = new ArrayList<>();
+        List<String> assets = new ArrayList<>();
+        for (Object rawPreset : presets) {
+            if (!(rawPreset instanceof Map)) continue;
+            Map<?, ?> preset = (Map<?, ?>) rawPreset;
+            Object rawDecorations = preset.get("decorations");
+            if (!(rawDecorations instanceof List)) continue;
+            String presetName = String.valueOf(preset.get("name"));
+            for (Object rawDecoration : (List<?>) rawDecorations) {
+                if (!(rawDecoration instanceof Map)) continue;
+                Map<?, ?> decoration = (Map<?, ?>) rawDecoration;
+                String asset = decorationAsset(decoration);
+                if (asset.isEmpty()) continue;
+                String alt = decoration.get("alt") == null
+                        ? asset : String.valueOf(decoration.get("alt"));
+                labels.add(presetName + ": " + alt);
+                assets.add(asset);
+            }
+        }
+        if (labels.isEmpty()) {
+            Utils.showToast("No Decor presets found");
+            return;
+        }
+
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(
+                requireContext(), android.R.layout.simple_list_item_1, labels) {
+            @Override
+            public View getView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView row = (TextView) super.getView(position, convertView, parent);
+                row.setTextColor(Color.WHITE);
+                return row;
+            }
+        };
+
+        androidx.appcompat.app.AlertDialog dialog = new androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                .setTitle("Decor presets")
+                .setAdapter(adapter, (dialogInterface, which) -> {
+                    assetInput.setText(assets.get(which));
+                    assetInput.setSelection(assetInput.length());
+                })
+                .setNegativeButton("Cancel", null)
+                .create();
+        dialog.setOnShowListener(ignored -> {
+            TextView cancel = dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE);
+            if (cancel != null) cancel.setTextColor(Color.WHITE);
+        });
+        dialog.show();
+    }
+
+    public void showOwnDecorations(List<?> decorations) {
+        List<Map<?, ?>> valid = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        String selected = plugin.getSelectedAsset();
+
+        for (Object rawDecoration : decorations) {
+            if (!(rawDecoration instanceof Map)) continue;
+            Map<?, ?> decoration = (Map<?, ?>) rawDecoration;
+            String asset = decorationAsset(decoration);
+            if (asset.isEmpty()) continue;
+            valid.add(decoration);
+            String alt = decoration.get("alt") == null
+                    ? asset : String.valueOf(decoration.get("alt"));
+            String state = Boolean.FALSE.equals(decoration.get("reviewed"))
+                    ? " (pending review)" : "";
+            labels.add((asset.equals(selected) ? "✓ " : "") + alt + state);
+        }
+
+        if (valid.isEmpty()) {
+            Utils.showToast("No Decor decorations found");
+            return;
+        }
+
+        int selectedIndex = 0;
+        for (int i = 0; i < valid.size(); i++) {
+            if (decorationAsset(valid.get(i)).equals(selected)) {
+                selectedIndex = i;
+                break;
+            }
+        }
+        final int[] checked = {selectedIndex};
+        androidx.appcompat.app.AlertDialog dialog = new androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                .setTitle("My Decor decorations")
+                .setSingleChoiceItems(labels.toArray(new String[0]), selectedIndex,
+                        (ignored, which) -> checked[0] = which)
+                .setNegativeButton("Cancel", null)
+                .setNeutralButton("Delete", null)
+                .setPositiveButton("Use", null)
+                .create();
+        dialog.setOnShowListener(ignored -> {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                    .setOnClickListener(button -> {
+                        if (Boolean.FALSE.equals(valid.get(checked[0]).get("reviewed"))) {
+                            Utils.showToast("This decoration is still pending review");
+                            return;
+                        }
+                        plugin.setSelectedAsset(decorationAsset(valid.get(checked[0])));
+                        assetInput.setText(plugin.getSelectedAsset());
+                        dialog.dismiss();
+                        Utils.showToast("Decoration applied; reopen the current view");
+                    });
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)
+                    .setOnClickListener(button -> {
+                        Object hash = valid.get(checked[0]).get("hash");
+                        if (hash != null) {
+                            plugin.deleteDecoration(String.valueOf(hash));
+                            dialog.dismiss();
+                        }
+                    });
+        });
+        dialog.show();
     }
 
     private void addIntro(Context context, String text) {
@@ -201,53 +313,10 @@ public final class FakeDecorSettings extends BottomSheet {
         return Math.round(value * context.getResources().getDisplayMetrics().density);
     }
 
-    public void showPresets(List<?> presets) {
-        List<String> labels = new ArrayList<>();
-        List<String> assets = new ArrayList<>();
-        for (Object rawPreset : presets) {
-            if (!(rawPreset instanceof Map)) continue;
-            Map<?, ?> preset = (Map<?, ?>) rawPreset;
-            Object rawDecorations = preset.get("decorations");
-            if (!(rawDecorations instanceof List)) continue;
-            String presetName = String.valueOf(preset.get("name"));
-            for (Object rawDecoration : (List<?>) rawDecorations) {
-                if (!(rawDecoration instanceof Map)) continue;
-                Map<?, ?> decoration = (Map<?, ?>) rawDecoration;
-                Object hash = decoration.get("hash");
-                if (hash == null) continue;
-                boolean animated = Boolean.TRUE.equals(decoration.get("animated"));
-                String asset = (animated ? "a_" : "") + hash;
-                String alt = decoration.get("alt") == null ? asset : String.valueOf(decoration.get("alt"));
-                labels.add(presetName + ": " + alt);
-                assets.add(asset);
-            }
-        }
-        if (labels.isEmpty()) {
-            Utils.showToast("No Decor presets found");
-            return;
-        }
-        ArrayAdapter<String> adapter = new ArrayAdapter<String>(
-                requireContext(), android.R.layout.simple_list_item_1, labels) {
-            @Override
-            public View getView(int position, View convertView, android.view.ViewGroup parent) {
-                TextView row = (TextView) super.getView(position, convertView, parent);
-                row.setTextColor(Color.WHITE);
-                return row;
-            }
-        };
-
-        androidx.appcompat.app.AlertDialog dialog = new androidx.appcompat.app.AlertDialog.Builder(requireContext())
-                .setTitle("Decor presets")
-                .setAdapter(adapter, (dialogInterface, which) -> {
-                    assetInput.setText(assets.get(which));
-                    assetInput.setSelection(assetInput.length());
-                })
-                .setNegativeButton("Cancel", null)
-                .create();
-        dialog.setOnShowListener(ignored -> {
-            TextView cancel = dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE);
-            if (cancel != null) cancel.setTextColor(Color.WHITE);
-        });
-        dialog.show();
+    private static String decorationAsset(Map<?, ?> decoration) {
+        Object hash = decoration.get("hash");
+        if (hash == null || "null".equals(String.valueOf(hash))) return "";
+        boolean animated = Boolean.TRUE.equals(decoration.get("animated"));
+        return (animated ? "a_" : "") + hash;
     }
 }
