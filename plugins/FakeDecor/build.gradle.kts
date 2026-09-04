@@ -9,8 +9,7 @@ aliucord {
         * Improve account status and authorization guidance.
         
         # 1.0.0
-        * Backport Decor avatar decorations to Discord 126.021.
-        * Add system-browser authorization and per-account Decor tokens.
+        * Initial plugin release!
         """.trimIndent(),
     )
 }
