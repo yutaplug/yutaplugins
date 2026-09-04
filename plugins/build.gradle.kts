@@ -38,7 +38,7 @@ subprojects {
 
     configure<AliucordExtension> {
         // TODO: Change to your name and user ID
-        author("yutaplug", 0L, hyperlink = false)
+        author("yutaplug", 1202406828248408134L, hyperlink = true)
 
         // TODO: Change to your repository
         github("https://github.com/yutaplug/yutaplugins")
