@@ -147,7 +147,7 @@ public class BetterMessageLogger extends Plugin {
                     if (!(frame.args[0] instanceof WidgetChatListActions.Model)) return;
                     WidgetChatListActions.Model model = (WidgetChatListActions.Model) frame.args[0];
                     MessageRecord record = records.get(model.getMessage().getId());
-                    if (record == null) return;
+                    if (record == null || !shouldKeep(record)) return;
                     WidgetChatListActions sheet = (WidgetChatListActions) frame.thisObject;
                     if (!record.edits.isEmpty()) addHistoryAction(sheet, record);
                     if (record.deleted || !record.edits.isEmpty()) addDeleteAction(sheet, record);
@@ -248,7 +248,7 @@ public class BetterMessageLogger extends Plugin {
         com.discord.api.user.User author = message.getAuthor();
         String avatar = null;
         if (author != null && author.a() != null) avatar = author.a().a();
-        Long guildId = message.getGuildId();
+        Long guildId = resolveGuildId(message.getChannelId(), message.getGuildId());
         return new MessageRecord(message.getId(), message.getChannelId(), guildId,
                 author == null ? 0L : author.getId(), author == null ? "Unknown user" : author.getUsername(), avatar,
                 author != null && Boolean.TRUE.equals(author.e()), message.getContent() == null ? "" : message.getContent(),
@@ -283,17 +283,33 @@ public class BetterMessageLogger extends Plugin {
         if (settings.getBool("ignoreBots", false) && record.bot) return false;
         if (readIds("ignoredUsers").contains(String.valueOf(record.authorId))) return false;
 
-        boolean dm = record.guildId == null || record.guildId == 0L;
+        Long guildId = effectiveGuildId(record);
+        boolean dm = guildId == null || guildId == 0L;
         if (dm) {
             if (contains("blackDms", record.channelId) || (!readIds("whiteDms").isEmpty()
                     && !contains("whiteDms", record.channelId))) return false;
         } else {
             if (contains("blackChannels", record.channelId) || (!readIds("whiteChannels").isEmpty()
                     && !contains("whiteChannels", record.channelId))) return false;
-            if (contains("blackServers", record.guildId) || (!readIds("whiteServers").isEmpty()
-                    && !contains("whiteServers", record.guildId))) return false;
+            if (contains("blackServers", guildId) || (!readIds("whiteServers").isEmpty()
+                    && !contains("whiteServers", guildId))) return false;
         }
         return true;
+    }
+
+    private Long effectiveGuildId(MessageRecord record) {
+        return resolveGuildId(record.channelId, record.guildId);
+    }
+
+    private Long resolveGuildId(long channelId, Long guildId) {
+        if (guildId != null && guildId != 0L) return guildId;
+        try {
+            com.discord.api.channel.Channel channel = com.discord.stores.StoreStream.getChannels().getChannel(channelId);
+            if (channel != null && channel.i() != 0L) return channel.i();
+        } catch (Throwable ignored) {
+            // Local messages can be observed while the channel store is still initializing.
+        }
+        return guildId;
     }
 
     private boolean contains(String key, long id) {
@@ -328,6 +344,12 @@ public class BetterMessageLogger extends Plugin {
         database.open();
         database.loadAllAsync(loaded -> {
             for (MessageRecord record : loaded) {
+                if (!shouldKeep(record)) {
+                    database.removeAsync(record.id);
+                    records.remove(record.id);
+                    deletedMessageIds.remove(record.id);
+                    continue;
+                }
                 if (record.deleted) deletedMessageIds.add(record.id);
                 MessageRecord existing = records.get(record.id);
                 if (existing == null) records.put(record.id, record);
@@ -634,7 +656,7 @@ public class BetterMessageLogger extends Plugin {
     static final class MessageRecord {
         final long id;
         final long channelId;
-        final Long guildId;
+        Long guildId;
         final long authorId;
         final String authorName;
         final String authorAvatar;
