@@ -9,7 +9,7 @@ aliucord {
         * Enabled the backported Markdown rules consistently in replies and forum posts.
         * Improved nested-list indentation handling for nested bullet markers.
         * Improved parsing of indented -# subtext.
-        * Increased and differentiated the sizes of #, ##, and ### headers.
+        * Increased header sizes and made all three levels visibly larger, with # largest and ### smallest.
 
         # 1.0.0
         * Backport headers, subtext, bullet lists, nested lists, and masked links.
