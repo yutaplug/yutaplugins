@@ -2,15 +2,20 @@ package com.github.yutaplug.markdownfix;
 
 import android.content.Context;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.style.LeadingMarginSpan;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.graphics.Typeface;
 
+import com.aliucord.Utils;
 import com.aliucord.annotations.AliucordPlugin;
 import com.aliucord.entities.Plugin;
+import com.aliucord.entities.Plugin.SettingsTab;
+import com.aliucord.api.SettingsAPI;
 import com.aliucord.patcher.PreHook;
 import com.discord.simpleast.core.node.Node;
 import com.discord.simpleast.core.parser.ParseSpec;
@@ -18,18 +23,22 @@ import com.discord.simpleast.core.parser.Parser;
 import com.discord.simpleast.core.parser.Rule;
 import com.discord.utilities.color.ColorCompat;
 import com.discord.utilities.spans.ClickableSpan;
+import com.discord.utilities.spans.BulletSpan;
+import com.discord.utilities.spans.VerticalPaddingSpan;
 import com.discord.utilities.textprocessing.AstRenderer;
 import com.discord.utilities.textprocessing.DiscordParser;
 import com.discord.utilities.textprocessing.MessageParseState;
 import com.discord.utilities.textprocessing.MessagePreprocessor;
 import com.discord.utilities.textprocessing.MessageRenderContext;
 import com.discord.utilities.textprocessing.Rules;
-import com.discord.utilities.textprocessing.node.BulletListNode;
+import com.discord.utilities.textprocessing.node.BasicRenderContext;
 import com.discord.utilities.textprocessing.node.EditedMessageNode;
 import com.discord.utilities.textprocessing.node.ZeroSpaceWidthNode;
 import com.facebook.drawee.span.DraweeSpanStringBuilder;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -41,6 +50,20 @@ import b.a.t.b.b.e;
 @AliucordPlugin
 @SuppressWarnings({"rawtypes", "unchecked"})
 public final class MarkdownFix extends Plugin {
+    static final String HEADER_1_SCALE = "header1Scale";
+    static final String HEADER_2_SCALE = "header2Scale";
+    static final String HEADER_3_SCALE = "header3Scale";
+    static final String SUBTEXT_SCALE = "subtextScale";
+    static final String COMPACT_BULLETS = "compactBullets";
+    static final String CUSTOM_BULLET_COLOR = "customBulletColor";
+    static final String BULLET_COLOR = "bulletColor";
+
+    static final float DEFAULT_HEADER_1_SCALE = 1.35f;
+    static final float DEFAULT_HEADER_2_SCALE = 1.20f;
+    static final float DEFAULT_HEADER_3_SCALE = 1.10f;
+    static final float DEFAULT_SUBTEXT_SCALE = 0.75f;
+    static final String DEFAULT_BULLET_COLOR = "#5865F2";
+
     private static final Pattern SUBTEXT_PATTERN =
             Pattern.compile("^\\s*-#[ \\t]+(.*?)[ \\t]*(?=\\n|$)");
     private static final Pattern HEADER_PATTERN =
@@ -56,9 +79,14 @@ public final class MarkdownFix extends Plugin {
 
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser;
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> forumParser;
+    private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> embedTitlesParser;
+    private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> embedValuesParser;
 
     @Override
     public void start(Context context) throws Throwable {
+        settingsTab = new SettingsTab(MarkdownFixSettings.class, SettingsTab.Type.BOTTOM_SHEET)
+                .withArgs(settings);
+
         Method parseChannelMessage = DiscordParser.class.getDeclaredMethod(
                 "parseChannelMessage",
                 Context.class,
@@ -94,19 +122,59 @@ public final class MarkdownFix extends Plugin {
                 logger.error("MarkdownFix could not render a message", error);
             }
         }));
+
+        try {
+            installEmbedParserHook();
+        } catch (Throwable error) {
+            // Embed parsers are private Discord implementation details; keep the
+            // normal message and forum fixes available if they move in a future build.
+            logger.error("MarkdownFix could not hook embed Markdown", error);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void installEmbedParserHook() throws Throwable {
+        Class<?> embedClass = Class.forName(
+                "com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemEmbed");
+        Field titlesField = embedClass.getDeclaredField("UI_THREAD_TITLES_PARSER");
+        Field valuesField = embedClass.getDeclaredField("UI_THREAD_VALUES_PARSER");
+        titlesField.setAccessible(true);
+        valuesField.setAccessible(true);
+        embedTitlesParser = (Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState>)
+                titlesField.get(null);
+        embedValuesParser = (Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState>)
+                valuesField.get(null);
+
+        Method parse = Parser.class.getDeclaredMethod(
+                "parse", CharSequence.class, Object.class, List.class);
+        patcher.patch(parse, new PreHook(frame -> {
+            boolean isEmbedParser = frame.thisObject == embedTitlesParser
+                    || frame.thisObject == embedValuesParser;
+            if (!isEmbedParser) return;
+
+            try {
+                CharSequence content = (CharSequence) frame.args[0];
+                MessageParseState state = (MessageParseState) frame.args[1];
+                List<Node<MessageRenderContext>> ast = getParser().parse(content, state);
+                frame.setResult(ast);
+            } catch (Throwable error) {
+                logger.error("MarkdownFix could not parse embed Markdown", error);
+            }
+        }));
     }
 
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> getParser() {
-        if (parser == null) parser = createParser();
+        if (parser == null) parser = createParser(settings);
         return parser;
     }
 
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> getForumParser() {
-        if (forumParser == null) forumParser = createForumParser();
+        if (forumParser == null) forumParser = createForumParser(settings);
         return forumParser;
     }
 
-    private static Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> createParser() {
+    private static Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> createParser(
+            SettingsAPI settings) {
         Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser =
                 new Parser<>(false);
         Rules rules = Rules.INSTANCE;
@@ -130,16 +198,16 @@ public final class MarkdownFix extends Plugin {
         parser.addRule(rules.createUserMentionRule());
         parser.addRule(rules.createUnicodeEmojiRule());
         parser.addRule(rules.createTimestampRule());
-        parser.addRule(new HeaderRule());
-        parser.addRule(new SubtextRule());
-        parser.addRule(new ListRule());
+        parser.addRule(new HeaderRule(settings));
+        parser.addRule(new SubtextRule(settings));
+        parser.addRule(new ListRule(settings));
         parser.addRules(e.a(false, false));
         parser.addRule(rules.createTextReplacementRule());
         return parser;
     }
 
     private static Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState>
-            createForumParser() {
+            createForumParser(SettingsAPI settings) {
         Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser =
                 new Parser<>(false);
         Rules rules = Rules.INSTANCE;
@@ -161,8 +229,8 @@ public final class MarkdownFix extends Plugin {
         parser.addRule(rules.createUserMentionRule());
         parser.addRule(rules.createUnicodeEmojiRule());
         parser.addRule(rules.createTimestampRule());
-        parser.addRule(rules.createHeaderItemRule());
-        parser.addRule(new ForumListRule());
+        parser.addRule(new HeaderRule(settings));
+        parser.addRule(new ForumListRule(settings));
         parser.addRules(e.a(false, false));
         parser.addRule(rules.createTextReplacementRule());
         return parser;
@@ -198,8 +266,11 @@ public final class MarkdownFix extends Plugin {
 
     private static final class HeaderRule
             extends Rule.BlockRule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
-        private HeaderRule() {
+        private final SettingsAPI settings;
+
+        private HeaderRule(SettingsAPI settings) {
             super(HEADER_PATTERN);
+            this.settings = settings;
         }
 
         @Override
@@ -208,7 +279,7 @@ public final class MarkdownFix extends Plugin {
                 Parser<MessageRenderContext, ? super Node<MessageRenderContext>, MessageParseState> parser,
                 MessageParseState state) {
             return new ParseSpec<>(
-                    new HeaderNode(matcher.group(1).length()),
+                    new HeaderNode(matcher.group(1).length(), settings),
                     state,
                     matcher.start(2),
                     matcher.end(2)
@@ -218,9 +289,11 @@ public final class MarkdownFix extends Plugin {
 
     private static final class HeaderNode extends Node<MessageRenderContext> {
         private final int level;
+        private final SettingsAPI settings;
 
-        private HeaderNode(int level) {
+        private HeaderNode(int level, SettingsAPI settings) {
             this.level = level;
+            this.settings = settings;
         }
 
         @Override
@@ -232,7 +305,11 @@ public final class MarkdownFix extends Plugin {
             int end = builder.length();
             if (end <= start) return;
 
-            float size = level == 1 ? 1.35f : level == 2 ? 1.20f : 1.10f;
+            float size = level == 1
+                    ? readScale(settings, HEADER_1_SCALE, DEFAULT_HEADER_1_SCALE)
+                    : level == 2
+                    ? readScale(settings, HEADER_2_SCALE, DEFAULT_HEADER_2_SCALE)
+                    : readScale(settings, HEADER_3_SCALE, DEFAULT_HEADER_3_SCALE);
             builder.setSpan(new RelativeSizeSpan(size), start, end,
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             builder.setSpan(new StyleSpan(Typeface.BOLD), start, end,
@@ -242,8 +319,11 @@ public final class MarkdownFix extends Plugin {
 
     private static final class SubtextRule
             extends Rule.BlockRule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
-        private SubtextRule() {
+        private final SettingsAPI settings;
+
+        private SubtextRule(SettingsAPI settings) {
             super(SUBTEXT_PATTERN);
+            this.settings = settings;
         }
 
         @Override
@@ -252,7 +332,7 @@ public final class MarkdownFix extends Plugin {
                 Parser<MessageRenderContext, ? super Node<MessageRenderContext>, MessageParseState> parser,
                 MessageParseState state) {
             return new ParseSpec<>(
-                    new SubtextNode(),
+                    new SubtextNode(settings),
                     state,
                     matcher.start(1),
                     matcher.end(1)
@@ -261,6 +341,12 @@ public final class MarkdownFix extends Plugin {
     }
 
     private static final class SubtextNode extends Node<MessageRenderContext> {
+        private final SettingsAPI settings;
+
+        private SubtextNode(SettingsAPI settings) {
+            this.settings = settings;
+        }
+
         @Override
         public void render(SpannableStringBuilder builder, MessageRenderContext context) {
             int start = builder.length();
@@ -270,7 +356,7 @@ public final class MarkdownFix extends Plugin {
             int end = builder.length();
             if (end <= start) return;
 
-            builder.setSpan(new RelativeSizeSpan(0.75f), start, end,
+            builder.setSpan(new RelativeSizeSpan(readScale(settings, SUBTEXT_SCALE, DEFAULT_SUBTEXT_SCALE)), start, end,
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             applyMutedColorExceptLinks(builder, start, end, mutedTextColor(context));
         }
@@ -311,8 +397,11 @@ public final class MarkdownFix extends Plugin {
 
     private static final class ListRule
             extends Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
-        private ListRule() {
+        private final SettingsAPI settings;
+
+        private ListRule(SettingsAPI settings) {
             super(LIST_PATTERN);
+            this.settings = settings;
         }
 
         @Override
@@ -325,8 +414,8 @@ public final class MarkdownFix extends Plugin {
             int nestedLevel = indentationWidth == 0 ? 1 : Math.min(4, 1 + (indentationWidth + 1) / 2);
             String newline = matcher.group(3);
             boolean includesNewline = newline != null && !newline.isEmpty();
-            BulletListNode<MessageRenderContext> node =
-                    new BulletListNode<>(nestedLevel, includesNewline);
+            ConfigurableBulletNode<MessageRenderContext> node =
+                    new ConfigurableBulletNode<>(nestedLevel, includesNewline, settings);
 
             String body = matcher.group(2);
             if (BLOCK_LIST_BODY_PATTERN.matcher(body).matches()) {
@@ -334,7 +423,7 @@ public final class MarkdownFix extends Plugin {
                 // the list marker. Parse block syntax with a fresh parser so the
                 // block-only header and subtext rules see a true line start.
                 Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> bodyParser =
-                        createParser();
+                        createParser(settings);
                 for (Node<MessageRenderContext> child : bodyParser.parse(body, state)) {
                     node.addChild(child);
                 }
@@ -352,8 +441,11 @@ public final class MarkdownFix extends Plugin {
 
     private static final class ForumListRule
             extends Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
-        private ForumListRule() {
+        private final SettingsAPI settings;
+
+        private ForumListRule(SettingsAPI settings) {
             super(FORUM_LIST_PATTERN);
+            this.settings = settings;
         }
 
         @Override
@@ -365,11 +457,91 @@ public final class MarkdownFix extends Plugin {
             int nestedLevel = indentation == null || indentation.isEmpty() ? 1 : 2;
             String lineEnding = matcher.group(3);
             boolean includesNewline = lineEnding != null && lineEnding.indexOf('\n') >= 0;
-            BulletListNode<MessageRenderContext> node =
-                    new BulletListNode<>(nestedLevel, includesNewline);
+            ConfigurableBulletNode<MessageRenderContext> node =
+                    new ConfigurableBulletNode<>(nestedLevel, includesNewline, settings);
 
             return new ParseSpec<>(node, state, matcher.start(2), matcher.end(2));
         }
+    }
+
+    private static final class ConfigurableBulletNode<T extends BasicRenderContext> extends Node<T> {
+        private final int nestedLevel;
+        private final boolean includesNewline;
+        private final SettingsAPI settings;
+
+        private ConfigurableBulletNode(int nestedLevel, boolean includesNewline, SettingsAPI settings) {
+            super(null, 1, null);
+            this.nestedLevel = nestedLevel;
+            this.includesNewline = includesNewline;
+            this.settings = settings;
+        }
+
+        @Override
+        public void render(SpannableStringBuilder builder, T renderContext) {
+            Context context = renderContext.getContext();
+            int start = builder.length();
+            if (getChildren() != null) {
+                for (Node<T> child : getChildren()) child.render(builder, renderContext);
+            }
+
+            boolean compact = settings.getBool(COMPACT_BULLETS, false);
+            int gap = compact
+                    ? dp(context, 6)
+                    : dimension(context, "markdown_bullet_gap", 4);
+            int indentation = compact
+                    ? dp(context, 4) * nestedLevel
+                    : gap * nestedLevel;
+            int radius = compact ? Math.max(1, dp(context, 2)) : 8;
+            float strokeWidth = compact ? Math.max(1, dp(context, 1)) : 4.0f;
+            int verticalPadding = compact
+                    ? 0
+                    : dimension(context, "markdown_bullet_vertical_padding", 2);
+            Paint.Style style = nestedLevel > 1 ? Paint.Style.STROKE : Paint.Style.FILL;
+
+            ArrayList<Object> spans = new ArrayList<>(3);
+            spans.add(new VerticalPaddingSpan(verticalPadding, verticalPadding));
+            spans.add(new LeadingMarginSpan.Standard(indentation));
+            spans.add(new BulletSpan(gap, bulletColor(context), radius, strokeWidth, style));
+            for (Object span : spans) {
+                builder.setSpan(span, start, builder.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            if (includesNewline) builder.append("\n");
+        }
+
+        private int bulletColor(Context context) {
+            if (settings.getBool(CUSTOM_BULLET_COLOR, false)) {
+                try {
+                    return Color.parseColor(settings.getString(BULLET_COLOR, DEFAULT_BULLET_COLOR));
+                } catch (Throwable ignored) {
+                    // Fall back to Discord's themed bullet color for invalid values.
+                }
+            }
+
+            int primaryColor = Utils.getResId("primary_400", "attr");
+            return primaryColor == 0
+                    ? Color.LTGRAY
+                    : ColorCompat.getThemedColor(context, primaryColor);
+        }
+    }
+
+    static float readScale(SettingsAPI settings, String key, float fallback) {
+        try {
+            float value = Float.parseFloat(settings.getString(key, ""));
+            return value >= 0.1f && value <= 3.0f ? value : fallback;
+        } catch (Throwable ignored) {
+            return fallback;
+        }
+    }
+
+    private static int dimension(Context context, String name, int fallbackDp) {
+        int id = Utils.getResId(name, "dimen");
+        return id == 0
+                ? dp(context, fallbackDp)
+                : context.getResources().getDimensionPixelSize(id);
+    }
+
+    private static int dp(Context context, int value) {
+        return (int) (value * context.getResources().getDisplayMetrics().density + 0.5f);
     }
 
     @Override
@@ -377,5 +549,7 @@ public final class MarkdownFix extends Plugin {
         patcher.unpatchAll();
         parser = null;
         forumParser = null;
+        embedTitlesParser = null;
+        embedValuesParser = null;
     }
 }
