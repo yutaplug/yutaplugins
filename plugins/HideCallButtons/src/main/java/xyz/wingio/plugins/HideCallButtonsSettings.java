@@ -33,6 +33,9 @@ public class HideCallButtonsSettings extends BottomSheet {
         addSetting(HideCallButtons.HIDE_FRIEND_LIST,
                 "Hide friend-list call button",
                 "Hides the call button shown beside friends in the Friends list.");
+        addSetting(HideCallButtons.HIDE_VC_CAMERA,
+                "Hide VC camera button",
+                "Hides the camera button inside voice-channel controls.");
     }
 
     private void addSetting(String key, String title, String subtitle) {

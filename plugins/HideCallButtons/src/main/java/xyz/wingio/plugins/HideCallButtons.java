@@ -18,13 +18,17 @@ import com.discord.widgets.friends.WidgetFriendsListAdapter;
 import com.discord.widgets.home.WidgetHome;
 import com.discord.widgets.home.WidgetHomeHeaderManager;
 import com.discord.widgets.home.WidgetHomeModel;
+import com.discord.widgets.voice.controls.VoiceControlsSheetView;
 import com.discord.widgets.user.calls.PrivateCallLauncher;
 import com.discord.widgets.user.usersheet.WidgetUserSheet;
 import com.discord.widgets.user.usersheet.WidgetUserSheetViewModel;
+import com.discord.widgets.voice.model.CallModel;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.ref.WeakReference;
+
+import kotlin.jvm.functions.Function0;
 
 @SuppressWarnings("unused")
 @AliucordPlugin
@@ -33,6 +37,7 @@ public class HideCallButtons extends Plugin {
     static final String HIDE_DM_MEMBER_LIST = "hideDmMemberList";
     static final String HIDE_PROFILE_SHEET = "hideProfileSheet";
     static final String HIDE_FRIEND_LIST = "hideFriendList";
+    static final String HIDE_VC_CAMERA = "hideVcCamera";
     private WeakReference<WidgetHome> currentHome;
 
     @Override
@@ -111,6 +116,14 @@ public class HideCallButtons extends Plugin {
             if (settings.getBool(HIDE_FRIEND_LIST, false)) {
                 var item = (WidgetFriendsListAdapter.ItemUser) callFrame.thisObject;
                 hideView(item.itemView, "friends_list_item_call_button");
+            }
+        }));
+
+        Method configureVideoButton = VoiceControlsSheetView.class.getDeclaredMethod(
+                "configureVideoButton", CallModel.class, Function0.class, boolean.class);
+        patcher.patch(configureVideoButton, new Hook(callFrame -> {
+            if (settings.getBool(HIDE_VC_CAMERA, false)) {
+                hideView((VoiceControlsSheetView) callFrame.thisObject, "video_button");
             }
         }));
     }
