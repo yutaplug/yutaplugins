@@ -447,8 +447,17 @@ public class BetterMessageLogger extends Plugin {
         }
         if (builder instanceof com.facebook.drawee.span.DraweeSpanStringBuilder
                 && textView instanceof com.discord.utilities.view.text.SimpleDraweeSpanTextView) {
-            ((com.discord.utilities.view.text.SimpleDraweeSpanTextView) textView)
-                    .setDraweeSpanStringBuilder((com.facebook.drawee.span.DraweeSpanStringBuilder) builder);
+            // LinkifiedTextView re-runs Android's auto-linking whenever its text is set.
+            // That can replace Discord's ClickableSpan instances and drop callbacks used
+            // by PluginDownloader for the link long-press context menu.
+            int autoLinkMask = textView.getAutoLinkMask();
+            textView.setAutoLinkMask(0);
+            try {
+                ((com.discord.utilities.view.text.SimpleDraweeSpanTextView) textView)
+                        .setDraweeSpanStringBuilder((com.facebook.drawee.span.DraweeSpanStringBuilder) builder);
+            } finally {
+                textView.setAutoLinkMask(autoLinkMask);
+            }
         } else {
             textView.setText(builder, TextView.BufferType.SPANNABLE);
         }

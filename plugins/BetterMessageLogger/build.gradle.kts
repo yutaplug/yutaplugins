@@ -1,9 +1,12 @@
-version = "1.0.2" // Plugin version. Increment this to trigger an update
+version = "1.0.3" // Plugin version. Increment this to trigger an update
 description = "Keeps deleted messages and edit history visible in Discord chats." // Plugin description that will be shown to user
 
 aliucord {
     changelog.set(
         """
+        # 1.0.3
+        * Fixed link long-press context menus so PluginDownloader actions remain available.
+
         # 1.0.2
         * Modernized the settings screen with grouped sections, switches, action buttons, and improved spacing.
 
