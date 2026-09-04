@@ -5,7 +5,9 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ImageView;
 
 import com.aliucord.Http;
@@ -18,6 +20,8 @@ import com.aliucord.patcher.Hook;
 import com.aliucord.patcher.PreHook;
 import com.aliucord.utils.ChannelUtils;
 import com.aliucord.utils.GsonUtils;
+import com.aliucord.wrappers.users.GuildMemberWrapperKt;
+import com.aliucord.wrappers.users.UserWrapperKt;
 import com.discord.api.channel.Channel;
 import com.discord.api.sticker.BaseSticker;
 import com.discord.api.user.AvatarDecoration;
@@ -40,14 +44,17 @@ import com.discord.widgets.user.profile.UserProfileHeaderViewModel;
 
 import java.io.InputStream;
 import java.net.URLEncoder;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 import kotlin.jvm.functions.Function0;
 
@@ -65,11 +72,20 @@ public final class FakeDecor extends Plugin {
     private static final String LEGACY_SELECTED_ASSET_KEY = "selectedAsset";
     private static final String API_TOKENS_KEY = "apiTokens";
     private static final String LEGACY_API_TOKEN_KEY = "apiToken";
+    private static final String PRESERVE_ORIGINAL_DECOR_KEY = "preserveOriginalDecor";
     private static final String UNLOADED = "\u0000unloaded";
 
     private final Map<Long, CachedDecoration> userDecorations = new ConcurrentHashMap<>();
     private final Set<Long> decorationRequests = ConcurrentHashMap.newKeySet();
-    private final Map<View, Long> boundViews = Collections.synchronizedMap(new WeakHashMap<>());
+    private final Map<View, BoundView> boundViews = Collections.synchronizedMap(new WeakHashMap<>());
+    private final Set<View> pendingRenders =
+            Collections.newSetFromMap(new WeakHashMap<>());
+    private final Map<View, RenderedDecoration> renderedDecorations =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    private final Map<View, AvatarDecoration> coreDecorations =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    private final Map<String, Long> customStickerSkuIds = new ConcurrentHashMap<>();
+    private final AtomicLong nextCustomStickerSkuId = new AtomicLong(Long.MIN_VALUE);
     private int decorationViewId;
 
     public FakeDecor() {
@@ -82,9 +98,10 @@ public final class FakeDecor extends Plugin {
         decorationViewId = findDecorationViewId();
 
         // Aliucord's Decorations core plugin owns the frame views and layout.
-        // FakeDecor only supplies the Decor asset and keeps the core renderer's
-        // URL handling pointed at Decor's CDN.
+        // FakeDecor applies its override after the core callback and remembers
+        // the last rendered value so recycled views do not reload it.
         patchDecorStickerUrl();
+        patchCoreDecorationRenderer();
         patchDecorationConfigureCallbacks();
     }
 
@@ -96,11 +113,36 @@ public final class FakeDecor extends Plugin {
                 new PreHook(param -> {
                     if (!(param.args[0] instanceof AvatarSticker)) return;
                     AvatarDecoration data = ((AvatarSticker) param.args[0]).getData();
-                    if (data != null && data.getSkuId() == DECOR_SKU_ID) {
+                    if (data != null && data.getSkuId() < 0L) {
                         param.setResult(assetUrl(data.getAsset(), true));
                     }
                 })
         );
+    }
+
+    private void patchCoreDecorationRenderer() {
+        try {
+            Class<?> avatarDecorator = Class.forName(
+                    "com.aliucord.coreplugins.decorations.avatar.AvatarDecorator");
+            java.lang.reflect.Method method = avatarDecorator.getDeclaredMethod(
+                    "findAndConfigure", View.class, AvatarDecoration.class);
+            patcher.patch(method, new PreHook(param -> {
+                View parent = (View) param.args[0];
+                AvatarDecoration data = (AvatarDecoration) param.args[1];
+                if (parent == null) return;
+
+                synchronized (coreDecorations) {
+                    if (coreDecorations.containsKey(parent)
+                            && Objects.equals(coreDecorations.get(parent), data)) {
+                        param.setResult(null);
+                        return;
+                    }
+                    coreDecorations.put(parent, data);
+                }
+            }));
+        } catch (Throwable error) {
+            logger.error("Failed to patch core avatar decoration renderer", error);
+        }
     }
 
     private void patchDecorationConfigureCallbacks() {
@@ -118,7 +160,8 @@ public final class FakeDecor extends Plugin {
                         Channel channel = item.getChannel();
                         user = channel == null ? null : ChannelUtils.getDMRecipient(channel);
                     }
-                    scheduleRender(holder.itemView, user == null ? 0L : user.getId());
+                    scheduleRender(holder.itemView, user == null ? 0L : user.getId(),
+                            getOriginalDecoration(user));
                 })
         );
 
@@ -132,7 +175,8 @@ public final class FakeDecor extends Plugin {
                             (ChannelMembersListViewHolderMember) param.thisObject;
                     ChannelMembersListAdapter.Item.Member member =
                             (ChannelMembersListAdapter.Item.Member) param.args[0];
-                    scheduleRender(holder.itemView, member == null ? 0L : member.getUserId());
+                    scheduleRender(holder.itemView, member == null ? 0L : member.getUserId(),
+                            getOriginalDecoration(member));
                 })
         );
 
@@ -154,7 +198,11 @@ public final class FakeDecor extends Plugin {
                             userId = entry.getMessage().getAuthor().getId();
                         }
                     }
-                    scheduleRender(holder.itemView, userId);
+                    AvatarDecoration original = entry == null ? null : getOriginalDecoration(entry.getAuthor());
+                    if (original == null && entry != null && entry.getMessage() != null) {
+                        original = getOriginalDecoration(entry.getMessage().getAuthor());
+                    }
+                    scheduleRender(holder.itemView, userId, original);
                 })
         );
 
@@ -176,63 +224,94 @@ public final class FakeDecor extends Plugin {
                             userId = state.getUser().getId();
                         }
                     }
-                    scheduleRender(view, userId);
+                    AvatarDecoration original = state == null ? null
+                            : getOriginalDecoration(state.getGuildMember());
+                    if (original == null && state != null) {
+                        original = getOriginalDecoration(state.getUser());
+                    }
+                    scheduleRender(view, userId, original);
                 })
         );
     }
 
-    private void scheduleRender(View parent, long userId) {
+    private void scheduleRender(View parent, long userId, AvatarDecoration original) {
         if (parent == null) return;
         synchronized (boundViews) {
-            boundViews.put(parent, userId);
+            boundViews.put(parent, new BoundView(userId, original));
+        }
+        postRender(parent);
+    }
+
+    private void postRender(View parent) {
+        if (parent == null) return;
+        synchronized (boundViews) {
+            if (!boundViews.containsKey(parent) || !pendingRenders.add(parent)) return;
         }
 
         // Posting is intentional: the core Decorations callback is also an
         // after-hook and may hide its view after this callback returns.
-        parent.post(() -> renderIfStillBound(parent, userId));
+        boolean posted = parent.post(() -> {
+            BoundView bound;
+            synchronized (boundViews) {
+                pendingRenders.remove(parent);
+                bound = boundViews.get(parent);
+            }
+            renderIfStillBound(parent, bound);
+        });
+        if (!posted) {
+            synchronized (boundViews) {
+                pendingRenders.remove(parent);
+            }
+        }
     }
 
-    private void renderIfStillBound(View parent, long userId) {
-        synchronized (boundViews) {
-            Long boundUser = boundViews.get(parent);
-            if (boundUser == null || boundUser != userId) return;
-        }
+    private void renderIfStillBound(View parent, BoundView bound) {
+        if (bound == null) return;
+
+        long userId = bound.userId;
 
         if (userId == 0L) {
             hideDecoration(parent);
             return;
         }
 
-        String asset = assetForUser(userId, parent);
+        if (isPreserveOriginalDecor() && bound.original != null) {
+            configureDecoration(parent, bound.original, false);
+            return;
+        }
+
+        String asset = assetForUser(userId);
         if (UNLOADED.equals(asset)) {
             hideDecoration(parent);
             return;
         }
-        configureDecoration(parent, asset);
+        configureDecoration(parent,
+                asset == null ? null : customDecoration(asset), true);
     }
 
-    private String assetForUser(long userId, View parent) {
+    private String assetForUser(long userId) {
         if (userId == currentUserId()) {
             return emptyToNull(getSelectedAsset());
         }
 
         CachedDecoration cached = userDecorations.get(userId);
         if (cached == null) {
-            fetchUserDecoration(userId, parent);
+            fetchUserDecoration(userId);
             return UNLOADED;
         }
 
         if (System.currentTimeMillis() - cached.fetchedAt >= DECORATION_FETCH_COOLDOWN) {
-            fetchUserDecoration(userId, parent);
+            fetchUserDecoration(userId);
         }
         return cached.asset;
     }
 
-    private void fetchUserDecoration(long userId, View parent) {
+    private void fetchUserDecoration(long userId) {
         if (!decorationRequests.add(userId)) return;
 
         Utils.threadPool.execute(() -> {
             String asset = null;
+            boolean cacheUpdated = false;
             try {
                 String ids = URLEncoder.encode("[\"" + userId + "\"]", "UTF-8");
                 String body = Http.simpleGet(API_URL + "/users?ids=" + ids);
@@ -244,49 +323,148 @@ public final class FakeDecor extends Plugin {
                     }
                 }
                 userDecorations.put(userId, new CachedDecoration(asset));
+                cacheUpdated = true;
             } catch (Throwable error) {
                 logger.error("Failed to fetch Decor decoration for " + userId, error);
             } finally {
                 decorationRequests.remove(userId);
             }
 
-            String result = asset;
-            if (parent != null) {
-                parent.post(() -> {
-                    synchronized (boundViews) {
-                        Long boundUser = boundViews.get(parent);
-                        if (boundUser == null || boundUser != userId) return;
-                    }
-                    configureDecoration(parent, result);
-                });
-            }
+            if (cacheUpdated) postRenderForUser(userId);
         });
     }
 
-    private void configureDecoration(View parent, String asset) {
+    private void postRenderForUser(long userId) {
+        List<View> parents = new ArrayList<>();
+        synchronized (boundViews) {
+            for (Map.Entry<View, BoundView> entry : boundViews.entrySet()) {
+                BoundView bound = entry.getValue();
+                if (bound != null && bound.userId == userId) parents.add(entry.getKey());
+            }
+        }
+        for (View parent : parents) postRender(parent);
+    }
+
+    private void configureDecoration(View parent, AvatarDecoration data, boolean custom) {
         if (parent == null) return;
         View decoration = parent.findViewById(decorationViewId);
         if (decoration == null) return;
 
-        if (asset == null || asset.isEmpty()) {
+        if (data == null || normalizeAsset(data.getAsset()).isEmpty()) {
             decoration.setVisibility(View.INVISIBLE);
+            makeProfileDecorationTouchTransparent(parent, decoration);
+            renderedDecorations.put(parent, RenderedDecoration.NONE);
             return;
         }
 
         decoration.setVisibility(View.VISIBLE);
-        String normalized = normalizeAsset(asset);
+        makeProfileDecorationTouchTransparent(parent, decoration);
+        RenderedDecoration rendered = renderedDecorations.get(parent);
+        if (rendered != null && rendered.matches(data, custom)) return;
+
         if (decoration instanceof StickerView) {
-            ((StickerView) decoration).d(
-                    new AvatarSticker(new AvatarDecoration(normalized, DECOR_SKU_ID, null)), null);
+            ((StickerView) decoration).d(new AvatarSticker(data), null);
         } else if (decoration instanceof ImageView) {
-            IconUtils.setIcon((ImageView) decoration, assetUrl(normalized, false));
+            String url = custom ? assetUrl(data.getAsset(), false) : officialAssetUrl(data);
+            IconUtils.setIcon((ImageView) decoration, url);
+        }
+        renderedDecorations.put(parent, new RenderedDecoration(data, custom));
+    }
+
+    private static void makeProfileDecorationTouchTransparent(View parent, View decoration) {
+        if (!(parent instanceof UserProfileHeaderView)) return;
+        View avatar = parent.findViewById(Utils.getResId("avatar", "id"));
+        if (avatar == null) return;
+        makeViewTreeTouchTransparent(decoration, avatar);
+    }
+
+    private static void makeViewTreeTouchTransparent(View view, View clickTarget) {
+        view.setClickable(false);
+        view.setFocusable(false);
+        view.setLongClickable(false);
+        view.setOnTouchListener((ignored, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) clickTarget.performClick();
+            return true;
+        });
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                makeViewTreeTouchTransparent(group.getChildAt(i), clickTarget);
+            }
         }
     }
 
+    private AvatarDecoration customDecoration(String asset) {
+        String normalized = normalizeAsset(asset);
+        long skuId = customStickerSkuIds.computeIfAbsent(
+                normalized, ignored -> nextCustomStickerSkuId.getAndIncrement());
+        return new AvatarDecoration(normalized, skuId, null);
+    }
+
     private void hideDecoration(View parent) {
-        if (parent == null) return;
-        View decoration = parent.findViewById(decorationViewId);
-        if (decoration != null) decoration.setVisibility(View.INVISIBLE);
+        configureDecoration(parent, null, false);
+    }
+
+    private AvatarDecoration getOriginalDecoration(ChannelMembersListAdapter.Item.Member member) {
+        if (member == null) return null;
+
+        long userId = member.getUserId();
+        Long guildId = member.getGuildId();
+        if (guildId != null) {
+            try {
+                AvatarDecoration original = getOriginalDecoration(
+                        StoreStream.getGuilds().getMember(guildId, userId));
+                if (original != null) return original;
+            } catch (Throwable ignored) {
+                // The core field bridge may not be available on older client builds.
+            }
+        }
+
+        try {
+            return getOriginalDecoration(StoreStream.getUsers().getUsers().get(userId));
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static AvatarDecoration getOriginalDecoration(User user) {
+        if (user == null) return null;
+        try {
+            return UserWrapperKt.getAvatarDecorationData(user);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static AvatarDecoration getOriginalDecoration(GuildMember member) {
+        if (member == null) return null;
+        try {
+            return GuildMemberWrapperKt.getAvatarDecorationData(member);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static AvatarDecoration getOriginalDecoration(com.discord.api.user.User user) {
+        if (user == null) return null;
+        try {
+            return UserWrapperKt.getAvatarDecorationData(user);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    boolean isPreserveOriginalDecor() {
+        return settings.getBool(PRESERVE_ORIGINAL_DECOR_KEY, false);
+    }
+
+    void setPreserveOriginalDecor(boolean preserve) {
+        settings.setBool(PRESERVE_ORIGINAL_DECOR_KEY, preserve);
+        List<View> parents;
+        synchronized (boundViews) {
+            parents = new ArrayList<>(boundViews.keySet());
+        }
+        for (View parent : parents) postRender(parent);
     }
 
     private static int findDecorationViewId() {
@@ -639,6 +817,11 @@ public final class FakeDecor extends Plugin {
         return CDN_URL + "/" + normalized + ".png";
     }
 
+    private static String officialAssetUrl(AvatarDecoration data) {
+        return "https://cdn.discordapp.com/avatar-decoration-presets/"
+                + data.getAsset() + ".png?size=256&passthrough=true";
+    }
+
     private static long currentUserId() {
         try {
             return StoreStream.getUsers().getMe().getId();
@@ -654,6 +837,36 @@ public final class FakeDecor extends Plugin {
         decorationRequests.clear();
         synchronized (boundViews) {
             boundViews.clear();
+            pendingRenders.clear();
+        }
+        renderedDecorations.clear();
+        coreDecorations.clear();
+        customStickerSkuIds.clear();
+    }
+
+    private static final class BoundView {
+        private final long userId;
+        private final AvatarDecoration original;
+
+        private BoundView(long userId, AvatarDecoration original) {
+            this.userId = userId;
+            this.original = original;
+        }
+    }
+
+    private static final class RenderedDecoration {
+        private static final RenderedDecoration NONE = new RenderedDecoration(null, false);
+
+        private final AvatarDecoration data;
+        private final boolean custom;
+
+        private RenderedDecoration(AvatarDecoration data, boolean custom) {
+            this.data = data;
+            this.custom = custom;
+        }
+
+        private boolean matches(AvatarDecoration other, boolean otherCustom) {
+            return custom == otherCustom && data != null && data.equals(other);
         }
     }
 

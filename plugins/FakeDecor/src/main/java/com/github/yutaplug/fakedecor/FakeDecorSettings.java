@@ -20,6 +20,7 @@ import com.aliucord.api.SettingsAPI;
 import com.aliucord.views.TextInput;
 import com.aliucord.widgets.BottomSheet;
 import com.discord.utilities.color.ColorCompat;
+import com.discord.views.CheckedSetting;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -61,6 +62,16 @@ public final class FakeDecorSettings extends BottomSheet {
         });
         addAction(context, "Browse Decor presets", "Choose from Decor's available preset decorations",
                 () -> plugin.fetchPresets(this));
+
+        addSectionHeader(context, "Display", false);
+        CheckedSetting preserveOriginal = Utils.createCheckedSetting(
+                context,
+                CheckedSetting.ViewType.SWITCH,
+                "Preserve official Discord decorations",
+                "Show Discord's native decoration instead of a Decor API decoration when available");
+        preserveOriginal.setChecked(plugin.isPreserveOriginalDecor());
+        preserveOriginal.setOnCheckedListener(value -> plugin.setPreserveOriginalDecor(value));
+        addContentView(preserveOriginal, 4);
 
         addSectionHeader(context, "Decor account", false);
         authorizationStatus = statusView(context);
