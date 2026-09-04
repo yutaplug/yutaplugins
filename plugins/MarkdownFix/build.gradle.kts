@@ -5,8 +5,10 @@ aliucord {
     changelog.set(
         """
         # 1.0.1
-        * Fixed nested list bullets not rendering correctly.
-        * Fixed headers and subtext inside list items.
+        * Updated the parser hook for compatibility with current Aliucord builds.
+        * Enabled the backported Markdown rules consistently in replies and forum posts.
+        * Improved nested-list indentation handling for nested bullet markers.
+        * Improved parsing of indented -# subtext.
         * Increased and differentiated the sizes of #, ##, and ### headers.
 
         # 1.0.0
