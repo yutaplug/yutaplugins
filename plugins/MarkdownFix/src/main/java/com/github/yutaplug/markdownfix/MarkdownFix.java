@@ -11,7 +11,7 @@ import android.graphics.Typeface;
 
 import com.aliucord.annotations.AliucordPlugin;
 import com.aliucord.entities.Plugin;
-import com.aliucord.patcher.Hook;
+import com.aliucord.patcher.PreHook;
 import com.discord.simpleast.core.node.Node;
 import com.discord.simpleast.core.parser.ParseSpec;
 import com.discord.simpleast.core.parser.Parser;
@@ -37,7 +37,7 @@ import java.util.regex.Pattern;
 
 import b.a.t.b.b.e;
 
-/** Enables Discord's newer block-level Markdown rules in ordinary chat messages. */
+/** Enables Discord's newer block-level Markdown rules in chat and forum messages. */
 @AliucordPlugin
 @SuppressWarnings({"rawtypes", "unchecked"})
 public final class MarkdownFix extends Plugin {
@@ -49,10 +49,13 @@ public final class MarkdownFix extends Plugin {
             Pattern.compile("^\\\\([^0-9A-Za-z\\s])");
     private static final Pattern LIST_PATTERN =
             Pattern.compile("^([^\\S\\r\\n]*)[*-][ \\t]+(.*)([\\n|$])?");
+    private static final Pattern FORUM_LIST_PATTERN =
+            Pattern.compile("^([^\\S\\r\\n]*)[*-][ \\t]+([^\\r\\n]*?)[ \\t]*(\\r?\\n|$)");
     private static final Pattern BLOCK_LIST_BODY_PATTERN =
             Pattern.compile("^(?:#{1,3}[ \\t]+|-#[ \\t]+).*");
 
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser;
+    private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> forumParser;
 
     @Override
     public void start(Context context) throws Throwable {
@@ -66,15 +69,17 @@ public final class MarkdownFix extends Plugin {
                 boolean.class
         );
 
-        patcher.patch(parseChannelMessage, new Hook(frame -> {
+        patcher.patch(parseChannelMessage, new PreHook(frame -> {
             try {
                 Context messageContext = (Context) frame.args[0];
                 String content = (String) frame.args[1];
                 MessageRenderContext renderContext = (MessageRenderContext) frame.args[2];
                 MessagePreprocessor preprocessor = (MessagePreprocessor) frame.args[3];
                 boolean appendEditedLabel = Boolean.TRUE.equals(frame.args[5]);
+                boolean isForumPost =
+                        frame.args[4] == DiscordParser.ParserOptions.FORUM_POST_FIRST_MESSAGE;
 
-                List<Node<MessageRenderContext>> ast = getParser().parse(
+                List<Node<MessageRenderContext>> ast = (isForumPost ? getForumParser() : getParser()).parse(
                         content == null ? "" : content,
                         MessageParseState.Companion.getInitialState()
                 );
@@ -94,6 +99,11 @@ public final class MarkdownFix extends Plugin {
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> getParser() {
         if (parser == null) parser = createParser();
         return parser;
+    }
+
+    private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> getForumParser() {
+        if (forumParser == null) forumParser = createForumParser();
+        return forumParser;
     }
 
     private static Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> createParser() {
@@ -123,6 +133,36 @@ public final class MarkdownFix extends Plugin {
         parser.addRule(new HeaderRule());
         parser.addRule(new SubtextRule());
         parser.addRule(new ListRule());
+        parser.addRules(e.a(false, false));
+        parser.addRule(rules.createTextReplacementRule());
+        return parser;
+    }
+
+    private static Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState>
+            createForumParser() {
+        Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser =
+                new Parser<>(false);
+        Rules rules = Rules.INSTANCE;
+
+        // This matches DiscordParser's FORUM_POST_FIRST_MESSAGE rule order. The
+        // list rule is corrected so bold text is not mistaken for a list item.
+        parser.addRule(rules.createSoftHyphenRule());
+        parser.addRule(new EscapeRule());
+        parser.addRule(rules.createCodeBlockRule());
+        parser.addRule(rules.createInlineCodeRule());
+        parser.addRule(rules.createSpoilerRule());
+        parser.addRule(rules.createUrlNoEmbedRule());
+        parser.addRule(rules.createUrlRule());
+        parser.addRule(rules.createCustomEmojiRule());
+        parser.addRule(rules.createNamedEmojiRule());
+        parser.addRule(rules.createUnescapeEmoticonRule());
+        parser.addRule(rules.createChannelMentionRule());
+        parser.addRule(rules.createRoleMentionRule());
+        parser.addRule(rules.createUserMentionRule());
+        parser.addRule(rules.createUnicodeEmojiRule());
+        parser.addRule(rules.createTimestampRule());
+        parser.addRule(rules.createHeaderItemRule());
+        parser.addRule(new ForumListRule());
         parser.addRules(e.a(false, false));
         parser.addRule(rules.createTextReplacementRule());
         return parser;
@@ -310,9 +350,32 @@ public final class MarkdownFix extends Plugin {
         }
     }
 
+    private static final class ForumListRule
+            extends Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
+        private ForumListRule() {
+            super(FORUM_LIST_PATTERN);
+        }
+
+        @Override
+        public ParseSpec<MessageRenderContext, MessageParseState> parse(
+                Matcher matcher,
+                Parser<MessageRenderContext, ? super Node<MessageRenderContext>, MessageParseState> parser,
+                MessageParseState state) {
+            String indentation = matcher.group(1);
+            int nestedLevel = indentation == null || indentation.isEmpty() ? 1 : 2;
+            String lineEnding = matcher.group(3);
+            boolean includesNewline = lineEnding != null && lineEnding.indexOf('\n') >= 0;
+            BulletListNode<MessageRenderContext> node =
+                    new BulletListNode<>(nestedLevel, includesNewline);
+
+            return new ParseSpec<>(node, state, matcher.start(2), matcher.end(2));
+        }
+    }
+
     @Override
     public void stop(Context context) {
         patcher.unpatchAll();
         parser = null;
+        forumParser = null;
     }
 }
