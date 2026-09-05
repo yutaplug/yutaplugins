@@ -82,6 +82,7 @@ public class SuperReactions extends Plugin {
     private final Map<WidgetManageReactions, ManageReactionTarget> activeManageReactions = new WeakHashMap<>();
     private final Map<Long, Long> reactionChannels = new ConcurrentHashMap<>();
     private final Map<Long, Map<String, Integer>> superReactionCounts = new ConcurrentHashMap<>();
+    private final Map<Long, Map<String, Integer>> superReactionColors = new ConcurrentHashMap<>();
     private final Map<Long, Long> superReactionFetchTimes = new ConcurrentHashMap<>();
     private final Set<Long> superReactionFetches = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> burstCheckTimes = new ConcurrentHashMap<>();
@@ -166,7 +167,8 @@ public class SuperReactions extends Plugin {
                     String key = reaction.b().c();
                     Integer burstCount = getSuperReactionCount(messageId, key);
                     ReactionView reactionView = (ReactionView) frame.thisObject;
-                    styleReactionView(reactionView, burstCount != null && burstCount > 0, burstCount);
+                    styleReactionView(reactionView, messageId, key,
+                            burstCount != null && burstCount > 0, burstCount);
                     setReactionMeState(reactionView, messageId, reaction);
                     Long channelId = reactionChannels.get(messageId);
                     if (burstCount == null && channelId != null) {
@@ -177,7 +179,7 @@ public class SuperReactions extends Plugin {
                         String currentKey = currentReaction == null || currentReaction.b() == null
                                 ? null : currentReaction.b().c();
                         Integer currentBurstCount = getSuperReactionCount(messageId, currentKey);
-                        styleReactionView(reactionView,
+                        styleReactionView(reactionView, messageId, currentKey,
                                 currentBurstCount != null && currentBurstCount > 0,
                                 currentBurstCount);
                         setReactionMeState(reactionView, messageId, currentReaction);
@@ -647,6 +649,14 @@ public class SuperReactions extends Plugin {
             String key = getReactionKey((Map<?, ?>) rawEmoji);
             if (key == null) continue;
 
+            Integer burstColor = parseBurstColor(reaction.get("burst_colors"));
+            if (burstColor != null) {
+                Map<String, Integer> colors = superReactionColors.computeIfAbsent(
+                        messageId, ignored -> new ConcurrentHashMap<>());
+                colors.put(key, burstColor);
+                colors.put(normalizeReactionKey(key), burstColor);
+            }
+
             if (Boolean.TRUE.equals(reaction.get("me_burst"))) {
                 markOwnedSuperReaction(messageId, key);
             } else if (reaction.containsKey("me_burst")) {
@@ -670,6 +680,34 @@ public class SuperReactions extends Plugin {
             }
         }
         return result;
+    }
+
+    private Integer parseBurstColor(Object rawColors) {
+        if (!(rawColors instanceof List<?>)) return null;
+
+        // Discord chooses the most vivid color from the first three palette
+        // entries for the reaction pill. Keep that behavior so the Android
+        // fallback uses the same emoji-specific hue as the web client.
+        int bestColor = 0;
+        float bestScore = -1f;
+        int inspected = 0;
+        for (Object rawColor : (List<?>) rawColors) {
+            if (inspected++ >= 3) break;
+            if (rawColor == null) continue;
+            try {
+                int color = Color.parseColor(String.valueOf(rawColor));
+                float[] hsv = new float[3];
+                Color.colorToHSV(color, hsv);
+                float score = hsv[1] + hsv[2];
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestColor = Color.rgb(Color.red(color), Color.green(color), Color.blue(color));
+                }
+            } catch (Throwable ignored) {
+                // Ignore malformed palette entries and use the next color.
+            }
+        }
+        return bestScore < 0f ? null : bestColor;
     }
 
     private Map<String, Integer> loadSuperReactionCounts(long channelId, long messageId, String body) {
@@ -732,6 +770,15 @@ public class SuperReactions extends Plugin {
         if (counts == null || reactionKey == null) return null;
         Integer count = counts.get(reactionKey);
         return count == null ? counts.get(normalizeReactionKey(reactionKey)) : count;
+    }
+
+    private int getSuperReactionColor(long messageId, String reactionKey) {
+        if (reactionKey == null) return SUPER_REACTION_COLOR;
+        Map<String, Integer> colors = superReactionColors.get(messageId);
+        if (colors == null) return SUPER_REACTION_COLOR;
+        Integer color = colors.get(reactionKey);
+        if (color == null) color = colors.get(normalizeReactionKey(reactionKey));
+        return color == null ? SUPER_REACTION_COLOR : color;
     }
 
     private void markOwnedSuperReaction(long messageId, String reactionKey) {
@@ -817,6 +864,7 @@ public class SuperReactions extends Plugin {
         if (messageId == 0L) return;
         if (channelId != 0L) reactionChannels.put(messageId, channelId);
         superReactionCounts.remove(messageId);
+        superReactionColors.remove(messageId);
         superReactionFetchTimes.remove(messageId);
         String cachePrefix = messageId + ":";
         boolean removedOwnedReaction = false;
@@ -879,7 +927,8 @@ public class SuperReactions extends Plugin {
             MessageReaction reaction = reactionView.getReaction();
             String key = reaction == null || reaction.b() == null ? null : reaction.b().c();
             Integer burstCount = getSuperReactionCount(messageId, key);
-            styleReactionView(reactionView, burstCount != null && burstCount > 0, burstCount);
+            styleReactionView(reactionView, messageId, key,
+                    burstCount != null && burstCount > 0, burstCount);
             setReactionMeState(reactionView, messageId, reaction);
             Long channelId = reactionChannels.get(messageId);
             if (burstCount == null && channelId != null && reaction != null) {
@@ -901,7 +950,8 @@ public class SuperReactions extends Plugin {
         }
     }
 
-    private void styleReactionView(ReactionView reactionView, boolean isSuperReaction,
+    private void styleReactionView(ReactionView reactionView, long messageId,
+                                   String reactionKey, boolean isSuperReaction,
                                    Integer burstCount) {
         synchronized (originalReactionBackgrounds) {
             if (!originalReactionBackgrounds.containsKey(reactionView)) {
@@ -915,22 +965,26 @@ public class SuperReactions extends Plugin {
                 return;
             }
 
+            int reactionColor = getSuperReactionColor(messageId, reactionKey);
+            int shineColor = blendColors(reactionColor, Color.WHITE, 0.55f);
+            int reflectionColor = blendColors(reactionColor, Color.WHITE, 0.30f);
             int radius = dp(reactionView, 8);
             GradientDrawable colorWash = new GradientDrawable();
-            colorWash.setColor(Color.argb(42, Color.red(SUPER_REACTION_COLOR),
-                    Color.green(SUPER_REACTION_COLOR), Color.blue(SUPER_REACTION_COLOR)));
+            colorWash.setColor(Color.argb(42, Color.red(reactionColor),
+                    Color.green(reactionColor), Color.blue(reactionColor)));
             colorWash.setCornerRadius(radius);
             colorWash.setStroke(dp(reactionView, 2), Color.argb(235,
-                    Color.red(SUPER_REACTION_COLOR), Color.green(SUPER_REACTION_COLOR),
-                    Color.blue(SUPER_REACTION_COLOR)));
+                    Color.red(reactionColor), Color.green(reactionColor),
+                    Color.blue(reactionColor)));
 
-            // Keep the normal dark pill underneath, then add a translucent color wash
-            // and a diagonal lightened-color reflection. This gives the static pill the same
-            // glassy/shiny feel as Discord's burst reaction treatment.
+            // Keep the normal dark pill underneath, then add a translucent emoji-colored
+            // wash and a diagonal lightened-color reflection like Discord's burst pill.
             GradientDrawable shine = new GradientDrawable(
                     GradientDrawable.Orientation.TL_BR,
-                    new int[]{Color.TRANSPARENT, Color.argb(90, 255, 226, 140),
-                            Color.argb(90, 255, 226, 140), Color.TRANSPARENT});
+                    new int[]{Color.TRANSPARENT, Color.argb(90, Color.red(shineColor),
+                            Color.green(shineColor), Color.blue(shineColor)),
+                            Color.argb(90, Color.red(reflectionColor), Color.green(reflectionColor),
+                                    Color.blue(reflectionColor)), Color.TRANSPARENT});
             shine.setCornerRadius(radius);
             Drawable[] layers = originalBackground == null
                     ? new Drawable[]{colorWash, shine}
@@ -940,6 +994,15 @@ public class SuperReactions extends Plugin {
                     ? "Super reaction"
                     : "Super reaction, " + burstCount + " total");
         }
+    }
+
+    private int blendColors(int color, int target, float amount) {
+        float clampedAmount = Math.max(0f, Math.min(1f, amount));
+        return Color.rgb(
+                Math.round(Color.red(color) + (Color.red(target) - Color.red(color)) * clampedAmount),
+                Math.round(Color.green(color) + (Color.green(target) - Color.green(color)) * clampedAmount),
+                Math.round(Color.blue(color) + (Color.blue(target) - Color.blue(color)) * clampedAmount)
+        );
     }
 
     private void setReactionMeState(ReactionView reactionView, long messageId, MessageReaction reaction) {
@@ -1230,6 +1293,7 @@ public class SuperReactions extends Plugin {
         }
         reactionChannels.clear();
         superReactionCounts.clear();
+        superReactionColors.clear();
         superReactionFetchTimes.clear();
         superReactionFetches.clear();
         locallySentSuperReactions.clear();
