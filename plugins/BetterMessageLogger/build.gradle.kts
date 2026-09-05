@@ -1,9 +1,15 @@
-version = "1.0.5" // Plugin version. Increment this to trigger an update
+version = "1.0.7" // Plugin version. Increment this to trigger an update
 description = "Keeps deleted messages and edit history visible in Discord chats." // Plugin description that will be shown to user
 
 aliucord {
     changelog.set(
         """
+        # 1.0.7
+        * Fixed deleted messages being repositioned as older or newer live batches load.
+
+        # 1.0.6
+        * Fixed logged messages interfering with older/newer loading, channel jumps, and re-entry.
+
         # 1.0.5
         * Fixed database messages interfering with loading older live messages.
 

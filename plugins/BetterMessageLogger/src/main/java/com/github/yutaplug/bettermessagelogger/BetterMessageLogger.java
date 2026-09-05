@@ -28,6 +28,7 @@ import com.discord.stores.StoreMessagesLoader;
 import com.discord.widgets.chat.list.actions.WidgetChatListActions;
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage;
 import com.discord.widgets.chat.list.entries.MessageEntry;
+import com.discord.widgets.chat.list.model.WidgetChatListModelMessages;
 import com.discord.utilities.color.ColorCompat;
 import com.discord.utilities.drawable.DrawableCompat;
 
@@ -115,18 +116,24 @@ public class BetterMessageLogger extends Plugin {
             }
         }));
 
-        patcher.patch(StoreMessages.class, "observeMessagesForChannel", new Class<?>[]{long.class}, new Hook(frame -> {
-            if (!(frame.getResult() instanceof Observable<?>)) return;
-            long channelId = (Long) frame.args[0];
+        // Keep StoreMessages.observeMessagesForChannel untouched. Discord's message loader
+        // uses that observable to calculate older/newer pagination and jump boundaries.
+        // Restored database rows belong in the display model, not in those live boundaries.
+        patcher.patch(WidgetChatListModelMessages.MessagesWithMetadata.Companion.class, "get",
+                new Class<?>[]{com.discord.api.channel.Channel.class}, new Hook(frame -> {
+            if (!(frame.args[0] instanceof com.discord.api.channel.Channel)
+                    || !(frame.getResult() instanceof Observable<?>)) return;
+            com.discord.api.channel.Channel channel = (com.discord.api.channel.Channel) frame.args[0];
             @SuppressWarnings("unchecked")
-            Observable<List<com.discord.models.message.Message>> messages =
-                    (Observable<List<com.discord.models.message.Message>>) (Observable<?>) frame.getResult();
-            frame.setResult(Observable.j(messages, revision, new Func2<List<com.discord.models.message.Message>, Long,
-                    List<com.discord.models.message.Message>>() {
+            Observable<WidgetChatListModelMessages.MessagesWithMetadata> metadata =
+                    (Observable<WidgetChatListModelMessages.MessagesWithMetadata>) (Observable<?>) frame.getResult();
+            long channelId = channel.k();
+            frame.setResult(Observable.j(metadata, revision, new Func2<WidgetChatListModelMessages.MessagesWithMetadata, Long,
+                    WidgetChatListModelMessages.MessagesWithMetadata>() {
                 @Override
-                public List<com.discord.models.message.Message> call(List<com.discord.models.message.Message> current,
-                                                                     Long ignoredRevision) {
-                    return withDeletedMessages(channelId, current);
+                public WidgetChatListModelMessages.MessagesWithMetadata call(
+                        WidgetChatListModelMessages.MessagesWithMetadata current, Long ignoredRevision) {
+                    return withDeletedMessageMetadata(channelId, current);
                 }
             }));
         }));
@@ -261,26 +268,39 @@ public class BetterMessageLogger extends Plugin {
                                                                           List<com.discord.models.message.Message> current) {
         List<com.discord.models.message.Message> result = new ArrayList<>();
         if (current != null) result.addAll(current);
-        if (result.isEmpty()) return result;
 
-        // StoreMessagesLoader uses the oldest synced message as the cursor for the next
-        // pagination request. Never put an older database row ahead of that cursor, or
-        // Discord will jump over live messages that have not been loaded yet.
+        // Only restore rows inside the live range Discord has loaded for this model.
+        // This keeps deleted messages attached to their own batches: rows from older or
+        // newer batches should not be inserted before those live messages arrive.
         long oldestLoadedId = Long.MAX_VALUE;
+        long newestLoadedId = Long.MIN_VALUE;
         Set<Long> present = new HashSet<>();
         for (com.discord.models.message.Message message : result) {
             present.add(message.getId());
-            if (!message.isLocal()) oldestLoadedId = Math.min(oldestLoadedId, message.getId());
+            if (!message.isLocal()) {
+                oldestLoadedId = Math.min(oldestLoadedId, message.getId());
+                newestLoadedId = Math.max(newestLoadedId, message.getId());
+            }
         }
         if (oldestLoadedId == Long.MAX_VALUE) return result;
 
         for (MessageRecord record : records.values()) {
             if (record.channelId != channelId || (!record.deleted && !deletedMessageIds.contains(record.id))
-                    || record.id < oldestLoadedId || !shouldKeep(record) || present.contains(record.id)) continue;
+                    || record.id < oldestLoadedId || record.id > newestLoadedId
+                    || !shouldKeep(record) || present.contains(record.id)) continue;
             result.add(record.toMessage());
         }
         result.sort(Comparator.comparingLong(com.discord.models.message.Message::getId));
         return result;
+    }
+
+    private WidgetChatListModelMessages.MessagesWithMetadata withDeletedMessageMetadata(
+            long channelId, WidgetChatListModelMessages.MessagesWithMetadata current) {
+        if (current == null) return null;
+        List<com.discord.models.message.Message> merged = withDeletedMessages(channelId, current.getMessages());
+        return current.copy(merged, current.getMessageState(), current.getMessageThreads(),
+                current.getThreadCountsAndLatestMessages(), current.getMessageReplyState(),
+                current.getParentChannelMessageReplyState());
     }
 
     private boolean shouldKeep(MessageRecord record) {

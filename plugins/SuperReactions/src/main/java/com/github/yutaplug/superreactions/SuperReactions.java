@@ -78,6 +78,8 @@ public class SuperReactions extends Plugin {
     private static final String MANAGE_REACTIONS_EMOJI_ARGUMENT = "com.discord.intent.extra.EXTRA_EMOJI_KEY";
     private static final long SUPER_REACTION_CACHE_TTL = 5 * 60 * 1000L;
     private static final long BURST_CHECK_TTL = 30 * 1000L;
+    private static final long LOCAL_REMOVAL_FALLBACK_DELAY_MS = 2 * 1000L;
+    private static final long LOCAL_REMOVAL_MARKER_TTL_MS = 10 * 1000L;
     private static final String OWNED_REACTIONS_PREFERENCES = "owned_super_reactions_";
     private static final int SUPER_REACTION_COLOR = Color.rgb(255, 196, 61);
 
@@ -103,8 +105,11 @@ public class SuperReactions extends Plugin {
     private final Set<Long> superReactionFetches = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> burstCheckTimes = new ConcurrentHashMap<>();
     private final Set<String> burstChecks = ConcurrentHashMap.newKeySet();
+    private final Set<String> knownNormalReactions = ConcurrentHashMap.newKeySet();
     private final Set<String> locallySentSuperReactions = ConcurrentHashMap.newKeySet();
     private final Set<String> ownedSuperReactions = ConcurrentHashMap.newKeySet();
+    private final Set<String> pendingSuperReactionRemovals = ConcurrentHashMap.newKeySet();
+    private final Set<String> completedSuperReactionRemovals = ConcurrentHashMap.newKeySet();
     private final Map<String, List<User>> burstReactionUsers = new ConcurrentHashMap<>();
     private final Map<String, List<MGRecyclerDataPayload>> normalReactionItems = new ConcurrentHashMap<>();
     private final Set<String> burstUserFetches = ConcurrentHashMap.newKeySet();
@@ -282,9 +287,9 @@ public class SuperReactions extends Plugin {
                     boolean isSuperReaction = expandedType != null
                             ? expandedType : burstCount != null && burstCount > 0;
                     ReactionView reactionView = (ReactionView) frame.thisObject;
+                    setReactionMeState(reactionView, messageId, reaction, isSuperReaction);
                     styleReactionView(reactionView, messageId, key,
                             isSuperReaction, burstCount);
-                    setReactionMeState(reactionView, messageId, reaction, isSuperReaction);
                     Long channelId = reactionChannels.get(messageId);
                     if (burstCount == null && channelId != null) {
                         checkBurstReaction(channelId, messageId, reaction.b());
@@ -298,11 +303,11 @@ public class SuperReactions extends Plugin {
                         boolean currentIsSuperReaction = currentExpandedType != null
                                 ? currentExpandedType
                                 : currentBurstCount != null && currentBurstCount > 0;
+                        setReactionMeState(reactionView, messageId, currentReaction,
+                                currentIsSuperReaction);
                         styleReactionView(reactionView, messageId, currentKey,
                                 currentIsSuperReaction,
                                 currentBurstCount);
-                        setReactionMeState(reactionView, messageId, currentReaction,
-                                currentIsSuperReaction);
                     });
                 })
         );
@@ -319,6 +324,17 @@ public class SuperReactions extends Plugin {
                     boolean isSuper = expandedType != null
                             ? expandedType : reaction != null && reaction.b() != null
                             && isSuperReaction(messageId, reaction.b().c());
+                    boolean isKnownNormal = reaction != null && reaction.b() != null
+                            && isKnownNormalReaction(messageId, reaction.b().c());
+                    if (reaction != null && reaction.b() != null
+                            && expandedType == null && !isSuper && !isKnownNormal) {
+                        // Metadata is asynchronous on a cold channel. Resolve
+                        // the typed reaction first so the normal endpoint cannot
+                        // consume a tap intended for an existing burst pill.
+                        frame.setResult(null);
+                        resolveReactionAndToggle(channelId, messageId, reaction);
+                        return;
+                    }
                     if (reaction != null && reaction.b() != null && isSuper) {
                         // The old client only knows the normal `me` bit and would
                         // call the normal reaction endpoint. Handle both sides of
@@ -360,6 +376,68 @@ public class SuperReactions extends Plugin {
                 StoreMessages.class,
                 "handleReactionUpdate",
                 new Class<?>[]{List.class, boolean.class},
+                new PreHook(frame -> {
+                    if (Boolean.TRUE.equals(frame.args[1])) return;
+                    Object updates = frame.args[0];
+                    if (!(updates instanceof List<?>)) return;
+
+                    long eventUserId = getCurrentUserId();
+                    if (eventUserId == 0L) return;
+
+                    List<Object> rewrittenUpdates = new ArrayList<>();
+                    boolean changed = false;
+                    for (Object update : (List<?>) updates) {
+                        if (!(update instanceof MessageReactionUpdate)) {
+                            rewrittenUpdates.add(update);
+                            continue;
+                        }
+
+                        MessageReactionUpdate reactionUpdate = (MessageReactionUpdate) update;
+                        String reactionKey = reactionUpdate.b() == null
+                                ? null : reactionUpdate.b().c();
+                        boolean isCurrentUser = reactionUpdate.d() == eventUserId;
+                        if (!isCurrentUser || reactionKey == null) {
+                            rewrittenUpdates.add(update);
+                            continue;
+                        }
+
+                        // The old message store ignores a remove event when its
+                        // reaction has me=false. That is exactly how a burst
+                        // reaction sent by the current user is represented by
+                        // this client. Feed only the message store a synthetic
+                        // non-self event so it decrements the aggregate count;
+                        // StoreMessageReactions still receives the real event
+                        // and removes the correct user from the member list.
+                        if (isCompletedSuperReactionRemoval(
+                                reactionUpdate.c(), reactionKey)) {
+                            changed = true;
+                            continue;
+                        }
+                        if (!isOwnSuperReaction(reactionUpdate.c(), reactionKey)
+                                && !isPendingSuperReactionRemoval(
+                                reactionUpdate.c(), reactionKey)) {
+                            rewrittenUpdates.add(update);
+                            continue;
+                        }
+
+                        completeSuperReactionRemoval(reactionUpdate.c(), reactionKey);
+                        long syntheticUserId = eventUserId == 1L ? 2L : 1L;
+                        rewrittenUpdates.add(new MessageReactionUpdate(
+                                syntheticUserId,
+                                reactionUpdate.a(),
+                                reactionUpdate.c(),
+                                reactionUpdate.b()));
+                        changed = true;
+                    }
+
+                    if (changed) frame.args[0] = rewrittenUpdates;
+                })
+        );
+
+        patcher.patch(
+                StoreMessages.class,
+                "handleReactionUpdate",
+                new Class<?>[]{List.class, boolean.class},
                 new Hook(frame -> {
                     Object updates = frame.args[0];
                     if (!(updates instanceof List<?>)) return;
@@ -367,7 +445,20 @@ public class SuperReactions extends Plugin {
                     for (Object update : (List<?>) updates) {
                         if (update instanceof MessageReactionUpdate) {
                             MessageReactionUpdate reactionUpdate = (MessageReactionUpdate) update;
-                            invalidateSuperReactionCache(reactionUpdate.c(), reactionUpdate.a(), false);
+                            boolean isAdd = Boolean.TRUE.equals(frame.args[1]);
+                            invalidateSuperReactionCache(
+                                    reactionUpdate.c(), reactionUpdate.a(),
+                                    hasLocalSuperReaction(reactionUpdate.c()));
+                            if (isAdd && reactionUpdate.b() != null) {
+                                // A reaction view is not guaranteed to be
+                                // rebound for a gateway count update. Probe
+                                // the typed endpoint directly so an official
+                                // client's new burst is styled immediately.
+                                reactionChannels.put(
+                                        reactionUpdate.c(), reactionUpdate.a());
+                                checkBurstReaction(
+                                        reactionUpdate.a(), reactionUpdate.c(), reactionUpdate.b());
+                            }
                         }
                     }
                 })
@@ -447,13 +538,13 @@ public class SuperReactions extends Plugin {
         button.setOnClickListener(ignored -> openSuperReactionPicker(actions));
 
         LinearLayout container = (LinearLayout) containerView;
-        int listIndex = container.indexOfChild(listView);
-        int insertIndex = listIndex < 0 ? 0 : listIndex + 1;
         ViewGroup.LayoutParams sourceParams = template.getLayoutParams();
         ViewGroup.LayoutParams params = sourceParams == null
                 ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 : new LinearLayout.LayoutParams(sourceParams);
-        container.addView(button, insertIndex, params);
+        // Keep the quick-reaction row at the top and place this action after
+        // the client's normal message actions.
+        container.addView(button, params);
         superReactionButtons.put(actions, button);
     }
 
@@ -735,6 +826,37 @@ public class SuperReactions extends Plugin {
         return getSuperReactionCount(messageId, reactionKey) != null;
     }
 
+    private boolean isKnownNormalReaction(long messageId, String reactionKey) {
+        if (reactionKey == null) return false;
+        return knownNormalReactions.contains(localReactionKey(messageId, reactionKey))
+                || knownNormalReactions.contains(
+                localReactionKey(messageId, normalizeReactionKey(reactionKey)))
+                || knownNormalReactions.contains(
+                localReactionKey(messageId, displayReactionKey(reactionKey)))
+                || knownNormalReactions.contains(localReactionKey(
+                messageId, normalizeReactionKey(displayReactionKey(reactionKey))));
+    }
+
+    private void markKnownNormalReaction(long messageId, String reactionKey) {
+        if (reactionKey == null) return;
+        knownNormalReactions.add(localReactionKey(messageId, reactionKey));
+        knownNormalReactions.add(localReactionKey(messageId, normalizeReactionKey(reactionKey)));
+        knownNormalReactions.add(localReactionKey(messageId, displayReactionKey(reactionKey)));
+        knownNormalReactions.add(localReactionKey(
+                messageId, normalizeReactionKey(displayReactionKey(reactionKey))));
+    }
+
+    private void removeKnownNormalReaction(long messageId, String reactionKey) {
+        if (reactionKey == null) return;
+        knownNormalReactions.remove(localReactionKey(messageId, reactionKey));
+        knownNormalReactions.remove(localReactionKey(
+                messageId, normalizeReactionKey(reactionKey)));
+        knownNormalReactions.remove(localReactionKey(
+                messageId, displayReactionKey(reactionKey)));
+        knownNormalReactions.remove(localReactionKey(
+                messageId, normalizeReactionKey(displayReactionKey(reactionKey))));
+    }
+
     private void checkBurstReaction(long channelId, long messageId, MessageReactionEmoji emoji) {
         if (channelId == 0L || messageId == 0L || emoji == null) return;
         String reactionKey = emoji.c();
@@ -775,10 +897,17 @@ public class SuperReactions extends Plugin {
                             messageId, ignored -> new ConcurrentHashMap<>());
                     counts.put(reactionKey, 1);
                     counts.put(normalizeReactionKey(reactionKey), 1);
+                    // The visible reaction may have been expanded as a normal
+                    // reaction before the typed endpoint completed. Drop that
+                    // per-view decision so the current burst count can win
+                    // without waiting for the row to be recycled by scrolling.
+                    clearExpandedReactionTypes(messageId);
                     mainHandler.post(() -> {
                         refreshSuperReactionStyles(messageId);
                         refreshManageReactionUsers(messageId);
                     });
+                } else {
+                    markKnownNormalReaction(messageId, reactionKey);
                 }
             } catch (Throwable error) {
                 burstCheckTimes.remove(checkKey);
@@ -786,6 +915,77 @@ public class SuperReactions extends Plugin {
                 burstChecks.remove(checkKey);
             }
         }, "SuperReactionsBurstCheck").start();
+    }
+
+    private void resolveReactionAndToggle(long channelId, long messageId,
+                                          MessageReaction reaction) {
+        new Thread(() -> {
+            MessageReactionEmoji emoji = reaction == null ? null : reaction.b();
+            if (channelId == 0L || messageId == 0L || emoji == null) return;
+            String reactionKey = emoji.c();
+            String apiKey = getReactionApiKey(emoji);
+            if (reactionKey == null || apiKey == null) return;
+
+            List<User> burstUsers = null;
+            try (Http.Request request = newDiscordV10Request(
+                    "/channels/" + channelId + "/messages/" + messageId
+                            + "/reactions/" + Uri.encode(apiKey) + "?limit=100&type=1")) {
+                Http.Response response = request.execute();
+                if (response.ok()) burstUsers = parseBurstReactionUsers(response.text());
+            } catch (Throwable ignored) {
+                // Fall back to the normal reaction endpoint below.
+            }
+
+            if (burstUsers != null && !burstUsers.isEmpty()) {
+                ManageReactionTarget target = new ManageReactionTarget(
+                        channelId, messageId, reactionKey, emoji, true);
+                burstReactionUsers.put(target.cacheKey(), burstUsers);
+                Map<String, Integer> counts = superReactionCounts.computeIfAbsent(
+                        messageId, ignored -> new ConcurrentHashMap<>());
+                counts.put(reactionKey, Math.max(1, burstUsers.size()));
+                counts.put(normalizeReactionKey(reactionKey), Math.max(1, burstUsers.size()));
+                for (User user : burstUsers) {
+                    if (user.getId() == getCurrentUserId()) {
+                        markOwnedSuperReaction(messageId, reactionKey);
+                        break;
+                    }
+                }
+                removeKnownNormalReaction(messageId, reactionKey);
+                mainHandler.post(() -> refreshSuperReactionStyles(messageId));
+                if (hasNitro() && isOwnSuperReaction(messageId, reactionKey)) {
+                    removeSuperReaction(channelId, messageId, emoji);
+                } else if (hasNitro()) {
+                    sendSuperReaction(channelId, messageId, emoji);
+                } else {
+                    sendNormalReaction(channelId, messageId, emoji, reaction.c());
+                }
+                return;
+            }
+
+            markKnownNormalReaction(messageId, reactionKey);
+            sendNormalReaction(channelId, messageId, emoji, reaction.c());
+        }, "SuperReactionsResolve").start();
+    }
+
+    private void sendNormalReaction(long channelId, long messageId,
+                                    MessageReactionEmoji emoji, boolean remove) {
+        if (channelId == 0L || messageId == 0L || emoji == null) return;
+        String apiKey = getReactionApiKey(emoji);
+        if (apiKey == null || apiKey.isEmpty()) return;
+        new Thread(() -> {
+            try (Http.Request request = newDiscordV10Request(
+                    "/channels/" + channelId + "/messages/" + messageId
+                            + "/reactions/" + Uri.encode(apiKey) + "/@me",
+                    remove ? "DELETE" : "PUT")) {
+                Http.Response response = request.execute();
+                if (!response.ok()) {
+                    throw new IllegalStateException("HTTP " + response.statusCode
+                            + " " + response.statusMessage);
+                }
+            } catch (Throwable error) {
+                logger.error("Could not update normal Reaction", error);
+            }
+        }, "SuperReactionsNormal").start();
     }
 
     private void fetchBurstReactionUsers(ManageReactionTarget target) {
@@ -975,6 +1175,10 @@ public class SuperReactions extends Plugin {
                     mergedCounts.putAll(loadedCounts);
                     return mergedCounts;
                 });
+                // A previous bind can have recorded this emoji as normal. The
+                // metadata response is authoritative, so let the next style
+                // pass derive the type from the refreshed counts.
+                clearExpandedReactionTypes(messageId);
                 mainHandler.post(() -> {
                     refreshSuperReactionStyles(messageId);
                     refreshManageReactionUsers(messageId);
@@ -1042,6 +1246,7 @@ public class SuperReactions extends Plugin {
                 markOwnedSuperReaction(messageId, key);
             } else if (reaction.containsKey("me_burst")) {
                 removeOwnedSuperReaction(messageId, key);
+                removeLocalSuperReaction(messageId, key);
             }
 
             int burstCount = 0;
@@ -1057,6 +1262,9 @@ public class SuperReactions extends Plugin {
             if (burstCount > 0) {
                 result.put(key, burstCount);
                 result.put(normalizeReactionKey(key), burstCount);
+            } else if (getNormalReactionCount(messageId, key) != null
+                    && getNormalReactionCount(messageId, key) > 0) {
+                markKnownNormalReaction(messageId, key);
             }
         }
         return result;
@@ -1178,7 +1386,15 @@ public class SuperReactions extends Plugin {
 
     private Integer getSuperReactionCount(long messageId, String reactionKey) {
         if (reactionKey == null) return null;
-        if (locallySentSuperReactions.contains(localReactionKey(messageId, reactionKey))) return 1;
+        if (locallySentSuperReactions.contains(localReactionKey(messageId, reactionKey))
+                || locallySentSuperReactions.contains(
+                localReactionKey(messageId, normalizeReactionKey(reactionKey)))
+                || locallySentSuperReactions.contains(
+                localReactionKey(messageId, displayReactionKey(reactionKey)))
+                || locallySentSuperReactions.contains(
+                localReactionKey(messageId, normalizeReactionKey(displayReactionKey(reactionKey))))) {
+            return 1;
+        }
         return getSuperReactionCount(superReactionCounts.get(messageId), reactionKey);
     }
 
@@ -1212,6 +1428,11 @@ public class SuperReactions extends Plugin {
         return types == null || index < 0 || index >= types.size() ? null : types.get(index);
     }
 
+    private void clearExpandedReactionTypes(long messageId) {
+        reactionDisplayTypes.remove(messageId);
+        expandedReactionTypes.remove(messageId);
+    }
+
     private int getSuperReactionColor(long messageId, String reactionKey) {
         if (reactionKey == null) return SUPER_REACTION_COLOR;
         Map<String, Integer> colors = superReactionColors.get(messageId);
@@ -1233,6 +1454,14 @@ public class SuperReactions extends Plugin {
         boolean removed = ownedSuperReactions.remove(localReactionKey(messageId, reactionKey));
         removed |= ownedSuperReactions.remove(localReactionKey(messageId, normalizeReactionKey(reactionKey)));
         if (removed) persistOwnedSuperReactions();
+    }
+
+    private boolean hasLocalSuperReaction(long messageId) {
+        String prefix = messageId + ":";
+        for (String key : locallySentSuperReactions) {
+            if (key.startsWith(prefix)) return true;
+        }
+        return false;
     }
 
     private void persistOwnedSuperReactions() {
@@ -1328,6 +1557,9 @@ public class SuperReactions extends Plugin {
         for (String key : burstReactionUsers.keySet()) {
             if (key.startsWith(cachePrefix)) burstReactionUsers.remove(key);
         }
+        for (String key : knownNormalReactions) {
+            if (key.startsWith(cachePrefix)) knownNormalReactions.remove(key);
+        }
 
         mainHandler.post(() -> {
             refreshSuperReactionStyles(messageId);
@@ -1413,8 +1645,8 @@ public class SuperReactions extends Plugin {
             Boolean expandedType = getReactionViewType(messageId, reactionView);
             boolean isSuper = expandedType != null
                     ? expandedType : burstCount != null && burstCount > 0;
-            styleReactionView(reactionView, messageId, key, isSuper, burstCount);
             setReactionMeState(reactionView, messageId, reaction, isSuper);
+            styleReactionView(reactionView, messageId, key, isSuper, burstCount);
             Long channelId = reactionChannels.get(messageId);
             if (burstCount == null && channelId != null && reaction != null) {
                 checkBurstReaction(channelId, messageId, reaction.b());
@@ -1471,9 +1703,16 @@ public class SuperReactions extends Plugin {
                             Color.argb(90, Color.red(reflectionColor), Color.green(reflectionColor),
                                     Color.blue(reflectionColor)), Color.TRANSPARENT});
             shine.setCornerRadius(radius);
-            Drawable[] layers = originalBackground == null
+            Drawable baseBackground = cloneDrawable(originalBackground);
+            if (baseBackground != null) {
+                // StateListDrawable may retain the old client's blue selected
+                // state even after the ReactionView state is cleared.
+                baseBackground.setState(new int[0]);
+                baseBackground.jumpToCurrentState();
+            }
+            Drawable[] layers = baseBackground == null
                     ? new Drawable[]{colorWash, shine}
-                    : new Drawable[]{cloneDrawable(originalBackground), colorWash, shine};
+                    : new Drawable[]{baseBackground, colorWash, shine};
             reactionView.setBackground(new LayerDrawable(layers));
             reactionView.setContentDescription(burstCount == null
                     ? "Super reaction"
@@ -1495,8 +1734,12 @@ public class SuperReactions extends Plugin {
         boolean isMine = reaction != null
                 && (reaction.c() || (isSuperReaction && reaction.b() != null
                 && isOwnSuperReaction(messageId, reaction.b().c())));
-        reactionView.setActivated(isMine);
-        reactionView.setSelected(isMine);
+        // The old selector paints an activated reaction blue. Super reactions
+        // use the custom translucent background instead, so do not leave the
+        // legacy selected/activated state enabled on their pill.
+        boolean useNativeSelection = isMine && !isSuperReaction;
+        reactionView.setActivated(useNativeSelection);
+        reactionView.setSelected(useNativeSelection);
     }
 
     private static final class ManageReactionTarget {
@@ -1628,6 +1871,7 @@ public class SuperReactions extends Plugin {
                 }
                 locallySentSuperReactions.add(localReactionKey(messageId, reactionKey));
                 locallySentSuperReactions.add(localReactionKey(messageId, displayReactionKey(reactionKey)));
+                removeKnownNormalReaction(messageId, reactionKey);
                 markOwnedSuperReaction(messageId, reactionKey);
                 invalidateSuperReactionCache(messageId, channelId, true);
                 mainHandler.post(() -> Utils.showToast("Super reaction sent"));
@@ -1643,6 +1887,8 @@ public class SuperReactions extends Plugin {
         String reactionKey = emoji.c();
         String apiKey = getReactionApiKey(emoji);
         if (reactionKey == null || apiKey == null) return;
+
+        markPendingSuperReactionRemoval(messageId, reactionKey);
 
         new Thread(() -> {
             try {
@@ -1675,8 +1921,10 @@ public class SuperReactions extends Plugin {
                 }
                 removeLocalSuperReaction(messageId, reactionKey);
                 invalidateSuperReactionCache(messageId, channelId, true);
+                scheduleLocalSuperReactionRemovalFallback(channelId, messageId, emoji);
                 mainHandler.post(() -> Utils.showToast("Super reaction removed"));
             } catch (Throwable error) {
+                clearPendingSuperReactionRemoval(messageId, reactionKey);
                 logger.error("Could not remove Super Reaction", error);
                 mainHandler.post(() -> Utils.showToast("Could not remove Super Reaction"));
             }
@@ -1773,6 +2021,91 @@ public class SuperReactions extends Plugin {
         }
     }
 
+    private String[] reactionStateKeys(long messageId, String reactionKey) {
+        return new String[]{
+                localReactionKey(messageId, reactionKey),
+                localReactionKey(messageId, normalizeReactionKey(reactionKey)),
+                localReactionKey(messageId, displayReactionKey(reactionKey)),
+                localReactionKey(messageId,
+                        normalizeReactionKey(displayReactionKey(reactionKey)))
+        };
+    }
+
+    private boolean isPendingSuperReactionRemoval(long messageId, String reactionKey) {
+        if (reactionKey == null) return false;
+        for (String key : reactionStateKeys(messageId, reactionKey)) {
+            if (pendingSuperReactionRemovals.contains(key)) return true;
+        }
+        return false;
+    }
+
+    private boolean isCompletedSuperReactionRemoval(long messageId, String reactionKey) {
+        if (reactionKey == null) return false;
+        for (String key : reactionStateKeys(messageId, reactionKey)) {
+            if (completedSuperReactionRemovals.contains(key)) return true;
+        }
+        return false;
+    }
+
+    private void markPendingSuperReactionRemoval(long messageId, String reactionKey) {
+        if (reactionKey == null) return;
+        for (String key : reactionStateKeys(messageId, reactionKey)) {
+            pendingSuperReactionRemovals.add(key);
+        }
+    }
+
+    private boolean clearPendingSuperReactionRemoval(long messageId, String reactionKey) {
+        boolean removed = false;
+        if (reactionKey == null) return false;
+        for (String key : reactionStateKeys(messageId, reactionKey)) {
+            removed |= pendingSuperReactionRemovals.remove(key);
+        }
+        return removed;
+    }
+
+    private void completeSuperReactionRemoval(long messageId, String reactionKey) {
+        if (reactionKey == null) return;
+        clearPendingSuperReactionRemoval(messageId, reactionKey);
+        for (String key : reactionStateKeys(messageId, reactionKey)) {
+            completedSuperReactionRemovals.add(key);
+        }
+        mainHandler.postDelayed(
+                () -> clearCompletedSuperReactionRemoval(messageId, reactionKey),
+                LOCAL_REMOVAL_MARKER_TTL_MS);
+    }
+
+    private void clearCompletedSuperReactionRemoval(long messageId, String reactionKey) {
+        if (reactionKey == null) return;
+        for (String key : reactionStateKeys(messageId, reactionKey)) {
+            completedSuperReactionRemovals.remove(key);
+        }
+    }
+
+    private void scheduleLocalSuperReactionRemovalFallback(long channelId, long messageId,
+                                                            MessageReactionEmoji emoji) {
+        mainHandler.postDelayed(() -> {
+            String reactionKey = emoji == null ? null : emoji.c();
+            if (reactionKey == null
+                    || !clearPendingSuperReactionRemoval(messageId, reactionKey)) return;
+
+            completeSuperReactionRemoval(messageId, reactionKey);
+            try {
+                List<MessageReactionUpdate> update = new ArrayList<>();
+                update.add(new MessageReactionUpdate(
+                        getCurrentUserId() == 1L ? 2L : 1L,
+                        channelId,
+                        messageId,
+                        emoji));
+                // A DELETE can succeed without producing a gateway event for
+                // an old client. Apply the same count decrement locally after
+                // giving the gateway a short opportunity to do it first.
+                StoreStream.Companion.getMessages().handleReactionUpdate(update, false);
+            } catch (Throwable error) {
+                logger.error("Could not update removed Super Reaction locally", error);
+            }
+        }, LOCAL_REMOVAL_FALLBACK_DELAY_MS);
+    }
+
     private void removeLocalSuperReaction(long messageId, String reactionKey) {
         if (reactionKey == null) return;
 
@@ -1826,8 +2159,11 @@ public class SuperReactions extends Plugin {
         expandedReactionTypes.clear();
         superReactionFetchTimes.clear();
         superReactionFetches.clear();
+        knownNormalReactions.clear();
         locallySentSuperReactions.clear();
         ownedSuperReactions.clear();
+        pendingSuperReactionRemovals.clear();
+        completedSuperReactionRemovals.clear();
         burstCheckTimes.clear();
         burstChecks.clear();
         burstReactionUsers.clear();
