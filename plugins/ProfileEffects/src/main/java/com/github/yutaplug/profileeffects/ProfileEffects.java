@@ -5,14 +5,13 @@ import android.graphics.Color;
 import android.graphics.drawable.Animatable;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.webkit.WebView;
-
-import androidx.constraintlayout.widget.ConstraintLayout;
 
 import com.aliucord.Http;
 import com.aliucord.Utils;
@@ -31,7 +30,8 @@ import com.discord.widgets.user.usersheet.WidgetUserSheet;
 import com.discord.widgets.user.profile.UserProfileHeaderView;
 import com.discord.widgets.user.profile.UserProfileHeaderViewModel;
 import com.discord.widgets.user.usersheet.WidgetUserSheetViewModel;
-import androidx.core.widget.NestedScrollView;
+
+import androidx.constraintlayout.widget.ConstraintLayout;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -71,6 +71,9 @@ public final class ProfileEffects extends Plugin {
                 new Class<?>[]{UserProfileHeaderViewModel.ViewState.Loaded.class},
                 new Hook(frame -> {
                     UserProfileHeaderView header = (UserProfileHeaderView) frame.thisObject;
+                    // Do not attach anything to the Settings profile header. The normal
+                    // user sheet is the only surface this plugin is intended to modify.
+                    if (!isUserSheetHeader(header)) return;
                     UserProfileHeaderViewModel.ViewState.Loaded state =
                             (UserProfileHeaderViewModel.ViewState.Loaded) frame.args[0];
                     User user = state.getUser();
@@ -131,6 +134,18 @@ public final class ProfileEffects extends Plugin {
             );
         } catch (Throwable error) {
             logger.error("Could not hook user-sheet resume", error);
+        }
+    }
+
+    private static boolean isUserSheetHeader(UserProfileHeaderView header) {
+        return hasResourceEntryName(header, "user_sheet_profile_header_view");
+    }
+
+    private static boolean hasResourceEntryName(View view, String name) {
+        try {
+            return name.equals(view.getResources().getResourceEntryName(view.getId()));
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -334,24 +349,18 @@ public final class ProfileEffects extends Plugin {
     private void render(UserProfileHeaderView header, Profile profile) {
         Log.i(TAG, "Rendering profile overlay: effect=" + (profile.effect != null)
                 + " frame=" + (profile.frame != null));
-        // Keep the frame container as a sibling of the native header. This matches the
-        // stable Android sheet layout and avoids measuring the full-size web asset as a
-        // child of the wrap-content header.
-        ViewGroup frameHost = header.getParent() instanceof ViewGroup
-                ? (ViewGroup) header.getParent()
-                : header;
+        ViewGroup host = findProfileCardHost(header);
+        if (host == null) return;
+
         ProfileOverlay backOverlay = backOverlays.get(header);
         if (backOverlay == null) {
             backOverlay = new ProfileOverlay(header.getContext(), false);
             backOverlay.setClickable(false);
-            attachFrameOverlay(frameHost, backOverlay, header, true);
+            attachBoundedChild(host, header, backOverlay, true);
             backOverlays.put(header, backOverlay);
-        } else if (backOverlay.getParent() != frameHost) {
-            ViewParent oldParent = backOverlay.getParent();
-            if (oldParent instanceof ViewGroup) {
-                ((ViewGroup) oldParent).removeView(backOverlay);
-            }
-            attachFrameOverlay(frameHost, backOverlay, header, true);
+        } else if (backOverlay.getParent() != host) {
+            removeFromParent(backOverlay);
+            attachBoundedChild(host, header, backOverlay, true);
         }
         backOverlay.setFrame(profile.frame);
 
@@ -359,111 +368,173 @@ public final class ProfileEffects extends Plugin {
         if (frontOverlay == null) {
             frontOverlay = new ProfileOverlay(header.getContext(), true);
             frontOverlay.setClickable(false);
-            attachFrameOverlay(frameHost, frontOverlay, header, false);
+            attachBoundedChild(host, header, frontOverlay, false);
             frontOverlay.setElevation(1000f);
             frontOverlays.put(header, frontOverlay);
-        } else if (frontOverlay.getParent() != frameHost) {
-            ViewParent oldParent = frontOverlay.getParent();
-            if (oldParent instanceof ViewGroup) {
-                ((ViewGroup) oldParent).removeView(frontOverlay);
-            }
-            attachFrameOverlay(frameHost, frontOverlay, header, false);
+        } else if (frontOverlay.getParent() != host) {
+            removeFromParent(frontOverlay);
+            attachBoundedChild(host, header, frontOverlay, false);
         }
-        frameHost.bringChildToFront(frontOverlay);
         frontOverlay.setFrame(profile.frame);
 
-        ViewGroup effectHost = findEffectHost(header, frameHost);
         EffectOverlay effectOverlay = effectOverlays.get(header);
         if (effectOverlay == null) {
             effectOverlay = new EffectOverlay(header.getContext());
             effectOverlay.setClickable(false);
-            attachEffectOverlay(effectHost, effectOverlay);
+            attachBoundedChild(host, header, effectOverlay, false);
             effectOverlays.put(header, effectOverlay);
-        } else if (effectOverlay.getParent() != effectHost) {
-            ViewParent oldParent = effectOverlay.getParent();
-            if (oldParent instanceof ViewGroup) {
-                ((ViewGroup) oldParent).removeView(effectOverlay);
-            }
-            attachEffectOverlay(effectHost, effectOverlay);
+        } else if (effectOverlay.getParent() != host) {
+            removeFromParent(effectOverlay);
+            attachBoundedChild(host, header, effectOverlay, false);
         }
         effectOverlay.setEffect(profile.effect);
+        host.bringChildToFront(frontOverlay);
     }
 
-    private static ViewGroup findEffectHost(UserProfileHeaderView header, ViewGroup fallback) {
-        ViewParent parent = header.getParent();
-        while (parent instanceof View) {
-            if (parent instanceof NestedScrollView) {
-                NestedScrollView scrollView = (NestedScrollView) parent;
-                View child = scrollView.getChildCount() == 0 ? null : scrollView.getChildAt(0);
-                return child instanceof ViewGroup ? (ViewGroup) child : fallback;
-            }
-            parent = parent.getParent();
-        }
-        return fallback;
-    }
-
-    private static void attachFrameOverlay(ViewGroup host, ProfileOverlay overlay,
-                                           UserProfileHeaderView header, boolean back) {
+    private static void attachBoundedChild(ViewGroup host, UserProfileHeaderView header,
+                                           View overlay, boolean back) {
+        // The fullscreen sheet's frame deliberately overflows the native profile
+        // card at the top and sides. Keep the actual controls underneath it, but do
+        // not let the card/root clip those overflow pixels.
         host.setClipChildren(false);
         host.setClipToPadding(false);
-        header.setClipChildren(false);
-        header.setClipToPadding(false);
-
-        // The frame intentionally extends above and below the profile header. Discord's
-        // web renderer leaves these ancestors unclipped, so mirror that behavior here.
-        ViewParent parent = host.getParent();
-        for (int depth = 0; depth < 4 && parent instanceof ViewGroup; depth++) {
-            ViewGroup ancestor = (ViewGroup) parent;
+        ViewGroup ancestor = host;
+        for (int depth = 0; depth < 4 && ancestor.getParent() instanceof ViewGroup; depth++) {
+            ancestor = (ViewGroup) ancestor.getParent();
             ancestor.setClipChildren(false);
             ancestor.setClipToPadding(false);
-            parent = ancestor.getParent();
         }
-
+        ProfileBounds bounds = profileBounds(header, host);
+        ViewGroup.LayoutParams params;
         if (host instanceof FrameLayout) {
-            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT);
-            host.addView(overlay, back ? 0 : host.getChildCount(), params);
+            FrameLayout.LayoutParams frameParams = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, bounds.height);
+            frameParams.gravity = Gravity.TOP;
+            frameParams.topMargin = bounds.top;
+            params = frameParams;
         } else if (host instanceof ConstraintLayout) {
-            ConstraintLayout.LayoutParams params = new ConstraintLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT);
-            params.leftToLeft = ConstraintLayout.LayoutParams.PARENT_ID;
-            params.rightToRight = ConstraintLayout.LayoutParams.PARENT_ID;
-            params.topToTop = ConstraintLayout.LayoutParams.PARENT_ID;
-            params.bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID;
-            host.addView(overlay, back ? 0 : host.getChildCount(), params);
+            ConstraintLayout.LayoutParams constraintParams = new ConstraintLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, bounds.height);
+            constraintParams.leftToLeft = ConstraintLayout.LayoutParams.PARENT_ID;
+            constraintParams.rightToRight = ConstraintLayout.LayoutParams.PARENT_ID;
+            constraintParams.topToTop = ConstraintLayout.LayoutParams.PARENT_ID;
+            params = constraintParams;
         } else {
-            ViewGroup.LayoutParams params = new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT);
-            host.addView(overlay, back ? 0 : host.getChildCount(), params);
+            params = new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, bounds.height);
+        }
+        host.addView(overlay, host.getChildCount(), params);
+        View content = findAncestorByResourceName(header, "user_sheet_content");
+        View actions = content == null
+                ? null
+                : findDescendantByResourceName(content, "user_sheet_profile_actions_container");
+        header.addOnLayoutChangeListener((view, left, top, right, bottom,
+                                           oldLeft, oldTop, oldRight, oldBottom) ->
+                resizeBoundedChild(host, header, overlay));
+        host.addOnLayoutChangeListener((view, left, top, right, bottom,
+                                        oldLeft, oldTop, oldRight, oldBottom) ->
+                resizeBoundedChild(host, header, overlay));
+        if (actions != null) {
+            actions.addOnLayoutChangeListener((view, left, top, right, bottom,
+                                               oldLeft, oldTop, oldRight, oldBottom) ->
+                    resizeBoundedChild(host, header, overlay));
+        }
+        header.post(() -> resizeBoundedChild(host, header, overlay));
+    }
+
+    private static void resizeBoundedChild(ViewGroup host, UserProfileHeaderView header,
+                                           View overlay) {
+        if (overlay.getParent() != host) return;
+        ProfileBounds bounds = profileBounds(header, host);
+        if (bounds.height <= 0) return;
+        ViewGroup.LayoutParams params = overlay.getLayoutParams();
+        params.width = ViewGroup.LayoutParams.MATCH_PARENT;
+        params.height = bounds.height;
+        if (params instanceof FrameLayout.LayoutParams) {
+            ((FrameLayout.LayoutParams) params).topMargin = bounds.top;
+        }
+        overlay.setLayoutParams(params);
+    }
+
+    private static ViewGroup findProfileCardHost(UserProfileHeaderView header) {
+        View current = header;
+        while (current.getParent() instanceof ViewGroup) {
+            ViewGroup parent = (ViewGroup) current.getParent();
+            if (hasResourceEntryName(parent, "user_sheet_content")) {
+                ViewParent root = parent.getParent();
+                return root instanceof ViewGroup ? (ViewGroup) root : parent;
+            }
+            current = parent;
+        }
+        return header.getParent() instanceof ViewGroup
+                ? (ViewGroup) header.getParent()
+                : null;
+    }
+
+    private static ProfileBounds profileBounds(UserProfileHeaderView header, ViewGroup host) {
+        View headerContainer = header.getParent() instanceof View
+                ? (View) header.getParent()
+                : header;
+        int top = relativeTop(headerContainer, host);
+        int bottom = top + headerContainer.getHeight();
+
+        View content = findAncestorByResourceName(header, "user_sheet_content");
+        View actions = content == null
+                ? null
+                : findDescendantByResourceName(content, "user_sheet_profile_actions_container");
+        if (actions != null && actions.getVisibility() != View.GONE && actions.getHeight() > 0) {
+            bottom = Math.max(bottom, relativeTop(actions, host) + actions.getHeight());
+        }
+        return new ProfileBounds(Math.max(0, top), Math.max(0, bottom - top));
+    }
+
+    private static View findAncestorByResourceName(View view, String name) {
+        View current = view;
+        while (current != null) {
+            if (hasResourceEntryName(current, name)) return current;
+            ViewParent parent = current.getParent();
+            current = parent instanceof View ? (View) parent : null;
+        }
+        return null;
+    }
+
+    private static View findDescendantByResourceName(View root, String name) {
+        if (hasResourceEntryName(root, name)) return root;
+        if (!(root instanceof ViewGroup)) return null;
+        ViewGroup group = (ViewGroup) root;
+        for (int index = 0; index < group.getChildCount(); index++) {
+            View result = findDescendantByResourceName(group.getChildAt(index), name);
+            if (result != null) return result;
+        }
+        return null;
+    }
+
+    private static int relativeTop(View view, ViewGroup ancestor) {
+        int top = 0;
+        View current = view;
+        while (current != ancestor) {
+            top += current.getTop();
+            ViewParent parent = current.getParent();
+            if (!(parent instanceof View)) break;
+            current = (View) parent;
+        }
+        return Math.max(0, top);
+    }
+
+    private static final class ProfileBounds {
+        private final int top;
+        private final int height;
+
+        private ProfileBounds(int top, int height) {
+            this.top = top;
+            this.height = height;
         }
     }
 
-    private static void attachEffectOverlay(ViewGroup host, EffectOverlay overlay) {
-        host.setClipChildren(false);
-        host.setClipToPadding(false);
-        ViewParent parent = host.getParent();
-        for (int depth = 0; depth < 3 && parent instanceof ViewGroup; depth++) {
-            ViewGroup ancestor = (ViewGroup) parent;
-            ancestor.setClipChildren(false);
-            ancestor.setClipToPadding(false);
-            parent = ancestor.getParent();
-        }
-
-        // Effects are a middle layer over the profile backgrounds. The outer sheet
-        // contains opaque section backgrounds, so putting this at index 0 hides it.
-        // Keep it above the sheet content; the asset itself is transparent and its
-        // WebView clips to the profile-effect viewport.
-        if (host instanceof FrameLayout) {
-            host.addView(overlay, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT));
-        } else {
-            host.addView(overlay, new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT));
+    private static void removeFromParent(View view) {
+        ViewParent parent = view.getParent();
+        if (parent instanceof ViewGroup) {
+            ((ViewGroup) parent).removeView(view);
         }
     }
 
@@ -722,7 +793,26 @@ public final class ProfileEffects extends Plugin {
         }
     }
 
-    private static final class ProfileOverlay extends FrameLayout {
+    /** A visual-only layer which must never steal clicks from the real profile UI. */
+    private abstract static class TouchThroughFrameLayout extends FrameLayout {
+        private TouchThroughFrameLayout(Context context) {
+            super(context);
+            setClickable(false);
+            setFocusable(false);
+            setFocusableInTouchMode(false);
+            setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
+
+        @Override
+        public boolean dispatchTouchEvent(MotionEvent event) {
+            // The frame/effect can extend across buttons. Returning false before
+            // dispatching to children lets the underlying Settings/profile controls
+            // receive the event, including Restart, Log Out, and the overflow menu.
+            return false;
+        }
+    }
+
+    private static final class ProfileOverlay extends TouchThroughFrameLayout {
         private final boolean front;
         private final List<FrameLayerView> layerViews = new ArrayList<>();
         private Product frame;
@@ -854,7 +944,7 @@ public final class ProfileEffects extends Plugin {
         }
     }
 
-    private static final class EffectOverlay extends FrameLayout {
+    private static final class EffectOverlay extends TouchThroughFrameLayout {
         private Product effect;
         private WebView webView;
 

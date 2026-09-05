@@ -261,11 +261,22 @@ public class BetterMessageLogger extends Plugin {
                                                                           List<com.discord.models.message.Message> current) {
         List<com.discord.models.message.Message> result = new ArrayList<>();
         if (current != null) result.addAll(current);
+        if (result.isEmpty()) return result;
+
+        // StoreMessagesLoader uses the oldest synced message as the cursor for the next
+        // pagination request. Never put an older database row ahead of that cursor, or
+        // Discord will jump over live messages that have not been loaded yet.
+        long oldestLoadedId = Long.MAX_VALUE;
         Set<Long> present = new HashSet<>();
-        for (com.discord.models.message.Message message : result) present.add(message.getId());
+        for (com.discord.models.message.Message message : result) {
+            present.add(message.getId());
+            if (!message.isLocal()) oldestLoadedId = Math.min(oldestLoadedId, message.getId());
+        }
+        if (oldestLoadedId == Long.MAX_VALUE) return result;
+
         for (MessageRecord record : records.values()) {
             if (record.channelId != channelId || (!record.deleted && !deletedMessageIds.contains(record.id))
-                    || !shouldKeep(record) || present.contains(record.id)) continue;
+                    || record.id < oldestLoadedId || !shouldKeep(record) || present.contains(record.id)) continue;
             result.add(record.toMessage());
         }
         result.sort(Comparator.comparingLong(com.discord.models.message.Message::getId));
