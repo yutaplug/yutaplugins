@@ -37,7 +37,7 @@ public final class MarkdownFixSettings extends BottomSheet {
         getLinearLayout().setPadding(dp(context, 20), dp(context, 8),
                 dp(context, 20), dp(context, 24));
 
-        addIntro(context, "Tune MarkdownFix's headers, subtext, and bullet-list appearance. "
+        addIntro(context, "Tune MarkdownFix's headers, subtext, and bullet points appearance. "
                 + "Scale values use 1.0 as the normal text size.");
 
         addSectionHeader(context, "Text sizes", true);

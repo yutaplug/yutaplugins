@@ -64,6 +64,9 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
+import kotlin.Unit;
+import kotlin.jvm.functions.Function1;
+
 @SuppressWarnings("unused")
 @AliucordPlugin
 public class SuperReactions extends Plugin {
@@ -84,12 +87,18 @@ public class SuperReactions extends Plugin {
     private final Map<WidgetChatListAdapterItemReactions, Integer> visibleReactionPositions = new WeakHashMap<>();
     private final Map<ReactionView, Drawable> originalReactionBackgrounds = new WeakHashMap<>();
     private final Map<WidgetManageReactions, ManageReactionTarget> activeManageReactions = new WeakHashMap<>();
+    private final Map<ManageReactionsEmojisAdapter, WidgetManageReactions>
+            activeManageEmojiAdapters = new WeakHashMap<>();
+    private final Map<WidgetManageReactions, Boolean> manageReactionWidgetTypes = new WeakHashMap<>();
     private final Map<Long, Long> reactionChannels = new ConcurrentHashMap<>();
     private final Map<Long, Map<String, Integer>> superReactionCounts = new ConcurrentHashMap<>();
     private final Map<Long, Map<String, Integer>> normalReactionCounts = new ConcurrentHashMap<>();
     private final Map<Long, Map<String, Integer>> superReactionColors = new ConcurrentHashMap<>();
     private final Map<Long, List<Boolean>> reactionDisplayTypes = new ConcurrentHashMap<>();
     private final Map<Long, IdentityHashMap<MessageReaction, Boolean>> expandedReactionTypes = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> manageReactionTypes = new ConcurrentHashMap<>();
+    private final IdentityHashMap<ManageReactionsEmojisAdapter.ReactionEmojiItem, Boolean>
+            manageReactionItemTypes = new IdentityHashMap<>();
     private final Map<Long, Long> superReactionFetchTimes = new ConcurrentHashMap<>();
     private final Set<Long> superReactionFetches = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> burstCheckTimes = new ConcurrentHashMap<>();
@@ -97,6 +106,7 @@ public class SuperReactions extends Plugin {
     private final Set<String> locallySentSuperReactions = ConcurrentHashMap.newKeySet();
     private final Set<String> ownedSuperReactions = ConcurrentHashMap.newKeySet();
     private final Map<String, List<User>> burstReactionUsers = new ConcurrentHashMap<>();
+    private final Map<String, List<MGRecyclerDataPayload>> normalReactionItems = new ConcurrentHashMap<>();
     private final Set<String> burstUserFetches = ConcurrentHashMap.newKeySet();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private SharedPreferences ownedReactionPreferences;
@@ -151,6 +161,87 @@ public class SuperReactions extends Plugin {
                             (Collection<?>) frame.args[0], messageId);
                     frame.args[0] = expandedReactions;
                 })
+        );
+
+        patcher.patch(
+                WidgetManageReactions.Companion.class,
+                "create",
+                new Class<?>[]{long.class, long.class, android.content.Context.class, MessageReaction.class},
+                new Hook(frame -> {
+                    long channelId = (Long) frame.args[0];
+                    long messageId = (Long) frame.args[1];
+                    MessageReaction reaction = (MessageReaction) frame.args[3];
+                    if (reaction == null || reaction.b() == null) return;
+
+                    Boolean type = getExpandedReactionType(messageId, reaction);
+                    if (type != null) {
+                        manageReactionTypes.put(
+                                manageReactionKey(channelId, messageId, reaction.b().c()), type);
+                    }
+                })
+        );
+
+        patcher.patch(
+                ManageReactionsEmojisAdapter.ReactionEmojiItem.class,
+                "getKey",
+                new Class<?>[]{},
+                new Hook(frame -> {
+                    ManageReactionsEmojisAdapter.ReactionEmojiItem item =
+                            (ManageReactionsEmojisAdapter.ReactionEmojiItem) frame.thisObject;
+                    Boolean type = getManageReactionItemType(item);
+                    if (type == null || item.getReaction() == null || item.getReaction().b() == null) {
+                        return;
+                    }
+                    frame.setResult(item.getReaction().b().c()
+                            + (type ? ":super" : ":normal"));
+                })
+        );
+
+        patcher.patch(
+                ManageReactionsEmojisAdapter.ReactionEmojiViewHolder.class,
+                "onConfigure",
+                new Class<?>[]{int.class, ManageReactionsEmojisAdapter.ReactionEmojiItem.class},
+                new Hook(frame -> {
+                    ManageReactionsEmojisAdapter.ReactionEmojiViewHolder holder =
+                            (ManageReactionsEmojisAdapter.ReactionEmojiViewHolder) frame.thisObject;
+                    ManageReactionsEmojisAdapter.ReactionEmojiItem item =
+                            (ManageReactionsEmojisAdapter.ReactionEmojiItem) frame.args[1];
+                    Boolean type = getManageReactionItemType(item);
+                    if (type == null || item == null || item.getReaction() == null
+                            || item.getReaction().b() == null) return;
+
+                    ManageReactionsEmojisAdapter adapter =
+                            ManageReactionsEmojisAdapter.ReactionEmojiViewHolder
+                                    .access$getAdapter$p(holder);
+                    WidgetManageReactions widget = getManageReactionWidget(adapter);
+                    Function1<String, Unit> listener = adapter.getOnEmojiSelectedListener();
+                    if (widget == null || listener == null) return;
+
+                    Intent intent = widget.getMostRecentIntent();
+                    long channelId = intent.getLongExtra(
+                            "com.discord.intent.extra.EXTRA_CHANNEL_ID", 0L);
+                    long messageId = intent.getLongExtra(
+                            "com.discord.intent.extra.EXTRA_MESSAGE_ID", 0L);
+                    String reactionKey = item.getReaction().b().c();
+                    String selectionKey = manageReactionKey(channelId, messageId, reactionKey);
+                    holder.itemView.setOnClickListener(ignored -> {
+                        synchronized (manageReactionWidgetTypes) {
+                            manageReactionWidgetTypes.put(widget, type);
+                        }
+                        manageReactionTypes.put(selectionKey, type);
+                        selectManageReaction(widget, channelId, messageId,
+                                item.getReaction().b(), type);
+                        listener.invoke(reactionKey);
+                    });
+                })
+        );
+
+        patcher.patch(
+                WidgetManageReactions.class,
+                "onViewBound",
+                new Class<?>[]{View.class},
+                new Hook(frame -> registerManageReactionAdapter(
+                        (WidgetManageReactions) frame.thisObject))
         );
 
         patcher.patch(
@@ -252,8 +343,13 @@ public class SuperReactions extends Plugin {
                     long messageId = (Long) frame.args[1];
                     MessageReactionEmoji emoji = (MessageReactionEmoji) frame.args[2];
                     long userId = (Long) frame.args[3];
-                    if (userId == getCurrentUserId() && isOwnSuperReaction(messageId,
-                            emoji == null ? null : emoji.c())) {
+                    String reactionKey = emoji == null ? null : emoji.c();
+                    Boolean selectedType = manageReactionTypes.get(
+                            manageReactionKey(channelId, messageId, reactionKey));
+                    boolean isSuper = selectedType != null
+                            ? selectedType : isSuperReaction(messageId, reactionKey);
+                    if (isSuper && userId == getCurrentUserId() && isOwnSuperReaction(messageId,
+                            reactionKey)) {
                         frame.setResult(null);
                         removeSuperReaction(channelId, messageId, emoji);
                     }
@@ -289,11 +385,20 @@ public class SuperReactions extends Plugin {
                     if (model == null) return;
                     ManageReactionTarget target = getManageReactionTarget(widget);
                     if (target == null) return;
-                    List<User> users = burstReactionUsers.get(target.cacheKey());
-                    if (users != null && !users.isEmpty()) {
-                        frame.args[0] = new ManageReactionsModel(
-                                model.getReactionItems(), createManageReactionItems(target, users));
+
+                    List<ManageReactionsEmojisAdapter.ReactionEmojiItem> reactionItems =
+                            expandManageReactionItems(model.getReactionItems(), target);
+                    List<? extends MGRecyclerDataPayload> userItems = model.getUserItems();
+                    List<MGRecyclerDataPayload> normalItems = new ArrayList<>();
+                    normalItems.addAll(userItems);
+                    normalReactionItems.put(normalCacheKey(target), normalItems);
+                    if (target.superReaction) {
+                        List<User> users = burstReactionUsers.get(target.cacheKey());
+                        userItems = users == null
+                                ? new ArrayList<MGRecyclerDataPayload>()
+                                : createManageReactionItems(target, users);
                     }
+                    frame.args[0] = new ManageReactionsModel(reactionItems, userItems);
                 })
         );
     }
@@ -394,14 +499,17 @@ public class SuperReactions extends Plugin {
         long channelId = intent.getLongExtra("com.discord.intent.extra.EXTRA_CHANNEL_ID", 0L);
         long messageId = intent.getLongExtra("com.discord.intent.extra.EXTRA_MESSAGE_ID", 0L);
         if (channelId == 0L || messageId == 0L) return;
+        registerManageReactionAdapter(widget);
 
         MessageReactionEmoji emoji = null;
         String reactionKey = null;
+        Boolean selectedType = null;
         for (ManageReactionsEmojisAdapter.ReactionEmojiItem reactionItem : model.getReactionItems()) {
             MessageReaction reaction = reactionItem.getReaction();
             if (reactionItem.isSelected() && reaction != null && reaction.b() != null) {
                 emoji = reaction.b();
                 reactionKey = emoji.c();
+                selectedType = getManageReactionItemType(reactionItem);
                 break;
             }
         }
@@ -420,19 +528,207 @@ public class SuperReactions extends Plugin {
         }
         if (emoji == null) return;
 
-        ManageReactionTarget target = new ManageReactionTarget(channelId, messageId, reactionKey, emoji);
+        if (reactionKey == null) return;
+        if (selectedType == null) {
+            synchronized (manageReactionWidgetTypes) {
+                selectedType = manageReactionWidgetTypes.get(widget);
+            }
+        }
+        if (selectedType == null) {
+            selectedType = manageReactionTypes.get(
+                    manageReactionKey(channelId, messageId, reactionKey));
+        }
+        boolean targetIsSuper = selectedType != null
+                ? selectedType : isSuperReaction(messageId, reactionKey);
+        ManageReactionTarget target = new ManageReactionTarget(
+                channelId, messageId, reactionKey, emoji, targetIsSuper);
         synchronized (activeManageReactions) {
             activeManageReactions.put(widget, target);
         }
 
-        // The legacy model cannot distinguish burst reactions. Probe the
-        // burst users endpoint even before metadata has finished loading.
-        // Empty burst results must not replace the normal reaction list.
-        fetchBurstReactionUsers(target);
-        if (!isSuperReaction(messageId, reactionKey)) {
+        if (targetIsSuper) {
+            // The legacy model cannot distinguish burst reactions. Query the
+            // typed endpoint only when the burst tab is actually selected.
+            fetchBurstReactionUsers(target);
+            fetchSuperReactionMetadata(channelId, messageId);
+        } else {
             checkBurstReaction(channelId, messageId, emoji);
             fetchSuperReactionMetadata(channelId, messageId);
         }
+    }
+
+    private String normalCacheKey(ManageReactionTarget target) {
+        return target.messageId + ":" + target.reactionKey + ":normal";
+    }
+
+    private void selectManageReaction(WidgetManageReactions widget, long channelId,
+                                      long messageId, MessageReactionEmoji emoji,
+                                      boolean isSuperReaction) {
+        if (widget == null || emoji == null) return;
+        String reactionKey = emoji.c();
+        manageReactionTypes.put(
+                manageReactionKey(channelId, messageId, reactionKey), isSuperReaction);
+        synchronized (manageReactionWidgetTypes) {
+            manageReactionWidgetTypes.put(widget, isSuperReaction);
+        }
+
+        ManageReactionTarget target = new ManageReactionTarget(
+                channelId, messageId, reactionKey, emoji, isSuperReaction);
+        synchronized (activeManageReactions) {
+            activeManageReactions.put(widget, target);
+        }
+        refreshManageReactionTabs(widget, target);
+
+        if (isSuperReaction) {
+            setManageReactionResults(widget, new ArrayList<MGRecyclerDataPayload>());
+            fetchBurstReactionUsers(target);
+        } else {
+            List<MGRecyclerDataPayload> users = normalReactionItems.get(normalCacheKey(target));
+            setManageReactionResults(widget, users == null
+                    ? new ArrayList<MGRecyclerDataPayload>()
+                    : new ArrayList<>(users));
+        }
+    }
+
+    private String manageReactionKey(long channelId, long messageId, String reactionKey) {
+        return channelId + ":" + messageId + ":" + reactionKey;
+    }
+
+    private void registerManageReactionAdapter(WidgetManageReactions widget) {
+        try {
+            java.lang.reflect.Field field = WidgetManageReactions.class
+                    .getDeclaredField("emojisAdapter");
+            field.setAccessible(true);
+            Object adapter = field.get(widget);
+            if (adapter instanceof ManageReactionsEmojisAdapter) {
+                synchronized (activeManageEmojiAdapters) {
+                    activeManageEmojiAdapters.put(
+                            (ManageReactionsEmojisAdapter) adapter, widget);
+                }
+            }
+        } catch (Throwable ignored) {
+            // The adapter is initialized before the first model emission on
+            // supported clients. Keep this hook optional for old variants.
+        }
+    }
+
+    private WidgetManageReactions getManageReactionWidget(ManageReactionsEmojisAdapter adapter) {
+        synchronized (activeManageEmojiAdapters) {
+            WidgetManageReactions widget = activeManageEmojiAdapters.get(adapter);
+            if (widget != null) return widget;
+        }
+        synchronized (activeManageReactions) {
+            for (WidgetManageReactions widget : activeManageReactions.keySet()) {
+                try {
+                    java.lang.reflect.Field field = WidgetManageReactions.class
+                            .getDeclaredField("emojisAdapter");
+                    field.setAccessible(true);
+                    if (field.get(widget) == adapter) return widget;
+                } catch (Throwable ignored) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Boolean getManageReactionItemType(
+            ManageReactionsEmojisAdapter.ReactionEmojiItem item) {
+        if (item == null) return null;
+        synchronized (manageReactionItemTypes) {
+            return manageReactionItemTypes.get(item);
+        }
+    }
+
+    private void trackManageReactionItem(
+            ManageReactionsEmojisAdapter.ReactionEmojiItem item, boolean isSuperReaction) {
+        synchronized (manageReactionItemTypes) {
+            manageReactionItemTypes.put(item, isSuperReaction);
+        }
+    }
+
+    private List<ManageReactionsEmojisAdapter.ReactionEmojiItem> expandManageReactionItems(
+            List<ManageReactionsEmojisAdapter.ReactionEmojiItem> source,
+            ManageReactionTarget target) {
+        Map<String, Boolean> selectedTypes = new HashMap<>();
+        for (ManageReactionsEmojisAdapter.ReactionEmojiItem item : source) {
+            if (item == null || !item.isSelected() || item.getReaction() == null
+                    || item.getReaction().b() == null) continue;
+            String key = item.getReaction().b().c();
+            Boolean type;
+            if (target.reactionKey.equals(key)) {
+                // The provider only reports the shared emoji key. The active
+                // target is authoritative when switching between duplicate
+                // normal and burst tabs without a provider emission.
+                type = target.superReaction;
+            } else {
+                type = getManageReactionItemType(item);
+                if (type == null) {
+                    type = manageReactionTypes.get(
+                            manageReactionKey(target.channelId, target.messageId, key));
+                }
+            }
+            selectedTypes.put(key, type != null && type);
+        }
+        if (!selectedTypes.containsKey(target.reactionKey)) {
+            selectedTypes.put(target.reactionKey, target.superReaction);
+        }
+
+        synchronized (manageReactionItemTypes) {
+            manageReactionItemTypes.clear();
+        }
+
+        List<ManageReactionsEmojisAdapter.ReactionEmojiItem> result = new ArrayList<>();
+        Set<String> seenKeys = new HashSet<>();
+        for (ManageReactionsEmojisAdapter.ReactionEmojiItem item : source) {
+            if (item == null || item.getReaction() == null || item.getReaction().b() == null) {
+                continue;
+            }
+            MessageReaction reaction = item.getReaction();
+            MessageReactionEmoji emoji = reaction.b();
+            String key = emoji.c();
+            if (!seenKeys.add(key)) continue;
+
+            Integer burstCount = getSuperReactionCount(target.messageId, key);
+            Integer normalCount = getNormalReactionCount(target.messageId, key);
+            if (normalCount == null && burstCount != null && burstCount > 0
+                    && reaction.a() > burstCount) {
+                normalCount = reaction.a() - burstCount;
+            }
+            if (target.superReaction && target.reactionKey.equals(key)
+                    && (burstCount == null || burstCount <= 0)) {
+                // The typed users request can finish before message metadata.
+                // Keep the selected burst tab visible until the real count arrives.
+                burstCount = 1;
+            }
+
+            boolean selected = selectedTypes.containsKey(key);
+            boolean selectedSuper = selected && Boolean.TRUE.equals(selectedTypes.get(key));
+            if (burstCount != null && burstCount > 0
+                    && normalCount != null && normalCount > 0) {
+                ManageReactionsEmojisAdapter.ReactionEmojiItem burstItem =
+                        new ManageReactionsEmojisAdapter.ReactionEmojiItem(
+                                new MessageReaction(burstCount, emoji, false), selectedSuper);
+                ManageReactionsEmojisAdapter.ReactionEmojiItem normalItem =
+                        new ManageReactionsEmojisAdapter.ReactionEmojiItem(
+                                new MessageReaction(normalCount, emoji, reaction.c()),
+                                selected && !selectedSuper);
+                trackManageReactionItem(burstItem, true);
+                trackManageReactionItem(normalItem, false);
+                result.add(burstItem);
+                result.add(normalItem);
+            } else if (burstCount != null && burstCount > 0) {
+                ManageReactionsEmojisAdapter.ReactionEmojiItem burstItem =
+                        new ManageReactionsEmojisAdapter.ReactionEmojiItem(
+                                new MessageReaction(burstCount, emoji, false), selectedSuper);
+                trackManageReactionItem(burstItem, true);
+                result.add(burstItem);
+            } else {
+                trackManageReactionItem(item, false);
+                result.add(item);
+            }
+        }
+        return result;
     }
 
     private boolean isSuperReaction(long messageId, String reactionKey) {
@@ -1082,8 +1378,28 @@ public class SuperReactions extends Plugin {
                     : activeManageReactions.entrySet()) {
                 ManageReactionTarget target = entry.getValue();
                 if (target.messageId != messageId) continue;
-                fetchBurstReactionUsers(target);
+                refreshManageReactionTabs(entry.getKey(), target);
+                if (target.superReaction) fetchBurstReactionUsers(target);
             }
+        }
+    }
+
+    private void refreshManageReactionTabs(
+            WidgetManageReactions widget, ManageReactionTarget target) {
+        try {
+            java.lang.reflect.Field field = WidgetManageReactions.class
+                    .getDeclaredField("emojisAdapter");
+            field.setAccessible(true);
+            Object value = field.get(widget);
+            if (!(value instanceof ManageReactionsEmojisAdapter)) return;
+
+            ManageReactionsEmojisAdapter adapter = (ManageReactionsEmojisAdapter) value;
+            List<ManageReactionsEmojisAdapter.ReactionEmojiItem> current =
+                    adapter.getInternalData();
+            if (current == null || current.isEmpty()) return;
+            adapter.setData(expandManageReactionItems(current, target));
+        } catch (Throwable error) {
+            logger.error("Could not update Super Reaction tabs", error);
         }
     }
 
@@ -1188,17 +1504,19 @@ public class SuperReactions extends Plugin {
         private final long messageId;
         private final String reactionKey;
         private final MessageReactionEmoji emoji;
+        private final boolean superReaction;
 
         private ManageReactionTarget(long channelId, long messageId, String reactionKey,
-                                     MessageReactionEmoji emoji) {
+                                     MessageReactionEmoji emoji, boolean superReaction) {
             this.channelId = channelId;
             this.messageId = messageId;
             this.reactionKey = reactionKey;
             this.emoji = emoji;
+            this.superReaction = superReaction;
         }
 
         private String cacheKey() {
-            return messageId + ":" + reactionKey;
+            return messageId + ":" + reactionKey + ":" + (superReaction ? "super" : "normal");
         }
 
         @Override
@@ -1208,6 +1526,7 @@ public class SuperReactions extends Plugin {
             ManageReactionTarget target = (ManageReactionTarget) other;
             return channelId == target.channelId
                     && messageId == target.messageId
+                    && superReaction == target.superReaction
                     && reactionKey.equals(target.reactionKey);
         }
 
@@ -1215,7 +1534,8 @@ public class SuperReactions extends Plugin {
         public int hashCode() {
             int result = Long.hashCode(channelId);
             result = 31 * result + Long.hashCode(messageId);
-            return 31 * result + reactionKey.hashCode();
+            result = 31 * result + reactionKey.hashCode();
+            return 31 * result + Boolean.hashCode(superReaction);
         }
     }
 
@@ -1484,6 +1804,16 @@ public class SuperReactions extends Plugin {
         }
         synchronized (activeManageReactions) {
             activeManageReactions.clear();
+        }
+        synchronized (activeManageEmojiAdapters) {
+            activeManageEmojiAdapters.clear();
+        }
+        synchronized (manageReactionWidgetTypes) {
+            manageReactionWidgetTypes.clear();
+        }
+        manageReactionTypes.clear();
+        synchronized (manageReactionItemTypes) {
+            manageReactionItemTypes.clear();
         }
         synchronized (originalReactionBackgrounds) {
             originalReactionBackgrounds.clear();

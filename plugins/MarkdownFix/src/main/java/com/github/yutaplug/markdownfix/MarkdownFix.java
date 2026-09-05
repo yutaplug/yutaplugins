@@ -5,6 +5,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.style.AbsoluteSizeSpan;
 import android.text.style.LeadingMarginSpan;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
@@ -24,6 +25,7 @@ import com.discord.simpleast.core.parser.Rule;
 import com.discord.utilities.color.ColorCompat;
 import com.discord.utilities.spans.ClickableSpan;
 import com.discord.utilities.spans.BulletSpan;
+import com.discord.utilities.spans.QuoteSpan;
 import com.discord.utilities.spans.VerticalPaddingSpan;
 import com.discord.utilities.textprocessing.AstRenderer;
 import com.discord.utilities.textprocessing.DiscordParser;
@@ -32,8 +34,11 @@ import com.discord.utilities.textprocessing.MessagePreprocessor;
 import com.discord.utilities.textprocessing.MessageRenderContext;
 import com.discord.utilities.textprocessing.Rules;
 import com.discord.utilities.textprocessing.node.BasicRenderContext;
+import com.discord.utilities.textprocessing.node.BlockQuoteNode;
 import com.discord.utilities.textprocessing.node.EditedMessageNode;
+import com.discord.utilities.textprocessing.node.UrlNode;
 import com.discord.utilities.textprocessing.node.ZeroSpaceWidthNode;
+import com.discord.utilities.string.StringUtilsKt;
 import com.facebook.drawee.span.DraweeSpanStringBuilder;
 
 import java.lang.reflect.Field;
@@ -45,6 +50,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import b.a.t.b.b.e;
+import kotlin.Unit;
 
 /** Enables Discord's newer block-level Markdown rules in chat and forum messages. */
 @AliucordPlugin
@@ -76,7 +82,8 @@ public final class MarkdownFix extends Plugin {
             Pattern.compile("^([^\\S\\r\\n]*)[*-][ \\t]+([^\\r\\n]*?)[ \\t]*(\\r?\\n|$)");
     private static final Pattern BLOCK_LIST_BODY_PATTERN =
             Pattern.compile("^(?:#{1,3}[ \\t]+|-#[ \\t]+).*");
-
+    private static final Pattern BLOCK_QUOTE_PATTERN =
+            Pattern.compile("^(?: *>>> +(.*)| *>(?!>>) +([^\\n]*\\n?))", Pattern.DOTALL);
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser;
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> forumParser;
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> embedTitlesParser;
@@ -130,6 +137,21 @@ public final class MarkdownFix extends Plugin {
             // normal message and forum fixes available if they move in a future build.
             logger.error("MarkdownFix could not hook embed Markdown", error);
         }
+
+        try {
+            installRichLinkHook();
+        } catch (Throwable error) {
+            // The URL renderer is an implementation detail of the Discord build.
+            logger.error("MarkdownFix could not hook Markdown hyperlinks", error);
+        }
+
+        try {
+            installModernSpacingHooks();
+        } catch (Throwable error) {
+            // These block renderer methods are implementation details of the Discord build.
+            logger.error("MarkdownFix could not hook modern Markdown block renderers", error);
+        }
+
     }
 
     @SuppressWarnings("unchecked")
@@ -161,6 +183,231 @@ public final class MarkdownFix extends Plugin {
                 logger.error("MarkdownFix could not parse embed Markdown", error);
             }
         }));
+    }
+
+    private void installRichLinkHook() throws Throwable {
+        Field maskField = UrlNode.class.getDeclaredField("mask");
+        maskField.setAccessible(true);
+        Method typedRender = UrlNode.class.getDeclaredMethod(
+                "render", SpannableStringBuilder.class, UrlNode.RenderContext.class);
+        Method bridgeRender = UrlNode.class.getDeclaredMethod(
+                "render", SpannableStringBuilder.class, Object.class);
+        patchRichLinkRender(typedRender, maskField);
+        patchRichLinkRender(bridgeRender, maskField);
+    }
+
+    private void patchRichLinkRender(Method render, Field maskField) {
+        patcher.patch(render, new PreHook(frame -> {
+            if (!(frame.thisObject instanceof UrlNode)
+                    || !(frame.args[1] instanceof MessageRenderContext)) return;
+
+            try {
+                String label = (String) maskField.get(frame.thisObject);
+                if (label == null) return;
+
+                renderRichMaskedLink(
+                        (UrlNode<?>) frame.thisObject,
+                        (SpannableStringBuilder) frame.args[0],
+                        (MessageRenderContext) frame.args[1],
+                        label
+                );
+                frame.setResult(null);
+            } catch (Throwable error) {
+                logger.error("MarkdownFix could not render a Markdown hyperlink", error);
+            }
+        }));
+    }
+
+    private void renderRichMaskedLink(
+            UrlNode<?> node,
+            SpannableStringBuilder builder,
+            MessageRenderContext context,
+            String label) {
+        String safeUrl = node.getUrl();
+        try {
+            safeUrl = StringUtilsKt.toPunyCodeASCIIUrl(node.getUrl());
+        } catch (Throwable ignored) {
+            // Keep the original URL if punycode conversion is unavailable.
+        }
+        final String linkUrl = safeUrl;
+
+        int start = builder.length();
+        try {
+            List<Node<MessageRenderContext>> labelAst = getParser().parse(
+                    label,
+                    MessageParseState.Companion.getInitialState()
+            );
+            for (Node<MessageRenderContext> child : labelAst) child.render(builder, context);
+        } catch (Throwable ignored) {
+            builder.append(label);
+        }
+
+        if (builder.length() > start) {
+            ClickableSpan clickable = new ClickableSpan(
+                    Integer.valueOf(ColorCompat.getThemedColor(
+                            context.getContext(), context.getLinkColorAttrResId())),
+                    false,
+                    view -> {
+                        context.getOnLongPressUrl().invoke(linkUrl);
+                        return Unit.a;
+                    },
+                    view -> {
+                        context.getOnClickUrl().invoke(view.getContext(), linkUrl, label);
+                        return Unit.a;
+                    }
+            );
+            builder.setSpan(clickable, start, builder.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+    }
+
+    private void installModernSpacingHooks() throws Throwable {
+        Method quoteRender = BlockQuoteNode.class.getDeclaredMethod(
+                "render", SpannableStringBuilder.class, BasicRenderContext.class);
+        Method quoteBridgeRender = BlockQuoteNode.class.getDeclaredMethod(
+                "render", SpannableStringBuilder.class, Object.class);
+        patchModernQuoteRender(quoteRender);
+        patchModernQuoteRender(quoteBridgeRender);
+    }
+
+    private void patchModernQuoteRender(Method render) {
+        patcher.patch(render, new PreHook(frame -> {
+            if (!(frame.thisObject instanceof BlockQuoteNode)
+                    || !(frame.args[0] instanceof SpannableStringBuilder)
+                    || !(frame.args[1] instanceof BasicRenderContext)) return;
+
+            try {
+                renderModernBlockQuote(
+                        (BlockQuoteNode<?>) frame.thisObject,
+                        (SpannableStringBuilder) frame.args[0],
+                        (BasicRenderContext) frame.args[1]
+                );
+                frame.setResult(null);
+            } catch (Throwable error) {
+                logger.error("MarkdownFix could not render a compact block quote", error);
+            }
+        }));
+    }
+
+    private static void renderModernBlockQuote(
+            BlockQuoteNode<?> node,
+            SpannableStringBuilder builder,
+            BasicRenderContext renderContext) {
+        if (builder.length() > 0 && builder.charAt(builder.length() - 1) != '\n') {
+            builder.append('\n');
+        }
+
+        SpannableStringBuilder content = new SpannableStringBuilder();
+        Iterable<? extends Node> children = node.getChildren();
+        if (children != null) {
+            for (Node child : children) child.render(content, renderContext);
+        }
+        while (content.length() > 0 && content.charAt(content.length() - 1) == '\n') {
+            content.delete(content.length() - 1, content.length());
+        }
+        if (content.length() == 0) content.append(' ');
+
+        Context context = renderContext.getContext();
+        int quoteColor = defaultQuoteColor(context);
+        int lineStart = 0;
+        while (lineStart < content.length()) {
+            int lineEnd = lineStart;
+            while (lineEnd < content.length() && content.charAt(lineEnd) != '\n') {
+                lineEnd++;
+            }
+
+            int quoteStart = builder.length();
+            if (lineEnd == lineStart) {
+                builder.append(' ');
+            } else {
+                builder.append(content, lineStart, lineEnd);
+            }
+            builder.setSpan(
+                    new QuoteSpan(quoteColor, dp(context, 2), dp(context, 6)),
+                    quoteStart,
+                    builder.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            );
+
+            if (lineEnd < content.length()) {
+                builder.append('\n');
+                lineStart = lineEnd + 1;
+            } else {
+                lineStart = lineEnd;
+            }
+        }
+
+        if (builder.length() == 0 || builder.charAt(builder.length() - 1) != '\n') {
+            int boundaryStart = builder.length();
+            builder.append('\n');
+            builder.setSpan(
+                    new AbsoluteSizeSpan(dp(context, 4)),
+                    boundaryStart,
+                    builder.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            );
+        }
+    }
+
+    private static int defaultQuoteColor(Context context) {
+        return themedColor(context, "theme_chat_block_quote_divider", Color.rgb(79, 84, 92));
+    }
+
+    private static final class ModernBlockQuoteRule
+            extends Rule.BlockRule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
+        private ModernBlockQuoteRule() {
+            super(BLOCK_QUOTE_PATTERN);
+        }
+
+        @Override
+        public Matcher match(CharSequence source, String previousMatch, MessageParseState state) {
+            if (state.isInQuote()) return null;
+            return super.match(source, previousMatch, state);
+        }
+
+        @Override
+        public ParseSpec<MessageRenderContext, MessageParseState> parse(
+                Matcher matcher,
+                Parser<MessageRenderContext, ? super Node<MessageRenderContext>, MessageParseState> parser,
+                MessageParseState state) {
+            int group = matcher.group(1) != null ? 1 : 2;
+            ModernBlockQuoteNode node = new ModernBlockQuoteNode();
+            return new ParseSpec<>(node, state.newBlockQuoteState(true),
+                    matcher.start(group), matcher.end(group));
+        }
+    }
+
+    private static final class ModernBlockQuoteNode extends Node<MessageRenderContext> {
+        @Override
+        public void render(SpannableStringBuilder builder, MessageRenderContext renderContext) {
+            if (builder.length() > 0 && builder.charAt(builder.length() - 1) != '\n') {
+                builder.append('\n');
+            }
+            int start = builder.length();
+            if (getChildren() != null) {
+                for (Node<MessageRenderContext> child : getChildren()) child.render(builder, renderContext);
+            }
+            if (builder.length() == start) builder.append(' ');
+
+            Context context = renderContext.getContext();
+            builder.setSpan(
+                    new QuoteSpan(
+                            defaultQuoteColor(context),
+                            dp(context, 2),
+                            dp(context, 5)
+                    ),
+                    start,
+                    builder.length(),
+                    Spanned.SPAN_INCLUSIVE_INCLUSIVE
+            );
+            if (builder.length() == 0 || builder.charAt(builder.length() - 1) != '\n') {
+                builder.append('\n');
+            }
+        }
+    }
+
+    private static int themedColor(Context context, String attribute, int fallback) {
+        int id = Utils.getResId(attribute, "attr");
+        return id == 0 ? fallback : ColorCompat.getThemedColor(context, id);
     }
 
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> getParser() {
@@ -219,6 +466,7 @@ public final class MarkdownFix extends Plugin {
         parser.addRule(rules.createCodeBlockRule());
         parser.addRule(rules.createInlineCodeRule());
         parser.addRule(rules.createSpoilerRule());
+        parser.addRule(rules.createMaskedLinkRule());
         parser.addRule(rules.createUrlNoEmbedRule());
         parser.addRule(rules.createUrlRule());
         parser.addRule(rules.createCustomEmojiRule());
