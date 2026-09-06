@@ -296,7 +296,9 @@ public final class MarkdownFix extends Plugin {
             builder.append('\n');
         }
 
-        SpannableStringBuilder content = new SpannableStringBuilder();
+        // EmojiNode expects Discord's DraweeSpanStringBuilder when it renders
+        // custom emoji spans; a plain SpannableStringBuilder causes a cast crash.
+        DraweeSpanStringBuilder content = new DraweeSpanStringBuilder();
         Iterable<? extends Node> children = node.getChildren();
         if (children != null) {
             for (Node child : children) child.render(content, renderContext);

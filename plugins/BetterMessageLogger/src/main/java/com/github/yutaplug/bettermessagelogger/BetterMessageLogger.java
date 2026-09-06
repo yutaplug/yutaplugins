@@ -131,6 +131,32 @@ public class BetterMessageLogger extends Plugin {
             }
         }));
 
+        // The message action sheet uses the two-argument lookup. A deleted message is
+        // absent from Discord's live store by then, so give it back from our log for
+        // context-menu actions without changing the live pagination observable.
+        patcher.patch(StoreMessages.class, "observeMessagesForChannel",
+                new Class<?>[]{long.class, long.class}, new Hook(frame -> {
+            if (!(frame.getResult() instanceof Observable<?>)) return;
+            long channelId = (Long) frame.args[0];
+            long messageId = (Long) frame.args[1];
+            @SuppressWarnings("unchecked")
+            Observable<com.discord.models.message.Message> messages =
+                    (Observable<com.discord.models.message.Message>) (Observable<?>) frame.getResult();
+            frame.setResult(Observable.j(messages, revision,
+                    new Func2<com.discord.models.message.Message, Long, com.discord.models.message.Message>() {
+                        @Override
+                        public com.discord.models.message.Message call(
+                                com.discord.models.message.Message current, Long ignoredRevision) {
+                            if (current != null) return current;
+                            MessageRecord record = records.get(messageId);
+                            if (record == null || record.channelId != channelId
+                                    || (!record.deleted && !deletedMessageIds.contains(messageId))
+                                    || !shouldKeep(record)) return null;
+                            return record.toMessage();
+                        }
+                    }));
+        }));
+
         // Keep StoreMessages.observeMessagesForChannel untouched. Discord's message loader
         // uses that observable to calculate older/newer pagination and jump boundaries.
         // Restored database rows belong in the display model, not in those live boundaries.
