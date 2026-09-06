@@ -1,8 +1,10 @@
-version = "1.0.4"
+version = "1.0.5"
 description = "Backports Discord's newer Markdown formatting to chat messages."
 aliucord {
     changelog.set(
         """
+        # 1.0.5
+        * Fixed empty lines before headers and subtext
         # 1.0.4
         * List parsing now only applies at the start of a line
         # 1.0.3

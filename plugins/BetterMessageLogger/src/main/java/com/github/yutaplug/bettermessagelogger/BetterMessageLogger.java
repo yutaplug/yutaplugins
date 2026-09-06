@@ -21,6 +21,7 @@ import com.aliucord.Utils;
 import com.aliucord.annotations.AliucordPlugin;
 import com.aliucord.entities.Plugin;
 import com.aliucord.patcher.Hook;
+import com.aliucord.patcher.PreHook;
 import com.discord.api.utcdatetime.UtcDateTime;
 import com.discord.models.domain.ModelMessageDelete;
 import com.discord.stores.StoreMessages;
@@ -67,6 +68,8 @@ public class BetterMessageLogger extends Plugin {
     private final Map<Long, com.discord.models.message.Message> boundMessages = new ConcurrentHashMap<>();
     private final Map<WidgetChatListAdapterItemMessage, Long> boundMessageItems = new ConcurrentHashMap<>();
     private final Set<Long> deletedMessageIds = ConcurrentHashMap.newKeySet();
+    private final Set<Long> recentlyDeletedMessageIds = ConcurrentHashMap.newKeySet();
+    private final Map<Long, LoadedRange> loadedRanges = new ConcurrentHashMap<>();
     private final BehaviorSubject<Long> revision = BehaviorSubject.l0(0L);
     private final AtomicLong revisionNumber = new AtomicLong();
     private MessageLoggerDatabase database;
@@ -104,8 +107,20 @@ public class BetterMessageLogger extends Plugin {
             }
         }));
 
+        patcher.patch(StoreMessages.class, "handleMessageDelete", new Class<?>[]{ModelMessageDelete.class}, new PreHook(frame -> {
+            if (frame.thisObject instanceof StoreMessages && frame.args[0] instanceof ModelMessageDelete) {
+                captureMessageBeforeDelete((StoreMessages) frame.thisObject, (ModelMessageDelete) frame.args[0]);
+            }
+        }));
+
         patcher.patch(StoreMessages.class, "handleMessageDelete", new Class<?>[]{ModelMessageDelete.class}, new Hook(frame -> {
             if (frame.args[0] instanceof ModelMessageDelete) handleDeletedMessages((ModelMessageDelete) frame.args[0]);
+        }));
+
+        patcher.patch(StoreMessages.class, "handleMessagesLoaded", new Class<?>[]{StoreMessagesLoader.ChannelChunk.class}, new PreHook(frame -> {
+            if (frame.args[0] instanceof StoreMessagesLoader.ChannelChunk) {
+                resetLoadedRange((StoreMessagesLoader.ChannelChunk) frame.args[0]);
+            }
         }));
 
         patcher.patch(StoreMessages.class, "handleMessagesLoaded", new Class<?>[]{StoreMessagesLoader.ChannelChunk.class}, new Hook(frame -> {
@@ -158,7 +173,37 @@ public class BetterMessageLogger extends Plugin {
                     WidgetChatListActions sheet = (WidgetChatListActions) frame.thisObject;
                     if (!record.edits.isEmpty()) addHistoryAction(sheet, record);
                     if (record.deleted || !record.edits.isEmpty()) addDeleteAction(sheet, record);
-                }));
+        }));
+    }
+
+    private void captureMessageBeforeDelete(StoreMessages store, ModelMessageDelete event) {
+        List<Long> ids = event.getMessageIds();
+        if (ids == null) return;
+        for (Long id : ids) {
+            if (id == null) continue;
+            com.discord.models.message.Message live = null;
+            try {
+                live = store.getMessage(event.getChannelId(), id);
+            } catch (Throwable ignored) {
+                // The store can be unavailable while Discord is switching channels.
+            }
+            if (live == null) live = liveMessages.get(id);
+            if (live == null) live = boundMessages.get(id);
+            if (live == null) continue;
+
+            recentlyDeletedMessageIds.add(id);
+            remember(live);
+        }
+    }
+
+    private void resetLoadedRange(StoreMessagesLoader.ChannelChunk chunk) {
+        if (!chunk.isInitial() && !chunk.isJump()) return;
+        long channelId = chunk.getChannelId();
+        loadedRanges.remove(channelId);
+        for (Long id : new ArrayList<>(recentlyDeletedMessageIds)) {
+            MessageRecord record = records.get(id);
+            if (record == null || record.channelId == channelId) recentlyDeletedMessageIds.remove(id);
+        }
     }
 
     private void handleCreatedApiMessage(com.discord.api.message.Message message) {
@@ -212,6 +257,7 @@ public class BetterMessageLogger extends Plugin {
         for (Long id : ids) {
             if (id == null) continue;
             deletedMessageIds.add(id);
+            recentlyDeletedMessageIds.add(id);
             MessageRecord record = records.get(id);
             if (record == null) {
                 com.discord.models.message.Message live = liveMessages.get(id);
@@ -282,11 +328,23 @@ public class BetterMessageLogger extends Plugin {
                 newestLoadedId = Math.max(newestLoadedId, message.getId());
             }
         }
-        if (oldestLoadedId == Long.MAX_VALUE) return result;
+        LoadedRange loadedRange = loadedRanges.get(channelId);
+        if (oldestLoadedId != Long.MAX_VALUE) {
+            if (loadedRange == null) {
+                LoadedRange created = new LoadedRange();
+                LoadedRange existing = loadedRanges.putIfAbsent(channelId, created);
+                loadedRange = existing == null ? created : existing;
+            }
+            loadedRange.include(oldestLoadedId, newestLoadedId);
+        }
+
+        long restoredOldestId = loadedRange == null ? Long.MAX_VALUE : loadedRange.oldest();
+        long restoredNewestId = loadedRange == null ? Long.MIN_VALUE : loadedRange.newest();
 
         for (MessageRecord record : records.values()) {
+            boolean recentlyDeleted = recentlyDeletedMessageIds.contains(record.id);
             if (record.channelId != channelId || (!record.deleted && !deletedMessageIds.contains(record.id))
-                    || record.id < oldestLoadedId || record.id > newestLoadedId
+                    || (!recentlyDeleted && (record.id < restoredOldestId || record.id > restoredNewestId))
                     || !shouldKeep(record) || present.contains(record.id)) continue;
             result.add(record.toMessage());
         }
@@ -363,6 +421,7 @@ public class BetterMessageLogger extends Plugin {
         records.remove(id);
         liveMessages.remove(id);
         deletedMessageIds.remove(id);
+        recentlyDeletedMessageIds.remove(id);
         if (databaseEnabled && database != null) database.removeAsync(id);
     }
 
@@ -415,6 +474,8 @@ public class BetterMessageLogger extends Plugin {
         records.clear();
         liveMessages.clear();
         deletedMessageIds.clear();
+        recentlyDeletedMessageIds.clear();
+        loadedRanges.clear();
         if (database != null) database.clearAsync();
         bumpRevision();
         Utils.showToast("BetterMessageLogger database cleared");
@@ -765,6 +826,24 @@ public class BetterMessageLogger extends Plugin {
                     Collections.emptyList(), Collections.emptyList(),
                     null, null, null, Collections.emptyList(), null,
                     false, null, false, null, null, null, null, null, null);
+        }
+    }
+
+    private static final class LoadedRange {
+        private long oldest = Long.MAX_VALUE;
+        private long newest = Long.MIN_VALUE;
+
+        synchronized void include(long oldestId, long newestId) {
+            oldest = Math.min(oldest, oldestId);
+            newest = Math.max(newest, newestId);
+        }
+
+        synchronized long oldest() {
+            return oldest;
+        }
+
+        synchronized long newest() {
+            return newest;
         }
     }
 

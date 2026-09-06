@@ -71,9 +71,9 @@ public final class MarkdownFix extends Plugin {
     static final String DEFAULT_BULLET_COLOR = "#5865F2";
 
     private static final Pattern SUBTEXT_PATTERN =
-            Pattern.compile("^\\s*-#[ \\t]+(.*?)[ \\t]*(?=\\n|$)");
+            Pattern.compile("^[ \\t]*-#[ \\t]+(.*?)[ \\t]*(?=\\n|$)");
     private static final Pattern HEADER_PATTERN =
-            Pattern.compile("^\\s*(#{1,3})[ \\t]+(.*?)[ \\t]*(?=\\n|$)");
+            Pattern.compile("^[ \\t]*(#{1,3})[ \\t]+(.*?)[ \\t]*(?=\\n|$)");
     private static final Pattern ESCAPE_PATTERN =
             Pattern.compile("^\\\\([^0-9A-Za-z\\s])");
     private static final Pattern LIST_PATTERN =
