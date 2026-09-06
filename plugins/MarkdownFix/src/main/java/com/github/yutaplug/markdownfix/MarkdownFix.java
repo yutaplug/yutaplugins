@@ -644,7 +644,7 @@ public final class MarkdownFix extends Plugin {
     }
 
     private static final class ListRule
-            extends Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
+            extends Rule.BlockRule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
         private final SettingsAPI settings;
 
         private ListRule(SettingsAPI settings) {
@@ -688,7 +688,7 @@ public final class MarkdownFix extends Plugin {
     }
 
     private static final class ForumListRule
-            extends Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
+            extends Rule.BlockRule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
         private final SettingsAPI settings;
 
         private ForumListRule(SettingsAPI settings) {

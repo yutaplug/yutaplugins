@@ -324,8 +324,8 @@ public final class ProfileEffects extends Plugin {
 
             long type = number(item.get("type"), 0L);
             if (type == 1L) {
-                String staticFrame = string(item.get("staticFrameSrc"));
-                String reducedMotion = string(item.get("reducedMotionSrc"));
+                String staticFrame = cdnUrl(item.get("staticFrameSrc"));
+                String reducedMotion = cdnUrl(item.get("reducedMotionSrc"));
                 String fallback = firstEffectSource(item.get("effects"));
                 return Product.effect(
                         firstNonEmpty(reducedMotion, staticFrame, fallback),
@@ -439,6 +439,11 @@ public final class ProfileEffects extends Plugin {
                                                oldLeft, oldTop, oldRight, oldBottom) ->
                     resizeBoundedChild(host, header, overlay));
         }
+        if (content != null) {
+            content.addOnLayoutChangeListener((view, left, top, right, bottom,
+                                               oldLeft, oldTop, oldRight, oldBottom) ->
+                    resizeBoundedChild(host, header, overlay));
+        }
         header.post(() -> resizeBoundedChild(host, header, overlay));
     }
 
@@ -479,11 +484,11 @@ public final class ProfileEffects extends Plugin {
         int bottom = top + headerContainer.getHeight();
 
         View content = findAncestorByResourceName(header, "user_sheet_content");
-        View actions = content == null
-                ? null
-                : findDescendantByResourceName(content, "user_sheet_profile_actions_container");
-        if (actions != null && actions.getVisibility() != View.GONE && actions.getHeight() > 0) {
-            bottom = Math.max(bottom, relativeTop(actions, host) + actions.getHeight());
+        if (content != null && content.getHeight() > 0) {
+            // The fullscreen viewer is one scrollable profile card. Effects and
+            // frames must follow that complete card, not stop at the action row.
+            top = relativeTop(content, host);
+            bottom = top + content.getHeight();
         }
         return new ProfileBounds(Math.max(0, top), Math.max(0, bottom - top));
     }
@@ -572,20 +577,35 @@ public final class ProfileEffects extends Plugin {
             if (object == null) continue;
             Long id = numberOrNull(object.get("id"));
             if (id == null) continue;
+            String anchor = string(object.get("anchor"));
+            boolean responsive = booleanValue(object.get("responsive"));
             layers.add(new FrameLayer(
                     id,
                     "front".equalsIgnoreCase(string(object.get("order"))),
-                    "bottom".equalsIgnoreCase(string(object.get("anchor")))
+                    isBottomAnchor(anchor),
+                    // Only the explicit API flag means that a layer is meant to
+                    // resize with the full profile. Anchor names describe where
+                    // a normal layer is placed; treating center/middle as a
+                    // stretch instruction distorts decorative borders and can
+                    // turn an internal artwork edge into a white horizontal bar.
+                    responsive
             ));
         }
         return layers;
+    }
+
+    private static boolean isBottomAnchor(String anchor) {
+        if ("bottom".equalsIgnoreCase(anchor)) return true;
+        // Current collectibles responses encode TOP/BOTTOM as numeric enum
+        // values. TOP is 0 and BOTTOM is 1; older responses used the names.
+        return numberOrNull(anchor) != null && numberOrNull(anchor) == 1L;
     }
 
     private static String firstEffectSource(Object raw) {
         for (Object value : asList(raw)) {
             Map<?, ?> effect = asMap(value);
             if (effect == null) continue;
-            String source = string(effect.get("src"));
+            String source = cdnUrl(effect.get("src"));
             if (!source.isEmpty()) return source;
         }
         return "";
@@ -596,7 +616,7 @@ public final class ProfileEffects extends Plugin {
         for (Object value : asList(raw)) {
             Map<?, ?> object = asMap(value);
             if (object == null) continue;
-            String source = string(object.get("src"));
+            String source = cdnUrl(object.get("src"));
             if (source.isEmpty()) continue;
 
             Map<?, ?> position = asMap(object.get("position"));
@@ -613,6 +633,13 @@ public final class ProfileEffects extends Plugin {
         }
         effects.sort(Comparator.comparingLong(effect -> effect.zIndex));
         return effects;
+    }
+
+    private static String cdnUrl(Object raw) {
+        String source = string(raw).trim();
+        if (source.startsWith("//")) return "https:" + source;
+        if (source.startsWith("/")) return CDN + source;
+        return source;
     }
 
     private static String firstNonEmpty(String... values) {
@@ -785,11 +812,13 @@ public final class ProfileEffects extends Plugin {
         private final long id;
         private final boolean front;
         private final boolean bottom;
+        private final boolean stretchesToProfile;
 
-        private FrameLayer(long id, boolean front, boolean bottom) {
+        private FrameLayer(long id, boolean front, boolean bottom, boolean stretchesToProfile) {
             this.id = id;
             this.front = front;
             this.bottom = bottom;
+            this.stretchesToProfile = stretchesToProfile;
         }
     }
 
@@ -894,10 +923,17 @@ public final class ProfileEffects extends Plugin {
             int layerWidth = Math.round(
                     (metrics.innerWidth + 2f * metrics.overflowHorizontal) * scale);
             for (FrameLayerView layerView : layerViews) {
-                int height = layerView.imageWidth > 0 && layerView.imageHeight > 0
-                        ? Math.max(1, Math.round(layerWidth
-                        * (layerView.imageHeight / (float) layerView.imageWidth)))
-                        : Math.max(1, Math.round(layerWidth * 0.75f));
+                int height;
+                if (layerView.layer.stretchesToProfile) {
+                    // Discord's rail/border layer is full-height in the web
+                    // renderer; the source bitmap is not its intended card height.
+                    height = Math.max(1, getHeight());
+                } else {
+                    height = layerView.imageWidth > 0 && layerView.imageHeight > 0
+                            ? Math.max(1, Math.round(layerWidth
+                            * (layerView.imageHeight / (float) layerView.imageWidth)))
+                            : Math.max(1, Math.round(layerWidth * 0.75f));
+                }
                 FrameLayout.LayoutParams params = (FrameLayout.LayoutParams)
                         layerView.image.getLayoutParams();
                 params.width = layerWidth;
@@ -907,6 +943,10 @@ public final class ProfileEffects extends Plugin {
                     params.gravity = Gravity.BOTTOM;
                     params.bottomMargin = -Math.round(metrics.overflowBottom * scale);
                     params.topMargin = 0;
+                } else if (layerView.layer.stretchesToProfile) {
+                    params.gravity = Gravity.TOP;
+                    params.topMargin = 0;
+                    params.bottomMargin = 0;
                 } else {
                     params.gravity = Gravity.TOP;
                     params.topMargin = -Math.round(metrics.overflowTop * scale);
@@ -983,9 +1023,8 @@ public final class ProfileEffects extends Plugin {
 
         private void restartAnimation() {
             if (webView == null || effect == null || effect.effectLayers.isEmpty()) return;
-            // Keep the already-loaded WebView and reset its image elements instead of
-            // reloading the page. A full reload makes every APNG layer wait on the CDN
-            // again when the same profile sheet is opened a second time.
+            // Resume and restart the already-created image elements. Reloading the
+            // document here makes the fullscreen sheet wait for every CDN asset again.
             webView.onResume();
             webView.resumeTimers();
             webView.evaluateJavascript(
@@ -999,23 +1038,24 @@ public final class ProfileEffects extends Plugin {
             if (effect == null || effect.effectSource.isEmpty()) return;
 
             if (!effect.effectLayers.isEmpty()) {
-                addStaticEffectLayer(effect);
-                webView = new WebView(getContext());
-                webView.setBackgroundColor(Color.TRANSPARENT);
-                webView.setAlpha(1f);
-                webView.setClickable(false);
-                webView.setFocusable(false);
-                webView.setVerticalScrollBarEnabled(false);
-                webView.setHorizontalScrollBarEnabled(false);
-                webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
-                webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-                webView.getSettings().setJavaScriptEnabled(true);
-                webView.getSettings().setDomStorageEnabled(false);
-                webView.getSettings().setLoadsImagesAutomatically(true);
-                webView.getSettings().setSupportZoom(false);
-                addView(webView, new FrameLayout.LayoutParams(
+                WebView view = new WebView(getContext());
+                view.setBackgroundColor(Color.TRANSPARENT);
+                view.setAlpha(1f);
+                view.setClickable(false);
+                view.setFocusable(false);
+                view.setVerticalScrollBarEnabled(false);
+                view.setHorizontalScrollBarEnabled(false);
+                view.setOverScrollMode(View.OVER_SCROLL_NEVER);
+                // Chromium is required for animated APNG effect layers.
+                view.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                view.getSettings().setJavaScriptEnabled(true);
+                view.getSettings().setDomStorageEnabled(false);
+                view.getSettings().setLoadsImagesAutomatically(true);
+                view.getSettings().setSupportZoom(false);
+                addView(view, new FrameLayout.LayoutParams(
                         LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
-                webView.loadDataWithBaseURL(
+                webView = view;
+                view.loadDataWithBaseURL(
                         CDN + "/",
                         effectHtml(effect),
                         "text/html",
@@ -1054,37 +1094,6 @@ public final class ProfileEffects extends Plugin {
                     });
         }
 
-        private void addStaticEffectLayer(Product effect) {
-            SimpleDraweeView image = new SimpleDraweeView(getContext());
-            image.setAdjustViewBounds(true);
-            image.setScaleType(ImageView.ScaleType.FIT_XY);
-            image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            addView(image, new FrameLayout.LayoutParams(
-                    LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-            MGImages.setImage(image, Collections.singletonList(effect.effectSource),
-                    0,
-                    0,
-                    false,
-                    null,
-                    MGImages.AlwaysUpdateChangeDetector.INSTANCE,
-                    new c<ImageInfo>() {
-                        @Override
-                        public void onFinalImageSet(String id, ImageInfo info, Animatable animatable) {
-                            updateAspectRatio(image, info);
-                        }
-
-                        @Override
-                        public void onIntermediateImageSet(String id, ImageInfo info) {
-                            updateAspectRatio(image, info);
-                        }
-
-                        @Override
-                        public void onFailure(String id, Throwable error) {
-                            Log.e(TAG, "Static effect image failed: " + id, error);
-                        }
-                    });
-        }
-
         private static void updateAspectRatio(SimpleDraweeView image, ImageInfo info) {
             if (info != null && info.getWidth() > 0 && info.getHeight() > 0) {
                 image.setAspectRatio(info.getWidth() / (float) info.getHeight());
@@ -1104,8 +1113,8 @@ public final class ProfileEffects extends Plugin {
                             + ".effect{position:absolute;left:0;top:0;width:100%;"
                             + "height:auto;display:block;}"
                             + "</style>");
-            // Fetch every layer while the first layer is decoding so later skull
-            // layers do not wait for a separate network request.
+            // Fetch every layer while the first layer is decoding so later animated
+            // layers do not wait for a separate request.
             for (EffectLayer layer : effect.effectLayers) {
                 html.append("<link rel=\"preload\" as=\"image\" href=\"")
                         .append(htmlEscape(layer.source))
@@ -1119,9 +1128,8 @@ public final class ProfileEffects extends Plugin {
                         .append(layer.start)
                         .append("\"");
                 if (layer.start == 0L) {
-                    // Put the first layer directly on the element so Chromium starts
-                    // decoding it while parsing the document, instead of waiting for
-                    // the JavaScript timer to run after the first layout pass.
+                    // Start the first layer during initial document parsing so the
+                    // fullscreen sheet does not show a blank animation surface.
                     html.append(" src=\"")
                             .append(htmlEscape(layer.source))
                             .append("\"");
@@ -1164,5 +1172,6 @@ public final class ProfileEffects extends Plugin {
                     .replace(">", "&gt;")
                     .replace("'", "&#39;");
         }
+
     }
 }
