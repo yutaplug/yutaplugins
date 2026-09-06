@@ -668,24 +668,15 @@ public final class MarkdownFix extends Plugin {
                     new ConfigurableBulletNode<>(nestedLevel, includesNewline, settings);
 
             String body = matcher.group(2);
-            if (BLOCK_LIST_BODY_PATTERN.matcher(body).matches()) {
-                // A list item's body is parsed before the outer parser advances past
-                // the list marker. Parse block syntax with a fresh parser so the
-                // block-only header and subtext rules see a true line start.
-                Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> bodyParser =
-                        createParser(settings);
-                for (Node<MessageRenderContext> child : bodyParser.parse(body, state)) {
-                    node.addChild(child);
-                }
-                return new ParseSpec<>(node, state);
+            // Parse every item body with a fresh parser. This prevents the child
+            // parser's last match from blocking the next consecutive list item,
+            // while the BlockRule keeps hyphens in ordinary inline text intact.
+            Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> bodyParser =
+                    createParser(settings);
+            for (Node<MessageRenderContext> child : bodyParser.parse(body, state)) {
+                node.addChild(child);
             }
-
-            return new ParseSpec<>(
-                    node,
-                    state,
-                    matcher.start(2),
-                    matcher.end(2)
-            );
+            return new ParseSpec<>(node, state);
         }
     }
 
@@ -710,7 +701,13 @@ public final class MarkdownFix extends Plugin {
             ConfigurableBulletNode<MessageRenderContext> node =
                     new ConfigurableBulletNode<>(nestedLevel, includesNewline, settings);
 
-            return new ParseSpec<>(node, state, matcher.start(2), matcher.end(2));
+            String body = matcher.group(2);
+            Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> bodyParser =
+                    createParser(settings);
+            for (Node<MessageRenderContext> child : bodyParser.parse(body, state)) {
+                node.addChild(child);
+            }
+            return new ParseSpec<>(node, state);
         }
     }
 

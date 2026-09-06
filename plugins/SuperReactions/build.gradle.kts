@@ -1,8 +1,12 @@
-version = "1.0.4"
+version = "1.0.5"
 description = "Backport super reactions."
 aliucord {
     changelog.set(
         """
+        # 1.0.5
+        * Reduce reaction metadata requests to avoid Discord rate limits on messages with many reactions
+        * Add rate-limit backoff and stop retrying alternate send endpoints after HTTP 429
+        * Fix existing super-reaction counts resetting after sending a new super reaction
         # 1.0.4
         * Fix shine not applying sometimes
         * Fix not being able to remove a super-reaction sent from official Discord

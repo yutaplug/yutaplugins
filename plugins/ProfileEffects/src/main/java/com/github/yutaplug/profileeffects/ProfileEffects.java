@@ -423,7 +423,10 @@ public final class ProfileEffects extends Plugin {
             params = new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, bounds.height);
         }
-        host.addView(overlay, host.getChildCount(), params);
+        // Back frame layers belong behind the native profile content.
+        // Appending them made the side rails cover the banner; front layers remain above
+        // the content so the decorative top piece is still visible.
+        host.addView(overlay, back ? 0 : host.getChildCount(), params);
         View content = findAncestorByResourceName(header, "user_sheet_content");
         View actions = content == null
                 ? null
@@ -577,21 +580,30 @@ public final class ProfileEffects extends Plugin {
             if (object == null) continue;
             Long id = numberOrNull(object.get("id"));
             if (id == null) continue;
-            String anchor = string(object.get("anchor"));
-            boolean responsive = booleanValue(object.get("responsive"));
+            String type = string(object.get("type"));
+            if (type.isEmpty()) type = string(object.get("layer_type"));
+            String anchor = normalizeFrameAnchor(object.get("anchor"));
+            String order = string(object.get("order"));
+            boolean front = "front".equalsIgnoreCase(order) || "0".equals(order);
             layers.add(new FrameLayer(
                     id,
-                    "front".equalsIgnoreCase(string(object.get("order"))),
+                    front,
+                    type,
+                    anchor,
                     isBottomAnchor(anchor),
-                    // Only the explicit API flag means that a layer is meant to
-                    // resize with the full profile. Anchor names describe where
-                    // a normal layer is placed; treating center/middle as a
-                    // stretch instruction distorts decorative borders and can
-                    // turn an internal artwork edge into a white horizontal bar.
-                    responsive
+                    booleanValue(object.get("responsive"))
             ));
         }
         return layers;
+    }
+
+    private static String normalizeFrameAnchor(Object raw) {
+        String anchor = string(raw).toLowerCase();
+        if ("0".equals(anchor)) return "top";
+        if ("1".equals(anchor)) return "bottom";
+        if ("2".equals(anchor)) return "center";
+        if ("middle".equals(anchor)) return "center";
+        return anchor;
     }
 
     private static boolean isBottomAnchor(String anchor) {
@@ -811,14 +823,19 @@ public final class ProfileEffects extends Plugin {
     private static final class FrameLayer {
         private final long id;
         private final boolean front;
+        private final String type;
+        private final String anchor;
         private final boolean bottom;
-        private final boolean stretchesToProfile;
+        private final boolean responsive;
 
-        private FrameLayer(long id, boolean front, boolean bottom, boolean stretchesToProfile) {
+        private FrameLayer(long id, boolean front, String type, String anchor, boolean bottom,
+                           boolean responsive) {
             this.id = id;
             this.front = front;
+            this.type = type;
+            this.anchor = anchor;
             this.bottom = bottom;
-            this.stretchesToProfile = stretchesToProfile;
+            this.responsive = responsive;
         }
     }
 
@@ -873,10 +890,12 @@ public final class ProfileEffects extends Plugin {
                 List<FrameLayer> layers = new ArrayList<>(frame.frameLayers);
                 layers.sort(Comparator.comparing(layer -> layer.front));
                 for (FrameLayer layer : layers) {
-                    // The native sheet does not have the web client's full-card frame
-                    // container. The bottom staple would otherwise become a large rail
-                    // over the profile body, so keep the reliable top frame only.
-                    if (!layer.bottom && layer.front == front) addFrameLayer(frame, layer);
+                    // Keep the top/rail layers. A bottom staple belongs to the web
+                    // profile footer and is intentionally not drawn in the native sheet.
+                    if (layer.front == front
+                            && !("staple".equals(layer.type) && layer.bottom)) {
+                        addFrameLayer(frame, layer);
+                    }
                 }
             }
             layoutLayers();
@@ -924,9 +943,8 @@ public final class ProfileEffects extends Plugin {
                     (metrics.innerWidth + 2f * metrics.overflowHorizontal) * scale);
             for (FrameLayerView layerView : layerViews) {
                 int height;
-                if (layerView.layer.stretchesToProfile) {
-                    // Discord's rail/border layer is full-height in the web
-                    // renderer; the source bitmap is not its intended card height.
+                if ("border".equals(layerView.layer.type)) {
+                    // Discord repeats border layers to fill the frame container.
                     height = Math.max(1, getHeight());
                 } else {
                     height = layerView.imageWidth > 0 && layerView.imageHeight > 0
@@ -939,14 +957,22 @@ public final class ProfileEffects extends Plugin {
                 params.width = layerWidth;
                 params.height = height;
                 params.leftMargin = -Math.round(metrics.overflowHorizontal * scale);
-                if (layerView.layer.bottom) {
+                if ("rail".equals(layerView.layer.type)) {
+                    // Rails are full-frame background layers. Discord uses the
+                    // layer's anchor as background-position, not as a stretch flag.
+                    if ("bottom".equals(layerView.layer.anchor)) {
+                        params.gravity = Gravity.BOTTOM;
+                    } else if ("center".equals(layerView.layer.anchor)) {
+                        params.gravity = Gravity.CENTER_VERTICAL;
+                    } else {
+                        params.gravity = Gravity.TOP;
+                    }
+                    params.topMargin = 0;
+                    params.bottomMargin = 0;
+                } else if (layerView.layer.bottom) {
                     params.gravity = Gravity.BOTTOM;
                     params.bottomMargin = -Math.round(metrics.overflowBottom * scale);
                     params.topMargin = 0;
-                } else if (layerView.layer.stretchesToProfile) {
-                    params.gravity = Gravity.TOP;
-                    params.topMargin = 0;
-                    params.bottomMargin = 0;
                 } else {
                     params.gravity = Gravity.TOP;
                     params.topMargin = -Math.round(metrics.overflowTop * scale);

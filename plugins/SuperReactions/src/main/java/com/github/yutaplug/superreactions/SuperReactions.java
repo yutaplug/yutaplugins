@@ -103,6 +103,7 @@ public class SuperReactions extends Plugin {
             manageReactionItemTypes = new IdentityHashMap<>();
     private final Map<Long, Long> superReactionFetchTimes = new ConcurrentHashMap<>();
     private final Set<Long> superReactionFetches = ConcurrentHashMap.newKeySet();
+    private final Map<Long, Long> superReactionInvalidationVersions = new ConcurrentHashMap<>();
     private final Map<String, Long> burstCheckTimes = new ConcurrentHashMap<>();
     private final Set<String> burstChecks = ConcurrentHashMap.newKeySet();
     private final Set<String> knownNormalReactions = ConcurrentHashMap.newKeySet();
@@ -114,11 +115,14 @@ public class SuperReactions extends Plugin {
     private final Map<String, List<MGRecyclerDataPayload>> normalReactionItems = new ConcurrentHashMap<>();
     private final Set<String> burstUserFetches = ConcurrentHashMap.newKeySet();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private volatile long discordRateLimitUntil;
     private SharedPreferences ownedReactionPreferences;
     private String ownedReactionPreferencesKey;
+    private volatile boolean running;
 
     @Override
     public void start(android.content.Context context) throws Throwable {
+        running = true;
         ownedSuperReactions.clear();
         long currentUserId = getCurrentUserId();
         ownedReactionPreferences = context.getSharedPreferences("SuperReactions", android.content.Context.MODE_PRIVATE);
@@ -290,10 +294,6 @@ public class SuperReactions extends Plugin {
                     setReactionMeState(reactionView, messageId, reaction, isSuperReaction);
                     styleReactionView(reactionView, messageId, key,
                             isSuperReaction, burstCount);
-                    Long channelId = reactionChannels.get(messageId);
-                    if (burstCount == null && channelId != null) {
-                        checkBurstReaction(channelId, messageId, reaction.b());
-                    }
                     reactionView.post(() -> {
                         MessageReaction currentReaction = reactionView.getReaction();
                         String currentKey = currentReaction == null || currentReaction.b() == null
@@ -449,16 +449,7 @@ public class SuperReactions extends Plugin {
                             invalidateSuperReactionCache(
                                     reactionUpdate.c(), reactionUpdate.a(),
                                     hasLocalSuperReaction(reactionUpdate.c()));
-                            if (isAdd && reactionUpdate.b() != null) {
-                                // A reaction view is not guaranteed to be
-                                // rebound for a gateway count update. Probe
-                                // the typed endpoint directly so an official
-                                // client's new burst is styled immediately.
-                                reactionChannels.put(
-                                        reactionUpdate.c(), reactionUpdate.a());
-                                checkBurstReaction(
-                                        reactionUpdate.a(), reactionUpdate.c(), reactionUpdate.b());
-                            }
+
                         }
                     }
                 })
@@ -570,6 +561,31 @@ public class SuperReactions extends Plugin {
         return newDiscordV10Request(route, "GET");
     }
 
+    private boolean isDiscordRateLimited() {
+        return System.currentTimeMillis() < discordRateLimitUntil;
+    }
+
+    private void noteDiscordRateLimit(Http.Request request, Http.Response response) {
+        if (response == null || response.statusCode != 429) return;
+
+        long delayMs = 5_000L;
+        try {
+            String retryAfter = request.conn.getHeaderField("Retry-After");
+            if (retryAfter != null) {
+                double seconds = Double.parseDouble(retryAfter.trim());
+                if (seconds >= 0.0) {
+                    delayMs = Math.max(1_000L,
+                            Math.min(60_000L, (long) Math.ceil(seconds * 1000.0)));
+                }
+            }
+        } catch (Throwable ignored) {
+            // Keep the conservative fallback when the header is unavailable.
+        }
+
+        long newLimit = System.currentTimeMillis() + delayMs;
+        if (newLimit > discordRateLimitUntil) discordRateLimitUntil = newLimit;
+    }
+
     private boolean hasNitro() {
         try {
             return UserUtils.INSTANCE.isPremium(StoreStream.Companion.getUsers().getMe());
@@ -641,11 +657,8 @@ public class SuperReactions extends Plugin {
             // The legacy model cannot distinguish burst reactions. Query the
             // typed endpoint only when the burst tab is actually selected.
             fetchBurstReactionUsers(target);
-            fetchSuperReactionMetadata(channelId, messageId);
-        } else {
-            checkBurstReaction(channelId, messageId, emoji);
-            fetchSuperReactionMetadata(channelId, messageId);
         }
+        fetchSuperReactionMetadata(channelId, messageId);
     }
 
     private String normalCacheKey(ManageReactionTarget target) {
@@ -1142,7 +1155,7 @@ public class SuperReactions extends Plugin {
     }
 
     private void fetchSuperReactionMetadata(long channelId, long messageId) {
-        if (channelId == 0L || messageId == 0L) return;
+        if (!running || isDiscordRateLimited() || channelId == 0L || messageId == 0L) return;
 
         long now = System.currentTimeMillis();
         Long lastFetch = superReactionFetchTimes.get(messageId);
@@ -1155,10 +1168,12 @@ public class SuperReactions extends Plugin {
             // even when its authenticated channel-message request is allowed.
             // Fetch the message through the normal list route instead; the
             // response contains the same count_details/me_burst fields.
+            long fetchVersion = superReactionInvalidationVersions.getOrDefault(messageId, 0L);
             try (Http.Request request = newDiscordV10Request(
                     "/channels/" + channelId + "/messages?around=" + messageId + "&limit=1")) {
                 Http.Response response = request.execute();
                 if (!response.ok()) {
+                    noteDiscordRateLimit(request, response);
                     throw new IllegalStateException("HTTP " + response.statusCode
                             + " " + response.statusMessage);
                 }
@@ -1169,12 +1184,11 @@ public class SuperReactions extends Plugin {
                 }
                 Map<String, Integer> loadedCounts = loadSuperReactionCounts(
                         channelId, messageId, messageBody);
-                superReactionCounts.compute(messageId, (ignored, currentCounts) -> {
-                    Map<String, Integer> mergedCounts = new ConcurrentHashMap<>();
-                    if (currentCounts != null) mergedCounts.putAll(currentCounts);
-                    mergedCounts.putAll(loadedCounts);
-                    return mergedCounts;
-                });
+                // The response is authoritative for server-side burst counts.
+                // Replacing the cache also removes a burst that disappeared;
+                // locally sent bursts remain visible through
+                // getSuperReactionCount() until Discord confirms their state.
+                superReactionCounts.put(messageId, new ConcurrentHashMap<>(loadedCounts));
                 // A previous bind can have recorded this emoji as normal. The
                 // metadata response is authoritative, so let the next style
                 // pass derive the type from the refreshed counts.
@@ -1188,6 +1202,15 @@ public class SuperReactions extends Plugin {
                 logger.error("Could not load Super Reaction metadata", error);
             } finally {
                 superReactionFetches.remove(messageId);
+                // A reaction event may have invalidated this request while it
+                // was in flight. Fetch once more so a busy message settles on
+                // the latest counts instead of waiting for the next bind.
+                long currentVersion = superReactionInvalidationVersions
+                        .getOrDefault(messageId, 0L);
+                if (running && fetchVersion != currentVersion) {
+                    superReactionFetchTimes.remove(messageId);
+                    mainHandler.post(() -> fetchSuperReactionMetadata(channelId, messageId));
+                }
             }
         }, "SuperReactionsMetadata").start();
     }
@@ -1211,6 +1234,11 @@ public class SuperReactions extends Plugin {
         Map<String, Integer> result = new HashMap<>();
         Map<?, ?> message = GsonUtils.fromJson(body, Map.class);
         if (message == null) return result;
+
+        // These maps are rebuilt from the same message response. Leaving old
+        // entries behind makes a removed burst look present after refresh.
+        normalReactionCounts.remove(messageId);
+        superReactionColors.remove(messageId);
 
         Object rawReactions = message.get("reactions");
         if (!(rawReactions instanceof List<?>)) return result;
@@ -1335,15 +1363,10 @@ public class SuperReactions extends Plugin {
     }
 
     private Map<String, Integer> loadSuperReactionCounts(long channelId, long messageId, String body) {
-        Map<String, Integer> result = parseSuperReactionCounts(messageId, body);
-        for (ReactionDescriptor reaction : parseReactionDescriptors(body)) {
-            if (getSuperReactionCount(result, reaction.key) != null) continue;
-            if (hasBurstUsers(channelId, messageId, reaction.apiKey)) {
-                result.put(reaction.key, 1);
-                result.put(normalizeReactionKey(reaction.key), 1);
-            }
-        }
-        return result;
+        // The message response already contains count_details for every
+        // reaction on Discord 126.21. Avoid one typed users request per emoji;
+        // that request fan-out is what causes 429s on busy messages.
+        return parseSuperReactionCounts(messageId, body);
     }
 
     private List<ReactionDescriptor> parseReactionDescriptors(String body) {
@@ -1386,6 +1409,12 @@ public class SuperReactions extends Plugin {
 
     private Integer getSuperReactionCount(long messageId, String reactionKey) {
         if (reactionKey == null) return null;
+
+        // A local send is only an optimistic fallback. Prefer the cached/server
+        // total so sending a burst reaction does not reset an existing count to 1.
+        Integer knownCount = getSuperReactionCount(superReactionCounts.get(messageId), reactionKey);
+        if (knownCount != null) return knownCount;
+
         if (locallySentSuperReactions.contains(localReactionKey(messageId, reactionKey))
                 || locallySentSuperReactions.contains(
                 localReactionKey(messageId, normalizeReactionKey(reactionKey)))
@@ -1395,7 +1424,7 @@ public class SuperReactions extends Plugin {
                 localReactionKey(messageId, normalizeReactionKey(displayReactionKey(reactionKey))))) {
             return 1;
         }
-        return getSuperReactionCount(superReactionCounts.get(messageId), reactionKey);
+        return null;
     }
 
     private Integer getSuperReactionCount(Map<String, Integer> counts, String reactionKey) {
@@ -1532,11 +1561,10 @@ public class SuperReactions extends Plugin {
     private void invalidateSuperReactionCache(long messageId, long channelId, boolean keepLocalOwnership) {
         if (messageId == 0L) return;
         if (channelId != 0L) reactionChannels.put(messageId, channelId);
-        superReactionCounts.remove(messageId);
-        normalReactionCounts.remove(messageId);
-        superReactionColors.remove(messageId);
-        reactionDisplayTypes.remove(messageId);
-        expandedReactionTypes.remove(messageId);
+        superReactionInvalidationVersions.merge(messageId, 1L, Long::sum);
+        // Keep the last known metadata while the replacement request is in
+        // flight. Clearing it here makes every existing pill temporarily look
+        // normal and leaves duplicate mixed-reaction views stale on screen.
         superReactionFetchTimes.remove(messageId);
         String cachePrefix = messageId + ":";
         boolean removedOwnedReaction = false;
@@ -1571,19 +1599,18 @@ public class SuperReactions extends Plugin {
     }
 
     private void refreshSuperReactionStyles(long messageId) {
-        boolean hasMixedReaction = hasMixedReaction(messageId);
         synchronized (visibleReactionItems) {
             for (Map.Entry<WidgetChatListAdapterItemReactions, Long> entry : visibleReactionItems.entrySet()) {
-                if (messageId == entry.getValue()) {
-                    WidgetChatListAdapterItemReactions item = entry.getKey();
-                    if (hasMixedReaction) {
-                        ReactionsEntry reactionsEntry = visibleReactionEntries.get(item);
-                        Integer position = visibleReactionPositions.get(item);
-                        if (reactionsEntry != null && position != null) {
-                            item.onConfigure(position, reactionsEntry);
-                            continue;
-                        }
-                    }
+                if (messageId != entry.getValue()) continue;
+
+                WidgetChatListAdapterItemReactions item = entry.getKey();
+                ReactionsEntry reactionsEntry = visibleReactionEntries.get(item);
+                Integer position = visibleReactionPositions.get(item);
+                if (reactionsEntry != null && position != null) {
+                    // Rebind from the original entry so stale duplicate views
+                    // are removed when a mixed reaction becomes single-type.
+                    item.onConfigure(position, reactionsEntry);
+                } else {
                     applySuperReactionStyles(item, messageId);
                 }
             }
@@ -1647,10 +1674,7 @@ public class SuperReactions extends Plugin {
                     ? expandedType : burstCount != null && burstCount > 0;
             setReactionMeState(reactionView, messageId, reaction, isSuper);
             styleReactionView(reactionView, messageId, key, isSuper, burstCount);
-            Long channelId = reactionChannels.get(messageId);
-            if (burstCount == null && channelId != null && reaction != null) {
-                checkBurstReaction(channelId, messageId, reaction.b());
-            }
+
         }
     }
 
@@ -1846,12 +1870,17 @@ public class SuperReactions extends Plugin {
     private void sendSuperReaction(long channelId, long messageId, String reactionKey) {
         new Thread(() -> {
             try {
+                if (isDiscordRateLimited()) {
+                    throw new IllegalStateException("Discord is temporarily rate limited");
+                }
+
                 String[] sendTargets = {
                         "/@me?location=Message%20Inline%20Button&type=1",
                         "/1/@me?location=Message%20Inline%20Button&burst=true",
                         "/@me?burst=true"
                 };
                 boolean sent = false;
+                int lastStatus = 0;
                 for (String sendTarget : sendTargets) {
                     try (Http.Request request = newDiscordV10Request(
                             "/channels/" + channelId
@@ -1860,6 +1889,11 @@ public class SuperReactions extends Plugin {
                                     + sendTarget,
                             "PUT")) {
                         Http.Response response = request.execute();
+                        lastStatus = response.statusCode;
+                        if (response.statusCode == 429) {
+                            noteDiscordRateLimit(request, response);
+                            throw new IllegalStateException("HTTP 429 " + response.statusMessage);
+                        }
                         if (response.ok()) {
                             sent = true;
                             break;
@@ -1867,7 +1901,8 @@ public class SuperReactions extends Plugin {
                     }
                 }
                 if (!sent) {
-                    throw new IllegalStateException("Discord did not add the Super Reaction");
+                    throw new IllegalStateException("Discord did not add the Super Reaction"
+                            + (lastStatus == 0 ? "" : " (HTTP " + lastStatus + ")"));
                 }
                 locallySentSuperReactions.add(localReactionKey(messageId, reactionKey));
                 locallySentSuperReactions.add(localReactionKey(messageId, displayReactionKey(reactionKey)));
@@ -2125,6 +2160,7 @@ public class SuperReactions extends Plugin {
 
     @Override
     public void stop(android.content.Context context) {
+        running = false;
         patcher.unpatchAll();
         mainHandler.removeCallbacksAndMessages(null);
         synchronized (superReactionButtons) {
@@ -2159,6 +2195,7 @@ public class SuperReactions extends Plugin {
         expandedReactionTypes.clear();
         superReactionFetchTimes.clear();
         superReactionFetches.clear();
+        superReactionInvalidationVersions.clear();
         knownNormalReactions.clear();
         locallySentSuperReactions.clear();
         ownedSuperReactions.clear();
