@@ -987,6 +987,16 @@ public final class ProfileEffects extends Plugin {
     private static final class EffectOverlay extends TouchThroughFrameLayout {
         private Product effect;
         private WebView webView;
+        private boolean rebuildOnAttach;
+        private final Runnable restartTask = () -> {
+            if (getWindowToken() == null || getWindowVisibility() != View.VISIBLE) return;
+            if (rebuildOnAttach) {
+                rebuildOnAttach = false;
+                rebuild();
+            } else {
+                restartAnimationNow();
+            }
+        };
 
         private EffectOverlay(Context context) {
             super(context);
@@ -1003,17 +1013,24 @@ public final class ProfileEffects extends Plugin {
         @Override
         protected void onAttachedToWindow() {
             super.onAttachedToWindow();
-            restartAnimation();
+            scheduleRestart(false);
         }
 
         @Override
         protected void onWindowVisibilityChanged(int visibility) {
             super.onWindowVisibilityChanged(visibility);
-            if (visibility == View.VISIBLE && getWindowToken() != null) restartAnimation();
+            if (visibility == View.VISIBLE) {
+                scheduleRestart(false);
+            } else {
+                rebuildOnAttach = true;
+                removeCallbacks(restartTask);
+            }
         }
 
         @Override
         protected void onDetachedFromWindow() {
+            rebuildOnAttach = true;
+            removeCallbacks(restartTask);
             if (webView != null) {
                 webView.onPause();
                 webView.pauseTimers();
@@ -1022,19 +1039,39 @@ public final class ProfileEffects extends Plugin {
         }
 
         private void restartAnimation() {
+            scheduleRestart(false);
+        }
+
+        private void scheduleRestart(boolean recreate) {
+            if (recreate) rebuildOnAttach = true;
+            removeCallbacks(restartTask);
+            postDelayed(restartTask, 120L);
+        }
+
+        private void restartAnimationNow() {
             if (webView == null || effect == null || effect.effectLayers.isEmpty()) return;
             // Resume and restart the already-created image elements. Reloading the
             // document here makes the fullscreen sheet wait for every CDN asset again.
             webView.onResume();
             webView.resumeTimers();
-            webView.evaluateJavascript(
-                    "(function(){if(window.restartEffects)window.restartEffects();})();",
-                    null);
+            webView.postDelayed(() -> {
+                if (webView != null && getWindowToken() != null
+                        && getWindowVisibility() == View.VISIBLE) {
+                    webView.evaluateJavascript(
+                            "(function(){if(window.restartEffects)window.restartEffects();})();",
+                            null);
+                }
+            }, 50L);
         }
 
         private void rebuild() {
+            if (webView != null) {
+                webView.stopLoading();
+                webView.onPause();
+                webView.destroy();
+                webView = null;
+            }
             removeAllViews();
-            webView = null;
             if (effect == null || effect.effectSource.isEmpty()) return;
 
             if (!effect.effectLayers.isEmpty()) {
