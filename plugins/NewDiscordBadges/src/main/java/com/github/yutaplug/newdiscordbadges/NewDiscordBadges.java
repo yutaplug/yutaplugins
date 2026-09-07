@@ -16,12 +16,13 @@ import com.aliucord.patcher.Hook;
 import com.aliucord.utils.GsonUtils;
 import com.discord.api.user.UserProfile;
 import com.discord.models.user.User;
-import com.discord.widgets.user.Badge;
-import com.facebook.drawee.view.SimpleDraweeView;
 import com.discord.utilities.images.MGImages;
+import com.discord.widgets.user.Badge;
 import com.discord.widgets.user.profile.UserProfileHeaderView;
 import com.discord.widgets.user.profile.UserProfileHeaderViewModel;
+import com.facebook.drawee.view.SimpleDraweeView;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -39,6 +40,7 @@ public final class NewDiscordBadges extends Plugin {
     private static final String CDN = "https://cdn.discordapp.com";
     private static final long CACHE_DURATION_MS = 10L * 60L * 1000L;
 
+    // These are the two Nitro badge generations currently used by Discord.
     private static final int[] NITRO_MONTHS = {1, 3, 6, 12, 24, 36, 60, 72};
     private static final String[] NITRO_LABELS = {
             "Bronze", "Silver", "Gold", "Platinum",
@@ -76,6 +78,7 @@ public final class NewDiscordBadges extends Plugin {
             "cd5e2cfd9d7f27a8cdcd3e8a8d5dc9f4",
             "5b154df19c53dce2af92c9b61e6be5e2"
     };
+
     private static final String[] GIFT_IDS = {
             "gifting_patron", "gifting_champion", "gifting_luminary",
             "gifting_icon", "gifting_hero", "gifting_legend"
@@ -102,31 +105,39 @@ public final class NewDiscordBadges extends Plugin {
             Collections.synchronizedMap(new WeakHashMap<>());
     private final Map<RecyclerView, RemoteBadgeAdapter> adapters =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private final Map<RecyclerView, RecyclerView.Adapter<?>> originalAdapters =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+    private volatile boolean running;
+    private volatile long generation;
 
     @Override
     public void start(Context context) throws Throwable {
+        running = true;
+        generation++;
+
         patcher.patch(
                 Badge.Companion.class,
                 "getBadgesForUser",
                 new Class<?>[]{User.class, UserProfile.class, boolean.class, boolean.class, Context.class},
                 new Hook(frame -> {
-                    Object result = frame.getResult();
-                    if (!(result instanceof List<?>)) return;
+                    if (!(frame.getResult() instanceof List<?>)) return;
+                    if (frame.args.length == 0 || !(frame.args[0] instanceof User)) return;
 
-                    User user = frame.args.length > 0 && frame.args[0] instanceof User
-                            ? (User) frame.args[0] : null;
-                    String userId = user == null ? "" : String.valueOf(user.getId());
+                    User user = (User) frame.args[0];
+                    if (!usersWithEvolvingNitro.contains(String.valueOf(user.getId()))) return;
 
-                    List<Badge> filtered = new ArrayList<>();
-                    for (Object value : (List<?>) result) {
+                    List<Badge> badges = new ArrayList<>();
+                    boolean changed = false;
+                    for (Object value : (List<?>) frame.getResult()) {
                         if (value instanceof Badge
-                                && "PREMIUM".equals(((Badge) value).getObjectType())
-                                && usersWithEvolvingNitro.contains(userId)) {
-                            continue;
+                                && "PREMIUM".equals(((Badge) value).getObjectType())) {
+                            changed = true;
+                        } else if (value instanceof Badge) {
+                            badges.add((Badge) value);
                         }
-                        if (value instanceof Badge) filtered.add((Badge) value);
                     }
-                    frame.setResult(filtered);
+                    if (changed) frame.setResult(badges);
                 })
         );
 
@@ -135,98 +146,106 @@ public final class NewDiscordBadges extends Plugin {
                 "updateViewState",
                 new Class<?>[]{UserProfileHeaderViewModel.ViewState.Loaded.class},
                 new Hook(frame -> {
+                    if (!(frame.thisObject instanceof UserProfileHeaderView)) return;
+                    if (frame.args.length == 0
+                            || !(frame.args[0] instanceof UserProfileHeaderViewModel.ViewState.Loaded)) {
+                        return;
+                    }
+
                     UserProfileHeaderView header = (UserProfileHeaderView) frame.thisObject;
-                    if (!isUserSheetHeader(header)) return;
+                    if (!isProfileHeader(header)) return;
 
                     UserProfileHeaderViewModel.ViewState.Loaded state =
                             (UserProfileHeaderViewModel.ViewState.Loaded) frame.args[0];
-                    if (state.getUser() == null || state.getUser().getId() <= 0L) return;
+                    User user = state.getUser();
+                    if (user == null || user.getId() <= 0L) return;
 
                     RecyclerView recycler = findBadgeRecycler(header);
                     if (recycler == null) return;
 
-                    boundStates.put(header, state);
-
-                    RemoteBadgeAdapter adapter = ensureAdapter(recycler);
-                    if (adapter == null) return;
-
+                    String userId = String.valueOf(user.getId());
                     Long guildId = null;
                     if (state.getGuildMember() != null
                             && state.getGuildMember().getGuildId() > 0L) {
                         guildId = state.getGuildMember().getGuildId();
                     }
-
-                    String key = profileKey(state.getUser().getId(), guildId);
+                    String key = profileKey(user.getId(), guildId);
                     boundProfiles.put(header, key);
+                    boundStates.put(header, state);
+
+                    RemoteBadgeAdapter adapter = ensureAdapter(recycler);
+                    if (adapter == null) return;
 
                     CachedBadges cached = badgeCache.get(key);
-                    if (cached != null
-                            && System.currentTimeMillis() - cached.fetchedAt < CACHE_DURATION_MS) {
+                    if (isFresh(cached)) {
+                        boolean previouslyHadNitro = usersWithEvolvingNitro.contains(userId);
+                        boolean hasNitro = hasEvolvingNitro(cached.badges);
+                        if (hasNitro) {
+                            usersWithEvolvingNitro.add(userId);
+                        } else {
+                            usersWithEvolvingNitro.remove(userId);
+                        }
                         adapter.setBadges(cached.badges);
+                        if (previouslyHadNitro != hasNitro) {
+                            refreshNativeBadges(header, state);
+                        }
                     } else {
                         adapter.setBadges(Collections.emptyList());
-                        requestBadges(header, state.getUser().getId(), guildId, key);
+                        requestBadges(header, user.getId(), guildId, key);
                     }
                 })
         );
     }
 
-    private RecyclerView findBadgeRecycler(UserProfileHeaderView header) {
-        int id = Utils.getResId("user_profile_header_badges_recycler", "id");
-        if (id == 0) return null;
-        return header.findViewById(id);
-    }
-
-    private static boolean isUserSheetHeader(UserProfileHeaderView header) {
+    private boolean isProfileHeader(UserProfileHeaderView header) {
         try {
-            return "user_sheet_profile_header_view".equals(
-                    header.getResources().getResourceEntryName(header.getId()));
-        } catch (Throwable ignored) {
+            String resourceName = header.getResources().getResourceEntryName(header.getId());
+            return "user_sheet_profile_header_view".equals(resourceName)
+                    || "user_settings_profile_header_view".equals(resourceName);
+        } catch (RuntimeException error) {
+            logger.error("Could not identify the profile header", error);
             return false;
         }
     }
 
+    private static RecyclerView findBadgeRecycler(UserProfileHeaderView header) {
+        int id = Utils.getResId("user_profile_header_badges_recycler", "id");
+        if (id == 0) return null;
+
+        View view = header.findViewById(id);
+        return view instanceof RecyclerView ? (RecyclerView) view : null;
+    }
+
+    private static boolean isFresh(CachedBadges cached) {
+        return cached != null
+                && System.currentTimeMillis() - cached.fetchedAt < CACHE_DURATION_MS;
+    }
+
     private RemoteBadgeAdapter ensureAdapter(RecyclerView recycler) {
-        RecyclerView.Adapter<?> nativeAdapter = recycler.getAdapter();
-        RemoteBadgeAdapter adapter = nativeAdapter == null
-                ? null : findRemoteAdapter(nativeAdapter);
-        if (adapter != null) {
-            removeDuplicateRemoteAdapters(nativeAdapter, adapter);
-            adapters.put(recycler, adapter);
-            return adapter;
+        RecyclerView.Adapter<?> current = recycler.getAdapter();
+        RemoteBadgeAdapter existing = current == null ? null : findRemoteAdapter(current);
+        if (existing != null) {
+            removeDuplicateRemoteAdapters(current, existing);
+            adapters.put(recycler, existing);
+            return existing;
         }
+        if (current == null) return null;
 
-        adapter = adapters.get(recycler);
-        if (adapter != null && nativeAdapter != null) {
-            if (nativeAdapter instanceof ConcatAdapter) {
-                ((ConcatAdapter) nativeAdapter).addAdapter(adapter);
-            } else {
-                recycler.setAdapter(new ConcatAdapter(
-                        (RecyclerView.Adapter) nativeAdapter,
-                        adapter
-                ));
-            }
-            return adapter;
-        }
-        if (nativeAdapter == null) return null;
+        RemoteBadgeAdapter adapter = adapters.get(recycler);
+        if (adapter == null) adapter = new RemoteBadgeAdapter();
+        originalAdapters.putIfAbsent(recycler, current);
 
-        adapter = new RemoteBadgeAdapter();
-        if (nativeAdapter instanceof ConcatAdapter) {
-            ((ConcatAdapter) nativeAdapter).addAdapter(adapter);
+        if (current instanceof ConcatAdapter) {
+            ((ConcatAdapter) current).addAdapter(adapter);
         } else {
-            recycler.setAdapter(new ConcatAdapter(
-                    (RecyclerView.Adapter) nativeAdapter,
-                    adapter
-            ));
+            recycler.setAdapter(new ConcatAdapter((RecyclerView.Adapter) current, adapter));
         }
         adapters.put(recycler, adapter);
         return adapter;
     }
 
     private static RemoteBadgeAdapter findRemoteAdapter(RecyclerView.Adapter<?> adapter) {
-        if (adapter instanceof RemoteBadgeAdapter) {
-            return (RemoteBadgeAdapter) adapter;
-        }
+        if (adapter instanceof RemoteBadgeAdapter) return (RemoteBadgeAdapter) adapter;
         if (!(adapter instanceof ConcatAdapter)) return null;
 
         for (Object child : ((ConcatAdapter) adapter).getAdapters()) {
@@ -252,51 +271,78 @@ public final class NewDiscordBadges extends Plugin {
         }
     }
 
-    private void requestBadges(UserProfileHeaderView header, long userId, Long guildId, String key) {
+    private void requestBadges(
+            UserProfileHeaderView header, long userId, Long guildId, String key) {
         if (!requestsInFlight.add(key)) return;
 
+        long requestGeneration = generation;
+        WeakReference<UserProfileHeaderView> headerReference = new WeakReference<>(header);
         Utils.threadPool.execute(() -> {
-            Map<?, ?> profileBody = Collections.emptyMap();
-            Map<?, ?> catalogBody = Collections.emptyMap();
+            List<RemoteBadge> result = Collections.emptyList();
+
             try {
-                profileBody = requestJson(profileRoute(userId, guildId));
-            } catch (Throwable error) {
-                logger.error("Failed to load profile data for badges", error);
-            }
-            try {
-                catalogBody = requestJson(badgeCatalogRoute(userId));
-            } catch (Throwable error) {
-                logger.error("Failed to load badge catalog", error);
+                // The mobile API exposes profile badges on the profile response.
+                // /users/{id}/badges is a desktop/catalog route and returns 404 here.
+                result = parseBadges(requestJson(profileRoute(userId, guildId)));
+            } catch (Exception error) {
+                logger.error("Failed to load Discord profile badges", error);
             }
 
-            List<RemoteBadge> result = parseBadges(profileBody, catalogBody);
-            if (hasEvolvingNitro(result)) {
-                usersWithEvolvingNitro.add(String.valueOf(userId));
-            } else {
-                usersWithEvolvingNitro.remove(String.valueOf(userId));
+            if (!running || generation != requestGeneration) {
+                requestsInFlight.remove(key);
+                return;
             }
-            badgeCache.put(key, new CachedBadges(result));
+
+            final List<RemoteBadge> fetched = result;
+            String userKey = String.valueOf(userId);
+            boolean previouslyHadNitro = usersWithEvolvingNitro.contains(userKey);
+            boolean hasNitro = hasEvolvingNitro(fetched);
+            if (hasNitro) {
+                usersWithEvolvingNitro.add(userKey);
+            } else {
+                usersWithEvolvingNitro.remove(userKey);
+            }
+
+            badgeCache.put(key, new CachedBadges(fetched));
             requestsInFlight.remove(key);
 
-            Utils.mainThread.post(() -> {
-                String boundKey = boundProfiles.get(header);
-                if (!key.equals(boundKey)) return;
-
-                UserProfileHeaderViewModel.ViewState.Loaded state = boundStates.get(header);
-                if (state != null) {
-                    header.updateViewState(state);
-                    return;
-                }
-
-                RecyclerView recycler = findBadgeRecycler(header);
-                if (recycler == null) return;
-                RemoteBadgeAdapter adapter = adapters.get(recycler);
-                if (adapter != null) adapter.setBadges(result);
-            });
+            UserProfileHeaderView target = headerReference.get();
+            if (target == null) return;
+            Utils.mainThread.post(() -> applyFetchedBadges(
+                    target, key, fetched, previouslyHadNitro != hasNitro));
         });
     }
 
-    private Map<?, ?> requestJson(String route) throws Exception {
+    private void applyFetchedBadges(
+            UserProfileHeaderView header,
+            String key,
+            List<RemoteBadge> badges,
+            boolean nativeBadgesChanged) {
+        if (!running || !key.equals(boundProfiles.get(header))) return;
+
+        RecyclerView recycler = findBadgeRecycler(header);
+        RemoteBadgeAdapter adapter = recycler == null ? null : adapters.get(recycler);
+        if (adapter != null) adapter.setBadges(badges);
+
+        if (!nativeBadgesChanged) return;
+
+        refreshNativeBadges(header, boundStates.get(header));
+    }
+
+    private void refreshNativeBadges(
+            UserProfileHeaderView header,
+            UserProfileHeaderViewModel.ViewState.Loaded state) {
+        if (state == null) return;
+        try {
+            // Re-run Discord's native badge binding so the old Nitro badge disappears
+            // when an evolved tier is available, without replacing any other badges.
+            header.updateViewState(state);
+        } catch (RuntimeException error) {
+            logger.error("Could not refresh the profile-sheet badges", error);
+        }
+    }
+
+    private Object requestJson(String route) throws Exception {
         try (Http.Request request = Http.Request.newDiscordRNRequest(route)) {
             String fingerprint = com.discord.utilities.rest.RestAPI.AppHeadersProvider.INSTANCE
                     .getFingerprint();
@@ -306,21 +352,18 @@ public final class NewDiscordBadges extends Plugin {
             if (!response.ok()) {
                 throw new IllegalStateException("HTTP " + response.statusCode);
             }
-
-            Map<?, ?> body = GsonUtils.fromJson(response.text(), Map.class);
-            return body == null ? Collections.emptyMap() : body;
+            return GsonUtils.fromJson(response.text(), Object.class);
         }
     }
 
-    private static List<RemoteBadge> parseBadges(
-            Map<?, ?> profileBody, Map<?, ?> catalogBody) {
+    private static List<RemoteBadge> parseBadges(Object... bodies) {
         List<RemoteBadge> result = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        // The catalog contains the authoritative current tier. Parse it first so
-        // an older profile badge cannot win the family-level deduplication.
-        appendCatalogBadges(catalogBody, result, seen);
-        appendBadges(profileBody, result, seen);
-        return result.isEmpty() ? Collections.emptyList() : result;
+        for (Object body : bodies) {
+            appendBadges(body, result, seen);
+        }
+        if (result.isEmpty()) return Collections.emptyList();
+        return Collections.unmodifiableList(result);
     }
 
     private static void appendBadges(Object raw, List<RemoteBadge> result, Set<String> seen) {
@@ -331,72 +374,72 @@ public final class NewDiscordBadges extends Plugin {
             return;
         }
         if (raw instanceof String) {
-            appendKnownBadge(stringValue(raw), result, seen);
+            appendKnownBadge((String) raw, result, seen);
             return;
         }
         if (!(raw instanceof Map<?, ?>)) return;
 
         Map<?, ?> map = (Map<?, ?>) raw;
+        if (isCatalogBadge(map)) appendCatalogBadge(map, result, seen);
+
         String id = firstString(map, "id", "badge_id", "badgeId");
-        if (!id.isEmpty()) {
-            appendBadgeObject(map, result, seen);
-        }
+        if (!id.isEmpty()) appendBadgeObject(map, result, seen);
 
         for (Map.Entry<?, ?> entry : map.entrySet()) {
             String key = stringValue(entry.getKey()).toLowerCase(Locale.ROOT);
-            if (key.contains("badge")
-                    || key.contains("gift")
-                    || key.contains("experimental")
-                    || "profile".equals(key)
-                    || "user_profile".equals(key)) {
+            if (isBadgeContainer(key)) {
                 appendBadges(entry.getValue(), result, seen);
             }
         }
     }
 
+    private static boolean isBadgeContainer(String key) {
+        return key.contains("badge")
+                || key.contains("gift")
+                || key.contains("experimental")
+                || "profile".equals(key)
+                || "user_profile".equals(key)
+                || "data".equals(key)
+                || "items".equals(key)
+                || "results".equals(key);
+    }
+
     private static void appendBadgeObject(
             Map<?, ?> badge, List<RemoteBadge> result, Set<String> seen) {
         String id = firstString(badge, "id", "badge_id", "badgeId");
-        if (id.isEmpty() || isAlreadyRenderedNatively(id)) return;
+        if (id.isEmpty()) return;
 
         String icon = firstString(
                 badge,
+                "badge_image",
+                "badgeImage",
+                "image_url",
+                "icon_url",
                 "icon",
                 "icon_hash",
                 "iconHash",
                 "asset",
-                "badge_icon",
-                "badge_image"
+                "badge_icon"
         );
+        boolean evolvingPremium = isEvolvingPremiumBadge(id, icon);
+        if (isNativeBadge(id) && !evolvingPremium) return;
         if (icon.isEmpty()) icon = knownIcon(id);
         if (icon.isEmpty()) return;
 
         String description = firstString(badge, "description", "label", "title", "name");
         if (description.isEmpty()) description = knownDescription(id);
         if (description.isEmpty()) description = id;
-        appendRemoteBadge(result, seen, id, description, icon);
+
+        // Discord keeps the id as "premium" for the evolving icon. Use an internal
+        // family id so it replaces the native premium badge instead of being dropped.
+        String renderedId = evolvingPremium ? "premium_tenure_current" : id;
+        appendRemoteBadge(result, seen, renderedId, description, icon);
     }
 
-    private static void appendCatalogBadges(
-            Object raw, List<RemoteBadge> result, Set<String> seen) {
-        if (raw instanceof List<?>) {
-            for (Object value : (List<?>) raw) {
-                appendCatalogBadges(value, result, seen);
-            }
-            return;
-        }
-        if (!(raw instanceof Map<?, ?>)) return;
-
-        Map<?, ?> map = (Map<?, ?>) raw;
-        if (!firstString(map, "badge_id", "badgeId", "id").isEmpty()
-                && !firstString(map, "current_tier", "currentTier").isEmpty()) {
-            appendCatalogBadge(map, result, seen);
-        }
-
-        for (String key : new String[]{"badges", "data", "items", "results"}) {
-            Object value = map.get(key);
-            if (value != null) appendCatalogBadges(value, result, seen);
-        }
+    private static boolean isCatalogBadge(Map<?, ?> badge) {
+        return !firstString(badge, "badge_id", "badgeId", "id").isEmpty()
+                && !firstString(badge, "current_tier", "currentTier").isEmpty()
+                && firstValue(badge, "tiers") instanceof List<?>;
     }
 
     private static void appendCatalogBadge(
@@ -405,19 +448,17 @@ public final class NewDiscordBadges extends Plugin {
         if (!owned.isEmpty() && !"true".equalsIgnoreCase(owned)) return;
 
         String currentTier = firstString(badge, "current_tier", "currentTier");
-        if (currentTier.isEmpty()) return;
-
         String familyId = firstString(badge, "badge_id", "badgeId", "id");
         String family = normalizeBadgeFamily(familyId);
-        List<?> tiers = asList(badge.get("tiers"));
+        List<?> tiers = asList(firstValue(badge, "tiers"));
         int tierIndex = -1;
         Map<?, ?> tier = null;
+
         for (int i = 0; i < tiers.size(); i++) {
-            Object value = tiers.get(i);
-            if (!(value instanceof Map<?, ?>)) continue;
-            Map<?, ?> candidate = (Map<?, ?>) value;
-            String key = firstString(candidate, "key", "id", "tier", "name");
-            if (sameTier(currentTier, key) || sameTier(currentTier, String.valueOf(i))) {
+            if (!(tiers.get(i) instanceof Map<?, ?>)) continue;
+            Map<?, ?> candidate = (Map<?, ?>) tiers.get(i);
+            String tierKey = firstString(candidate, "key", "id", "tier", "name");
+            if (sameTier(currentTier, tierKey) || sameTier(currentTier, String.valueOf(i))) {
                 tier = candidate;
                 tierIndex = i;
                 break;
@@ -429,7 +470,8 @@ public final class NewDiscordBadges extends Plugin {
                     : "gifting".equals(family)
                     ? giftIndex(currentTier.toLowerCase(Locale.ROOT))
                     : -1;
-            if (expectedIndex >= 0 && expectedIndex < tiers.size()
+            if (expectedIndex >= 0
+                    && expectedIndex < tiers.size()
                     && tiers.get(expectedIndex) instanceof Map<?, ?>) {
                 tier = (Map<?, ?>) tiers.get(expectedIndex);
                 tierIndex = expectedIndex;
@@ -440,7 +482,7 @@ public final class NewDiscordBadges extends Plugin {
         String tierKey = firstString(tier, "key", "id", "tier", "name");
         String tierName = firstString(tier, "name", "description", "label", "title");
         String id = catalogBadgeId(familyId, tierKey, tierName, tierIndex, tier);
-        if (id.isEmpty() || isAlreadyRenderedNatively(id)) return;
+        if (id.isEmpty() || isNativeBadge(id)) return;
 
         String icon = firstString(
                 tier,
@@ -465,54 +507,50 @@ public final class NewDiscordBadges extends Plugin {
         if (icon.isEmpty()) return;
 
         String description = tierName;
-        if (description.isEmpty()) {
-            description = firstString(badge, "name", "description", "label", "title");
-        }
+        if (description.isEmpty()) description = firstString(badge, "name", "description", "label");
         if (description.isEmpty()) description = knownDescription(id);
         if (description.isEmpty()) description = id;
-
         appendRemoteBadge(result, seen, id, description, icon);
     }
 
     private static String catalogBadgeId(
-            String familyId, String tierKey, String tierName, int tierIndex, Map<?, ?> tier) {
+            String familyId,
+            String tierKey,
+            String tierName,
+            int tierIndex,
+            Map<?, ?> tier) {
         String explicitId = firstString(tier, "badge_id", "badgeId");
         if (isFullBadgeId(explicitId)) return explicitId;
 
         String family = normalizeBadgeFamily(familyId);
-        String value = (tierKey + " " + tierName + " " + explicitId)
-                .toLowerCase(Locale.ROOT);
-
+        String value = (tierKey + " " + tierName + " " + explicitId).toLowerCase(Locale.ROOT);
         if ("premium_tenure".equals(family)) {
             int index = nitroIndex(value);
             if (index < 0) index = tierIndex;
             if (index >= 0 && index < NITRO_V1_IDS.length) {
-                String[] ids = value.contains("v2") ? NITRO_V2_IDS : NITRO_V1_IDS;
-                return ids[index];
+                return value.contains("v2") ? NITRO_V2_IDS[index] : NITRO_V1_IDS[index];
             }
         }
-
         if ("gifting".equals(family)) {
             int index = giftIndex(value);
             if (index < 0) index = tierIndex;
             if (index >= 0 && index < GIFT_IDS.length) return GIFT_IDS[index];
         }
-
         if (!explicitId.isEmpty()) {
             return family.isEmpty() || explicitId.startsWith(family + "_")
                     ? explicitId : family + "_" + explicitId;
         }
-        if (family.isEmpty()) return tierKey;
-        return family + (tierKey.isEmpty() ? "" : "_" + tierKey);
+        return family.isEmpty() ? tierKey : family + (tierKey.isEmpty() ? "" : "_" + tierKey);
     }
 
     private static boolean isFullBadgeId(String id) {
-        return id.startsWith("premium_tenure_")
-                || id.startsWith("gifting_")
-                || id.startsWith("account_age_")
-                || id.startsWith("streaming_")
-                || id.startsWith("game_time_")
-                || id.startsWith("game_variety_");
+        String value = id.toLowerCase(Locale.ROOT);
+        return value.startsWith("premium_tenure_")
+                || value.startsWith("gifting_")
+                || value.startsWith("account_age_")
+                || value.startsWith("streaming_")
+                || value.startsWith("game_time_")
+                || value.startsWith("game_variety_");
     }
 
     private static String normalizeBadgeFamily(String familyId) {
@@ -547,23 +585,28 @@ public final class NewDiscordBadges extends Plugin {
     }
 
     private static int nitroIndex(String value) {
+        String lower = value.toLowerCase(Locale.ROOT);
         for (int i = 0; i < NITRO_LABELS.length; i++) {
-            if (value.contains(NITRO_LABELS[i].toLowerCase(Locale.ROOT))) return i;
+            if (lower.contains(NITRO_LABELS[i].toLowerCase(Locale.ROOT))) return i;
         }
+        if (lower.contains("fire")) return NITRO_LABELS.length - 1;
         for (int i = 0; i < NITRO_MONTHS.length; i++) {
-            if (value.contains("_" + NITRO_MONTHS[i] + "_month")
-                    || value.contains(NITRO_MONTHS[i] + " month")
-                    || value.equals(String.valueOf(NITRO_MONTHS[i]))) return i;
+            if (lower.contains("_" + NITRO_MONTHS[i] + "_month")
+                    || lower.contains(NITRO_MONTHS[i] + " month")
+                    || lower.equals(String.valueOf(NITRO_MONTHS[i]))) {
+                return i;
+            }
         }
         return -1;
     }
 
     private static int giftIndex(String value) {
+        String lower = value.toLowerCase(Locale.ROOT);
         for (int i = 0; i < GIFT_LABELS.length; i++) {
-            if (value.contains(GIFT_LABELS[i].toLowerCase(Locale.ROOT))) return i;
+            if (lower.contains(GIFT_LABELS[i].toLowerCase(Locale.ROOT))) return i;
         }
         for (int i = GIFT_MILESTONES.length - 1; i >= 0; i--) {
-            if (value.contains(String.valueOf(GIFT_MILESTONES[i]))) return i;
+            if (lower.contains(String.valueOf(GIFT_MILESTONES[i]))) return i;
         }
         return -1;
     }
@@ -582,56 +625,157 @@ public final class NewDiscordBadges extends Plugin {
     }
 
     private static void appendRemoteBadge(
-            List<RemoteBadge> result, Set<String> seen,
-            String id, String description, String icon) {
-        String key = id + "\u0000" + icon;
-        if (!seen.add(key) || containsBadgeId(result, id)) return;
-        result.add(new RemoteBadge(id, description, icon));
+            List<RemoteBadge> result,
+            Set<String> seen,
+            String id,
+            String description,
+            String icon) {
+        String normalizedId = id.trim();
+        String normalizedIcon = icon.trim();
+        if (normalizedId.isEmpty() || normalizedIcon.isEmpty()) return;
+
+        String exactKey = normalizedId + "\u0000" + normalizedIcon;
+        if (!seen.add(exactKey)) return;
+
+        String family = badgeFamily(normalizedId);
+        int existingIndex = findFamily(result, family);
+        if (existingIndex >= 0) {
+            if (isPreferred(new RemoteBadge(normalizedId, description, normalizedIcon),
+                    result.get(existingIndex), family)) {
+                result.set(existingIndex, new RemoteBadge(normalizedId, description, normalizedIcon));
+            }
+            return;
+        }
+        result.add(new RemoteBadge(normalizedId, description, normalizedIcon));
+    }
+
+    private static int findFamily(List<RemoteBadge> badges, String family) {
+        if (family.isEmpty()) return -1;
+        for (int i = 0; i < badges.size(); i++) {
+            if (family.equals(badgeFamily(badges.get(i).id))) return i;
+        }
+        return -1;
+    }
+
+    private static boolean isPreferred(RemoteBadge candidate, RemoteBadge current, String family) {
+        if ("premium_tenure".equals(family)) {
+            if ("premium_tenure_current".equals(candidate.id)) return true;
+            if ("premium_tenure_current".equals(current.id)) return false;
+
+            int candidateMonths = nitroMonths(candidate);
+            int currentMonths = nitroMonths(current);
+            if (candidateMonths != currentMonths) return candidateMonths > currentMonths;
+            return candidate.id.toLowerCase(Locale.ROOT).contains("_v2")
+                    && !current.id.toLowerCase(Locale.ROOT).contains("_v2");
+        }
+        if ("gifting".equals(family)) {
+            return giftLevel(candidate.id, candidate.description)
+                    > giftLevel(current.id, current.description);
+        }
+        return false;
+    }
+
+    private static String badgeFamily(String id) {
+        String value = id.toLowerCase(Locale.ROOT);
+        if (value.startsWith("premium_tenure")) return "premium_tenure";
+        if (value.startsWith("gifting")) return "gifting";
+        if (value.startsWith("account_age")) return "account_age";
+        if (value.startsWith("streaming")) return "streaming";
+        if (value.startsWith("game_time")) return "game_time";
+        if (value.startsWith("game_variety")) return "game_variety";
+        return "";
     }
 
     private static void appendKnownBadge(
             String id, List<RemoteBadge> result, Set<String> seen) {
-        if (id.isEmpty() || isAlreadyRenderedNatively(id)) return;
-
-        String icon = knownIcon(id);
+        String normalizedId = id.trim();
+        if (normalizedId.isEmpty() || isNativeBadge(normalizedId)) return;
+        String icon = knownIcon(normalizedId);
         if (icon.isEmpty()) return;
-
-        String description = knownDescription(id);
+        String description = knownDescription(normalizedId);
         appendRemoteBadge(
                 result,
                 seen,
-                id,
-                description.isEmpty() ? id : description,
+                normalizedId,
+                description.isEmpty() ? normalizedId : description,
                 icon
         );
     }
 
     private static boolean hasEvolvingNitro(List<RemoteBadge> badges) {
         for (RemoteBadge badge : badges) {
-            if (nitroMonths(badge.id) > 0) return true;
+            if (isEvolvingNitroBadge(badge)) return true;
         }
         return false;
     }
 
-    private static boolean containsBadgeId(List<RemoteBadge> badges, String id) {
-        for (RemoteBadge badge : badges) {
-            if (id.equals(badge.id)) return true;
-            if (nitroMonths(id) > 0 && nitroMonths(badge.id) > 0) return true;
-            if (isGiftingBadge(id) && isGiftingBadge(badge.id)) return true;
+    private static boolean isEvolvingNitroBadge(RemoteBadge badge) {
+        String value = (badge.id + " " + badge.description).toLowerCase(Locale.ROOT);
+        if ("premium_tenure".equals(badgeFamily(badge.id))
+                || value.contains("nitro")
+                || value.contains("premium_tenure")) {
+            return true;
         }
-        return false;
+
+        // Keep replacement working if Discord sends a localized tier label without
+        // the premium_tenure identifier (for example, "3 months: Silver").
+        for (String label : NITRO_LABELS) {
+            if (value.contains(label.toLowerCase(Locale.ROOT)) && value.contains("month")) {
+                return true;
+            }
+        }
+        return nitroMonths(badge) > 0;
     }
 
-    private static boolean isGiftingBadge(String id) {
-        return id != null && id.toLowerCase(Locale.ROOT).contains("gift");
+    private static int nitroMonths(RemoteBadge badge) {
+        int months = nitroMonths(badge.id);
+        return months > 0 ? months : nitroMonths(badge.description);
     }
 
-    private static int nitroMonths(String id) {
-        if (id == null || !id.startsWith("premium_tenure_")) return 0;
+    private static int nitroMonths(String value) {
+        if (value == null) return 0;
+        String lower = value.toLowerCase(Locale.ROOT);
         for (int months : NITRO_MONTHS) {
-            if (id.contains("_" + months + "_month")) return months;
+            if (lower.contains("_" + months + "_month")
+                    || lower.contains(months + " month")) {
+                return months;
+            }
         }
         return 0;
+    }
+
+    private static boolean isEvolvingPremiumBadge(String id, String icon) {
+        return "premium".equalsIgnoreCase(id)
+                && !icon.isEmpty()
+                && !isLegacyPremiumIcon(icon);
+    }
+
+    private static boolean isLegacyPremiumIcon(String icon) {
+        return icon.toLowerCase(Locale.ROOT)
+                .contains("2ba85e8026a8614b640c2837bcdfe21b");
+    }
+
+    private static boolean isNativeBadge(String id) {
+        String value = id.toLowerCase(Locale.ROOT);
+        switch (value) {
+            case "staff":
+            case "partner":
+            case "certified_moderator":
+            case "hypesquad":
+            case "hypesquad_house_1":
+            case "hypesquad_house_2":
+            case "hypesquad_house_3":
+            case "bug_hunter_level_1":
+            case "bug_hunter_level_2":
+            case "verified_developer":
+            case "early_supporter":
+            case "premium_early_supporter":
+            case "premium":
+            case "guild_booster":
+                return true;
+            default:
+                return value.startsWith("guild_booster_");
+        }
     }
 
     private static int giftLevel(String id, String description) {
@@ -669,14 +813,17 @@ public final class NewDiscordBadges extends Plugin {
         for (int i = 0; i < GIFT_IDS.length; i++) {
             if (GIFT_IDS[i].equals(id)) return GIFT_ICONS[i];
         }
+
         int months = nitroMonths(id);
         if (months > 0) {
             for (int i = 0; i < NITRO_MONTHS.length; i++) {
                 if (NITRO_MONTHS[i] == months) {
-                    return id.endsWith("_v2") ? NITRO_V2_ICONS[i] : NITRO_V1_ICONS[i];
+                    return id.toLowerCase(Locale.ROOT).contains("_v2")
+                            ? NITRO_V2_ICONS[i] : NITRO_V1_ICONS[i];
                 }
             }
         }
+
         int gift = giftLevel(id, "");
         if (gift > 0 && gift <= GIFT_ICONS.length) return GIFT_ICONS[gift - 1];
         return "";
@@ -687,8 +834,7 @@ public final class NewDiscordBadges extends Plugin {
         if (months > 0) {
             for (int i = 0; i < NITRO_MONTHS.length; i++) {
                 if (NITRO_MONTHS[i] == months) {
-                    return months + " months: "
-                            + (id.endsWith("_v2") ? NITRO_LABELS[i] : (i == 7 ? "Fire" : NITRO_LABELS[i]));
+                    return months + " months: " + NITRO_LABELS[i];
                 }
             }
         }
@@ -717,77 +863,93 @@ public final class NewDiscordBadges extends Plugin {
         return null;
     }
 
-    private static boolean isAlreadyRenderedNatively(String id) {
-        switch (id) {
-            case "staff":
-            case "partner":
-            case "certified_moderator":
-            case "hypesquad":
-            case "hypesquad_house_1":
-            case "hypesquad_house_2":
-            case "hypesquad_house_3":
-            case "bug_hunter_level_1":
-            case "bug_hunter_level_2":
-            case "verified_developer":
-            case "early_supporter":
-            case "premium":
-                return true;
-            default:
-                return id.startsWith("guild_booster_");
-        }
-    }
-
     private static String stringValue(Object value) {
         return value == null ? "" : String.valueOf(value).trim();
-    }
-
-    private static String profileRoute(long userId, Long guildId) {
-        String route = "/users/" + userId
-                + "/profile?with_mutual_guilds=false&with_mutual_friends=false";
-        return guildId == null ? route : route + "&guild_id=" + guildId;
-    }
-
-    private static String badgeCatalogRoute(long userId) {
-        return "/users/" + userId + "/badges";
     }
 
     private static String profileKey(long userId, Long guildId) {
         return userId + ":" + (guildId == null ? "global" : guildId);
     }
 
+    private static String profileRoute(long userId, Long guildId) {
+        String route = "/users/" + userId
+                + "/profile?type=popout"
+                + "&with_mutual_guilds=true"
+                + "&with_mutual_friends=true"
+                + "&with_mutual_friends_count=false";
+        return guildId == null ? route : route + "&guild_id=" + guildId;
+    }
+
+
+
     private static String iconUrl(String icon) {
         if (icon.startsWith("http://") || icon.startsWith("https://")) return icon;
-        if (icon.startsWith("/")) return "https://cdn.discordapp.com" + icon + "?size=32";
+        if (icon.startsWith("/")) return CDN + icon + "?size=32";
         if (icon.startsWith("badge-icons/")) return CDN + "/" + icon + "?size=32";
-        String suffix = icon.endsWith(".png") ? "" : ".png";
+        String suffix = hasImageExtension(icon) ? "" : ".png";
         return CDN + "/badge-icons/" + icon + suffix + "?size=32";
     }
 
     private static String iconFallbackUrl(String icon) {
         if (icon.startsWith("http://") || icon.startsWith("https://")) return icon;
-        if (icon.startsWith("/")) return "https://cdn.discordapp.com" + icon;
+        if (icon.startsWith("/")) return CDN + icon;
         if (icon.startsWith("badge-icons/")) return CDN + "/" + icon;
-        String suffix = icon.endsWith(".png") ? "" : ".png";
+        String suffix = hasImageExtension(icon) ? "" : ".png";
         return CDN + "/badge-icons/" + icon + suffix;
+    }
+
+    private static boolean hasImageExtension(String value) {
+        String lower = value.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".png")
+                || lower.endsWith(".jpg")
+                || lower.endsWith(".jpeg")
+                || lower.endsWith(".webp")
+                || lower.endsWith(".gif");
     }
 
     @Override
     public void stop(Context context) {
-        for (RecyclerView recycler : new ArrayList<>(adapters.keySet())) {
-            RecyclerView.Adapter<?> adapter = recycler.getAdapter();
-            if (adapter != null) removeAllRemoteAdapters(adapter);
-        }
+        running = false;
+        generation++;
         patcher.unpatchAll();
+
+        for (RecyclerView recycler : new ArrayList<>(adapters.keySet())) {
+            try {
+                RecyclerView.Adapter<?> current = recycler.getAdapter();
+                RecyclerView.Adapter<?> original = originalAdapters.get(recycler);
+                boolean hadRemoteAdapter = current != null && containsRemoteAdapter(current);
+                if (current != null) removeAllRemoteAdapters(current);
+                if (hadRemoteAdapter
+                        && original != null && current != original) {
+                    recycler.setAdapter(original);
+                }
+            } catch (RuntimeException error) {
+                logger.error("Could not remove profile badge adapter", error);
+            }
+        }
+
         requestsInFlight.clear();
         badgeCache.clear();
         usersWithEvolvingNitro.clear();
         boundProfiles.clear();
         boundStates.clear();
         adapters.clear();
+        originalAdapters.clear();
+    }
+
+    private static boolean containsRemoteAdapter(RecyclerView.Adapter<?> adapter) {
+        if (adapter instanceof RemoteBadgeAdapter) return true;
+        if (!(adapter instanceof ConcatAdapter)) return false;
+        for (Object child : ((ConcatAdapter) adapter).getAdapters()) {
+            if (child instanceof RecyclerView.Adapter<?>
+                    && containsRemoteAdapter((RecyclerView.Adapter<?>) child)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void removeAllRemoteAdapters(RecyclerView.Adapter<?> adapter) {
-        if (adapter instanceof RemoteBadgeAdapter) return;
         if (!(adapter instanceof ConcatAdapter)) return;
 
         ConcatAdapter concat = (ConcatAdapter) adapter;
@@ -831,21 +993,20 @@ public final class NewDiscordBadges extends Plugin {
             notifyDataSetChanged();
         }
 
-    @Override
-    public BadgeViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
-        Context context = parent.getContext();
-        SimpleDraweeView image = new SimpleDraweeView(context);
-        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        @Override
+        public BadgeViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
+            Context context = parent.getContext();
+            SimpleDraweeView image = new SimpleDraweeView(context);
+            image.setScaleType(ImageView.ScaleType.FIT_CENTER);
 
-        float density = context.getResources().getDisplayMetrics().density;
-        int size = Math.round(20f * density);
-        int margin = Math.round(6f * density);
-        RecyclerView.LayoutParams params = new RecyclerView.LayoutParams(size, size);
-        params.setMargins(margin, margin, 0, 0);
-        image.setLayoutParams(params);
-        return new BadgeViewHolder(image);
-    }
+            float density = context.getResources().getDisplayMetrics().density;
+            int size = Math.round(20f * density);
+            int margin = Math.round(6f * density);
+            RecyclerView.LayoutParams params = new RecyclerView.LayoutParams(size, size);
+            params.setMargins(margin, margin, 0, 0);
+            image.setLayoutParams(params);
+            return new BadgeViewHolder(image);
+        }
 
         @Override
         public void onBindViewHolder(BadgeViewHolder holder, int position) {
@@ -868,13 +1029,12 @@ public final class NewDiscordBadges extends Plugin {
             private void bind(RemoteBadge badge) {
                 image.setContentDescription(badge.description);
                 image.setOnClickListener(view -> Utils.showToast(badge.description));
-                MGImages.setImage(
-                        image,
-                        Arrays.asList(iconUrl(badge.icon), iconFallbackUrl(badge.icon)),
-                        0,
-                        0,
-                        false
-                );
+                String primary = iconUrl(badge.icon);
+                String fallback = iconFallbackUrl(badge.icon);
+                List<String> sources = primary.equals(fallback)
+                        ? Collections.singletonList(primary)
+                        : Arrays.asList(primary, fallback);
+                MGImages.setImage(image, sources, 0, 0, false);
             }
         }
     }
