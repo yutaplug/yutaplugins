@@ -202,7 +202,9 @@ public class BetterMessageLogger extends Plugin {
                 new Class<?>[]{WidgetChatListActions.Model.class}, new Hook(frame -> {
                     if (!(frame.args[0] instanceof WidgetChatListActions.Model)) return;
                     WidgetChatListActions.Model model = (WidgetChatListActions.Model) frame.args[0];
-                    MessageRecord record = records.get(model.getMessage().getId());
+                    com.discord.models.message.Message message = model.getMessage();
+                    if (message == null) return;
+                    MessageRecord record = records.get(message.getId());
                     if (record == null || !shouldKeep(record)) return;
                     WidgetChatListActions sheet = (WidgetChatListActions) frame.thisObject;
                     if (!record.edits.isEmpty()) addHistoryAction(sheet, record);
@@ -627,9 +629,14 @@ public class BetterMessageLogger extends Plugin {
         }
         if (builder instanceof com.facebook.drawee.span.DraweeSpanStringBuilder
                 && textView instanceof com.discord.utilities.view.text.SimpleDraweeSpanTextView) {
-            // LinkifiedTextView re-runs Android's auto-linking whenever its text is set.
-            // That can replace Discord's ClickableSpan instances and drop callbacks used
-            // by PluginDownloader for the link long-press context menu.
+            // Removing a stale label from a recycled row must not rebind the text view.
+            // PluginDownloader stores its URL long-press callback in the rendered link
+            // state, and rebinding here can make the link context menu lose that callback.
+            if (!deleted) {
+                textView.requestLayout();
+                textView.invalidate();
+                return;
+            }
             int autoLinkMask = textView.getAutoLinkMask();
             textView.setAutoLinkMask(0);
             try {

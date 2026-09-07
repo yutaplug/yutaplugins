@@ -1,0 +1,13 @@
+version = "1.1.4"
+description = "Send Voice Messages"
+
+aliucord {
+    changelog.set(
+        """
+        # 1.1.4
+        * Restore and redesign the voice message button
+        * Support replying with voice messages
+        * Fix empty recordings on Android 7
+        """.stripIndent(),
+    )
+}
