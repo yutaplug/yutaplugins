@@ -23,6 +23,7 @@ import com.discord.utilities.color.ColorCompat;
 import com.google.android.material.button.MaterialButton;
 import androidx.core.content.ContextCompat;
 
+import java.util.Locale;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -63,6 +64,9 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
             if (plugin != null) plugin.exportDatabase();
         });
 
+        addSectionHeader(context, "Appearance", false);
+        addAction(context, "Deleted tag color", "Current: " + currentDeletedLabelColor(),
+                () -> showColorDialog(context));
         addSectionHeader(context, "Message filters", false);
         addToggle(context, "Ignore my messages", "Do not save messages sent by your account", "ignoreOwn");
         addToggle(context, "Ignore bot messages", "Do not save messages sent by bots", "ignoreBots");
@@ -190,6 +194,60 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         return result;
     }
 
+    private void showColorDialog(Context context) {
+        EditText input = new EditText(context);
+        input.setSingleLine(true);
+        input.setSelectAllOnFocus(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setHint("#RRGGBB or #AARRGGBB");
+        input.setText(settings.getString(BetterMessageLogger.DELETED_LABEL_COLOR,
+                BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR));
+        input.setTextColor(Color.WHITE);
+        input.setHintTextColor(Color.LTGRAY);
+
+        AlertDialog dialog = new AlertDialog.Builder(context)
+                .setTitle("Deleted tag color")
+                .setMessage("Enter a hexadecimal color.")
+                .setView(input)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", null)
+                .create();
+        dialog.setOnShowListener(ignored -> {
+            styleDialog(dialog, input);
+            TextView save = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (save != null) save.setOnClickListener(button -> {
+                String value = normalizeColor(input.getText().toString());
+                try {
+                    Color.parseColor(value);
+                    settings.setString(BetterMessageLogger.DELETED_LABEL_COLOR, value);
+                    BetterMessageLogger plugin = BetterMessageLogger.getInstance();
+                    if (plugin != null) plugin.refreshDeletedLabels();
+                    dialog.dismiss();
+                    Utils.showToast("Deleted tag color updated");
+                } catch (Throwable error) {
+                    Utils.showToast("Enter #RRGGBB or #AARRGGBB");
+                }
+            });
+        });
+        dialog.show();
+    }
+
+    private String currentDeletedLabelColor() {
+        String value = normalizeColor(settings.getString(BetterMessageLogger.DELETED_LABEL_COLOR,
+                BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR));
+        try {
+            Color.parseColor(value);
+            return value;
+        } catch (Throwable ignored) {
+            return BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR;
+        }
+    }
+
+    private String normalizeColor(String raw) {
+        String value = raw == null ? "" : raw.trim();
+        return value.startsWith("#") ? value.toUpperCase(Locale.ROOT)
+                : "#" + value.toUpperCase(Locale.ROOT);
+    }
     private void showIdDialog(Context context, String title, String key, String hint) {
         LinearLayout content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);

@@ -43,7 +43,8 @@ class Translate : Plugin() {
     }
 
     override fun load(ctx: Context) {
-        pluginIcon = ContextCompat.getDrawable(ctx, R.e.ic_locale_24dp)!!
+        pluginIcon = ContextCompat.getDrawable(ctx, R.e.ic_locale_24dp)!!.mutate()
+        Utils.tintToTheme(pluginIcon)
     }
 
     override fun start(context: Context) {

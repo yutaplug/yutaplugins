@@ -1,6 +1,8 @@
-version = "1.3.2"
+version = "1.3.3"
 description = "Adds an option to translate messages."
 aliucord.changelog.set("""
+    # Version 1.3.3
+    * Matched the translate button icon color with Discord's native action buttons
     # Version 1.3.2
     * Fixed translating messages containing emojis, mentions, and URLs
     # Version 1.3.1

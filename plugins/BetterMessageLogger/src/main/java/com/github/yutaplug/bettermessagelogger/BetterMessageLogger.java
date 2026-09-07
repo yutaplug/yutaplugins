@@ -43,6 +43,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -61,14 +62,21 @@ public class BetterMessageLogger extends Plugin {
     private static final String DB_NAME = "BetterMessageLogger.db";
     private static final String TXT_NAME = "BetterMessageLogger.txt";
     private static final String DELETED_LABEL = " (deleted)";
+    static final String DELETED_LABEL_COLOR = "deletedLabelColor";
+    static final String DEFAULT_DELETED_LABEL_COLOR = "#FFFF0000";
+    private static final int MAX_CACHED_MESSAGES = 512;
+    private static final int MAX_TRANSIENT_RECORDS = 512;
     private static BetterMessageLogger instance;
 
     private final Map<Long, MessageRecord> records = new ConcurrentHashMap<>();
-    private final Map<Long, com.discord.models.message.Message> liveMessages = new ConcurrentHashMap<>();
-    private final Map<Long, com.discord.models.message.Message> boundMessages = new ConcurrentHashMap<>();
-    private final Map<WidgetChatListAdapterItemMessage, Long> boundMessageItems = new ConcurrentHashMap<>();
+    private final MessageCache liveMessages = new MessageCache(MAX_CACHED_MESSAGES);
+    private final MessageCache boundMessages = new MessageCache(MAX_CACHED_MESSAGES);
+    private final Map<WidgetChatListAdapterItemMessage, Long> boundMessageItems =
+            Collections.synchronizedMap(new java.util.WeakHashMap<>());
     private final Set<Long> deletedMessageIds = ConcurrentHashMap.newKeySet();
     private final Set<Long> recentlyDeletedMessageIds = ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.ConcurrentLinkedDeque<Long> transientRecordIds =
+            new java.util.concurrent.ConcurrentLinkedDeque<>();
     private final Map<Long, LoadedRange> loadedRanges = new ConcurrentHashMap<>();
     private final BehaviorSubject<Long> revision = BehaviorSubject.l0(0L);
     private final AtomicLong revisionNumber = new AtomicLong();
@@ -219,9 +227,10 @@ public class BetterMessageLogger extends Plugin {
 
             recentlyDeletedMessageIds.add(id);
             remember(live);
+            MessageRecord record = records.get(id);
+            if (record != null) record.runtime = live;
         }
     }
-
     private void resetLoadedRange(StoreMessagesLoader.ChannelChunk chunk) {
         if (!chunk.isInitial() && !chunk.isJump()) return;
         long channelId = chunk.getChannelId();
@@ -262,8 +271,9 @@ public class BetterMessageLogger extends Plugin {
         }
         if (old != null) {
             try {
-                record.runtime = old.merge(message);
-                liveMessages.put(id, record.runtime);
+                com.discord.models.message.Message merged = old.merge(message);
+                liveMessages.put(id, merged);
+                record.runtime = record.deleted || deletedMessageIds.contains(id) ? merged : null;
             } catch (Throwable ignored) {
                 // Keep the last complete model if Discord sends an unusually small update payload.
             }
@@ -272,11 +282,10 @@ public class BetterMessageLogger extends Plugin {
             removeRecord(id);
             return;
         }
-        records.put(id, record);
+        storeRecord(record);
         persist(record);
         bumpRevision();
     }
-
     private void handleDeletedMessages(ModelMessageDelete event) {
         List<Long> ids = event.getMessageIds();
         if (ids == null) return;
@@ -285,44 +294,46 @@ public class BetterMessageLogger extends Plugin {
             deletedMessageIds.add(id);
             recentlyDeletedMessageIds.add(id);
             MessageRecord record = records.get(id);
-            if (record == null) {
-                com.discord.models.message.Message live = liveMessages.get(id);
+            com.discord.models.message.Message live = null;
+            if (record == null || record.runtime == null) {
+                live = liveMessages.get(id);
                 if (live == null) live = boundMessages.get(id);
-                if (live != null) record = createRecord(live);
+                if (record == null && live != null) record = createRecord(live);
             }
             if (record != null && shouldKeep(record)) {
                 record.deleted = true;
                 record.deletedTimestamp = System.currentTimeMillis();
-                records.put(id, record);
+                if (live != null) record.runtime = live;
+                storeRecord(record);
                 persist(record);
             }
         }
         refreshVisibleDeletedTags();
         bumpRevision();
     }
-
     private void remember(com.discord.models.message.Message message) {
         if (message == null) return;
-        liveMessages.put(message.getId(), message);
-        MessageRecord record = records.get(message.getId());
+        long messageId = message.getId();
+        liveMessages.put(messageId, message);
+        MessageRecord record = records.get(messageId);
         if (record == null) record = createRecord(message);
         else {
-            record.runtime = message;
+            record.runtime = record.deleted || deletedMessageIds.contains(messageId) ? message : null;
             if (message.getContent() != null) record.content = message.getContent();
             if (message.getEditedTimestamp() != null) record.editedTimestamp = message.getEditedTimestamp().g();
         }
-        if (deletedMessageIds.contains(message.getId())) {
+        if (deletedMessageIds.contains(messageId)) {
             record.deleted = true;
+            record.runtime = message;
             if (record.deletedTimestamp == null) record.deletedTimestamp = System.currentTimeMillis();
         }
         if (!shouldKeep(record)) {
-            removeRecord(message.getId());
+            removeRecord(messageId);
             return;
         }
-        records.put(message.getId(), record);
+        storeRecord(record);
         persist(record);
     }
-
     private MessageRecord createRecord(com.discord.models.message.Message message) {
         com.discord.api.user.User author = message.getAuthor();
         String avatar = null;
@@ -333,7 +344,7 @@ public class BetterMessageLogger extends Plugin {
                 author != null && Boolean.TRUE.equals(author.e()), message.getContent() == null ? "" : message.getContent(),
                 message.getTimestamp() == null ? System.currentTimeMillis() : message.getTimestamp().g(),
                 message.getEditedTimestamp() == null ? null : message.getEditedTimestamp().g(), false, null,
-                "", message);
+                "", null);
     }
 
     private List<com.discord.models.message.Message> withDeletedMessages(long channelId,
@@ -445,12 +456,28 @@ public class BetterMessageLogger extends Plugin {
 
     private void removeRecord(long id) {
         records.remove(id);
+        transientRecordIds.remove(id);
         liveMessages.remove(id);
         deletedMessageIds.remove(id);
         recentlyDeletedMessageIds.remove(id);
         if (databaseEnabled && database != null) database.removeAsync(id);
     }
 
+    private void storeRecord(MessageRecord record) {
+        records.put(record.id, record);
+        if (record.deleted || !record.edits.isEmpty()) {
+            transientRecordIds.remove(record.id);
+            return;
+        }
+        transientRecordIds.remove(record.id);
+        transientRecordIds.addLast(record.id);
+        while (transientRecordIds.size() > MAX_TRANSIENT_RECORDS) {
+            Long oldestId = transientRecordIds.pollFirst();
+            if (oldestId == null) break;
+            MessageRecord oldest = records.get(oldestId);
+            if (oldest != null && !oldest.deleted && oldest.edits.isEmpty()) records.remove(oldestId, oldest);
+        }
+    }
     private void persist(MessageRecord record) {
         if (databaseEnabled && database != null) database.upsertAsync(record);
     }
@@ -463,18 +490,27 @@ public class BetterMessageLogger extends Plugin {
                 if (!shouldKeep(record)) {
                     database.removeAsync(record.id);
                     records.remove(record.id);
+                    transientRecordIds.remove(record.id);
                     deletedMessageIds.remove(record.id);
                     continue;
                 }
                 if (record.deleted) deletedMessageIds.add(record.id);
                 MessageRecord existing = records.get(record.id);
-                if (existing == null) records.put(record.id, record);
-                else if (existing.runtime != null) record.runtime = existing.runtime;
+                if (existing == null) {
+                    storeRecord(record);
+                } else {
+                    if (record.deleted) {
+                        existing.deleted = true;
+                        existing.deletedTimestamp = record.deletedTimestamp;
+                    }
+                    if (existing.edits.isEmpty()) existing.edits = record.edits;
+                    if (existing.editedTimestamp == null) existing.editedTimestamp = record.editedTimestamp;
+                    storeRecord(existing);
+                }
             }
             bumpRevision();
         });
     }
-
     void setDatabaseEnabled(boolean enabled) {
         if (databaseEnabled == enabled) return;
         databaseEnabled = enabled;
@@ -521,13 +557,14 @@ public class BetterMessageLogger extends Plugin {
     }
 
     private void refreshVisibleDeletedTags() {
-        for (Map.Entry<WidgetChatListAdapterItemMessage, Long> bound : boundMessageItems.entrySet()) {
-            WidgetChatListAdapterItemMessage item = bound.getKey();
-            long messageId = bound.getValue();
-            scheduleDeletedLabel(item, messageId);
+        List<Map.Entry<WidgetChatListAdapterItemMessage, Long>> bound;
+        synchronized (boundMessageItems) {
+            bound = new ArrayList<>(boundMessageItems.entrySet());
+        }
+        for (Map.Entry<WidgetChatListAdapterItemMessage, Long> entry : bound) {
+            scheduleDeletedLabel(entry.getKey(), entry.getValue());
         }
     }
-
     private void scheduleDeletedLabel(WidgetChatListAdapterItemMessage item, long messageId) {
         item.itemView.post(() -> {
             // A RecyclerView item can be rebound before this callback runs.
@@ -567,11 +604,13 @@ public class BetterMessageLogger extends Plugin {
         DeletedLabelSpan[] oldLabels = builder.getSpans(0, builder.length(), DeletedLabelSpan.class);
 
         if (!deleted && oldLabels.length == 0) return;
+        int labelColor = deletedLabelColor();
         if (deleted && oldLabels.length == 1) {
             int start = builder.getSpanStart(oldLabels[0]);
             int end = builder.getSpanEnd(oldLabels[0]);
             if (start == builder.length() - DELETED_LABEL.length() && end == builder.length()
-                    && DELETED_LABEL.contentEquals(builder.subSequence(start, end))) return;
+                    && DELETED_LABEL.contentEquals(builder.subSequence(start, end))
+                    && oldLabels[0].color == labelColor) return;
         }
 
         for (DeletedLabelSpan oldLabel : oldLabels) {
@@ -583,7 +622,8 @@ public class BetterMessageLogger extends Plugin {
         if (deleted) {
             int start = builder.length();
             builder.append(DELETED_LABEL);
-            builder.setSpan(new DeletedLabelSpan(), start, builder.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            builder.setSpan(new DeletedLabelSpan(deletedLabelColor()), start, builder.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         if (builder instanceof com.facebook.drawee.span.DraweeSpanStringBuilder
                 && textView instanceof com.discord.utilities.view.text.SimpleDraweeSpanTextView) {
@@ -703,10 +743,28 @@ public class BetterMessageLogger extends Plugin {
         }
     }
 
+    private int deletedLabelColor() {
+        try {
+            return Color.parseColor(settings.getString(DELETED_LABEL_COLOR, DEFAULT_DELETED_LABEL_COLOR));
+        } catch (Throwable ignored) {
+            return Color.RED;
+        }
+    }
+
+    void refreshDeletedLabels() {
+        refreshVisibleDeletedTags();
+    }
+
     private static final class DeletedLabelSpan extends CharacterStyle {
+        private final int color;
+
+        DeletedLabelSpan(int color) {
+            this.color = color;
+        }
+
         @Override
         public void updateDrawState(TextPaint paint) {
-            paint.setColor(Color.RED);
+            paint.setColor(color);
             paint.setTextSize(paint.getTextSize() * 0.75f);
         }
     }
@@ -725,14 +783,11 @@ public class BetterMessageLogger extends Plugin {
     }
 
     private void deleteLoggedMessage(long id) {
-        records.remove(id);
-        liveMessages.remove(id);
-        if (databaseEnabled && database != null) database.removeAsync(id);
+        removeRecord(id);
         refreshVisibleDeletedTags();
         bumpRevision();
         Utils.showToast("Logged message deleted");
     }
-
     private void showHistory(WidgetChatListActions sheet, MessageRecord record) {
         StringBuilder text = new StringBuilder();
         for (String edit : record.editEntries()) text.append(edit).append("\n\n");
@@ -764,13 +819,48 @@ public class BetterMessageLogger extends Plugin {
     @Override
     public void stop(Context context) {
         patcher.unpatchAll();
+        records.clear();
+        transientRecordIds.clear();
+        liveMessages.clear();
         boundMessages.clear();
-        boundMessageItems.clear();
+        synchronized (boundMessageItems) {
+            boundMessageItems.clear();
+        }
+        deletedMessageIds.clear();
+        recentlyDeletedMessageIds.clear();
+        loadedRanges.clear();
         if (database != null) database.stop();
         database = null;
         instance = null;
     }
+    private static final class MessageCache {
+        private final Map<Long, com.discord.models.message.Message> messages;
 
+        MessageCache(final int maximumSize) {
+            messages = new LinkedHashMap<Long, com.discord.models.message.Message>(maximumSize + 1, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Long, com.discord.models.message.Message> eldest) {
+                    return size() > maximumSize;
+                }
+            };
+        }
+
+        synchronized com.discord.models.message.Message get(long id) {
+            return messages.get(id);
+        }
+
+        synchronized void put(long id, com.discord.models.message.Message message) {
+            messages.put(id, message);
+        }
+
+        synchronized void remove(long id) {
+            messages.remove(id);
+        }
+
+        synchronized void clear() {
+            messages.clear();
+        }
+    }
     static final class MessageRecord {
         final long id;
         final long channelId;

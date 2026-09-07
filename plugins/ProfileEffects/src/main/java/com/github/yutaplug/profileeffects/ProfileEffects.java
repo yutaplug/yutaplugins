@@ -17,6 +17,7 @@ import com.aliucord.Http;
 import com.aliucord.Utils;
 import com.aliucord.annotations.AliucordPlugin;
 import com.aliucord.entities.Plugin;
+import com.aliucord.entities.Plugin.SettingsTab;
 import com.aliucord.patcher.Hook;
 import com.aliucord.utils.GsonUtils;
 import b.f.g.c.c;
@@ -33,6 +34,9 @@ import com.discord.widgets.user.usersheet.WidgetUserSheetViewModel;
 
 import androidx.constraintlayout.widget.ConstraintLayout;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -43,14 +47,19 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.Semaphore;
 
 @SuppressWarnings({"unused", "unchecked"})
 @AliucordPlugin
 public final class ProfileEffects extends Plugin {
+    static final String USE_WEBVIEW = "useWebView";
     private static final String TAG = "ProfileEffects";
     private static final String CDN = "https://cdn.discordapp.com";
+    private static final int MAX_WEBVIEW_LAYER_SIZE = 8191;
     private static final long CACHE_DURATION = 10L * 60L * 1000L;
-
+    // APNG decoding retains every frame. Serializing decodes prevents two large
+    // profile layers from spiking the app's heap at the same time.
+    private static final Semaphore APNG_DECODE_PERMIT = new Semaphore(1, true);
     private final Map<String, CachedProfile> profileCache = new ConcurrentHashMap<>();
     private final Set<String> profileRequests = ConcurrentHashMap.newKeySet();
     private final Map<UserProfileHeaderView, String> boundProfiles =
@@ -65,6 +74,8 @@ public final class ProfileEffects extends Plugin {
     @Override
     public void start(Context context) throws Throwable {
         Log.i(TAG, "ProfileEffects started");
+        settingsTab = new SettingsTab(ProfileEffectsSettings.class, SettingsTab.Type.BOTTOM_SHEET)
+                .withArgs(settings);
         patcher.patch(
                 UserProfileHeaderView.class,
                 "updateViewState",
@@ -387,8 +398,10 @@ public final class ProfileEffects extends Plugin {
             removeFromParent(effectOverlay);
             attachBoundedChild(host, header, effectOverlay, false);
         }
+        effectOverlay.setUseWebView(settings.getBool(USE_WEBVIEW, false));
         effectOverlay.setEffect(profile.effect);
         host.bringChildToFront(frontOverlay);
+        host.bringChildToFront(effectOverlay);
     }
 
     private static void attachBoundedChild(ViewGroup host, UserProfileHeaderView header,
@@ -617,7 +630,19 @@ public final class ProfileEffects extends Plugin {
         for (Object value : asList(raw)) {
             Map<?, ?> effect = asMap(value);
             if (effect == null) continue;
-            String source = cdnUrl(effect.get("src"));
+            String source = effectSource(effect);
+            if (!source.isEmpty()) return source;
+        }
+        return "";
+    }
+
+    private static String effectSource(Map<?, ?> effect) {
+        String source = cdnUrl(effect.get("src"));
+        if (!source.isEmpty()) return source;
+        for (Object value : asList(effect.get("randomizedSources"))) {
+            Map<?, ?> randomized = asMap(value);
+            if (randomized == null) continue;
+            source = cdnUrl(randomized.get("src"));
             if (!source.isEmpty()) return source;
         }
         return "";
@@ -628,20 +653,23 @@ public final class ProfileEffects extends Plugin {
         for (Object value : asList(raw)) {
             Map<?, ?> object = asMap(value);
             if (object == null) continue;
-            String source = cdnUrl(object.get("src"));
+            String source = effectSource(object);
             if (source.isEmpty()) continue;
 
             Map<?, ?> position = asMap(object.get("position"));
+            Object zIndex = object.containsKey("zIndex")
+                    ? object.get("zIndex") : object.get("z_index");
             effects.add(new EffectLayer(
                     source,
                     number(object.get("start"), 0L),
                     number(object.get("duration"), 0L),
                     booleanValue(object.get("loop")),
+                    number(object.get("loopDelay"), 0L),
                     number(position == null ? null : position.get("x"), 0L),
                     number(position == null ? null : position.get("y"), 0L),
                     number(object.get("width"), 450L),
                     number(object.get("height"), 880L),
-                    number(object.get("zIndex"), 0L)));
+                    number(zIndex, 0L)));
         }
         effects.sort(Comparator.comparingLong(effect -> effect.zIndex));
         return effects;
@@ -652,6 +680,14 @@ public final class ProfileEffects extends Plugin {
         if (source.startsWith("//")) return "https:" + source;
         if (source.startsWith("/")) return CDN + source;
         return source;
+    }
+
+    private static File effectCacheFile(Context context, String source) {
+        File directory = new File(context.getCacheDir(), "profile-effects");
+        if ((!directory.exists() && !directory.mkdirs()) || !directory.isDirectory()) {
+            throw new IllegalStateException("Could not create profile effect cache");
+        }
+        return new File(directory, Integer.toHexString(source.hashCode()) + ".png");
     }
 
     private static String firstNonEmpty(String... values) {
@@ -785,6 +821,7 @@ public final class ProfileEffects extends Plugin {
         private final long start;
         private final long duration;
         private final boolean loop;
+        private final long loopDelay;
         private final long x;
         private final long y;
         private final long width;
@@ -792,11 +829,13 @@ public final class ProfileEffects extends Plugin {
         private final long zIndex;
 
         private EffectLayer(String source, long start, long duration, boolean loop,
+                            long loopDelay,
                             long x, long y, long width, long height, long zIndex) {
             this.source = source;
             this.start = Math.max(0L, start);
             this.duration = Math.max(0L, duration);
             this.loop = loop;
+            this.loopDelay = Math.max(0L, loopDelay);
             this.x = x;
             this.y = y;
             this.width = width > 0L ? width : 450L;
@@ -1013,6 +1052,8 @@ public final class ProfileEffects extends Plugin {
     private static final class EffectOverlay extends TouchThroughFrameLayout {
         private Product effect;
         private WebView webView;
+        private final List<EffectLayerView> layerViews = new ArrayList<>();
+        private boolean useWebView;
         private boolean rebuildOnAttach;
         private final Runnable restartTask = () -> {
             if (getWindowToken() == null || getWindowVisibility() != View.VISIBLE) return;
@@ -1030,9 +1071,22 @@ public final class ProfileEffects extends Plugin {
             setClipToPadding(false);
         }
 
+        @Override
+        protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+            super.onSizeChanged(width, height, oldWidth, oldHeight);
+            layoutLayers();
+            resizeWebView();
+        }
+
         private void setEffect(Product effect) {
             if (this.effect == effect) return;
             this.effect = effect;
+            rebuild();
+        }
+
+        private void setUseWebView(boolean useWebView) {
+            if (this.useWebView == useWebView) return;
+            this.useWebView = useWebView;
             rebuild();
         }
 
@@ -1050,6 +1104,8 @@ public final class ProfileEffects extends Plugin {
             } else {
                 rebuildOnAttach = true;
                 removeCallbacks(restartTask);
+                pauseWebView();
+                disposeLayers();
             }
         }
 
@@ -1057,10 +1113,9 @@ public final class ProfileEffects extends Plugin {
         protected void onDetachedFromWindow() {
             rebuildOnAttach = true;
             removeCallbacks(restartTask);
-            if (webView != null) {
-                webView.onPause();
-                webView.pauseTimers();
-            }
+            destroyWebView();
+            disposeLayers();
+            removeAllViews();
             super.onDetachedFromWindow();
         }
 
@@ -1075,55 +1130,40 @@ public final class ProfileEffects extends Plugin {
         }
 
         private void restartAnimationNow() {
-            if (webView == null || effect == null || effect.effectLayers.isEmpty()) return;
-            // Resume and restart the already-created image elements. Reloading the
-            // document here makes the fullscreen sheet wait for every CDN asset again.
-            webView.onResume();
-            webView.resumeTimers();
-            webView.postDelayed(() -> {
-                if (webView != null && getWindowToken() != null
-                        && getWindowVisibility() == View.VISIBLE) {
-                    webView.evaluateJavascript(
-                            "(function(){if(window.restartEffects)window.restartEffects();})();",
-                            null);
-                }
-            }, 50L);
+            if (useWebView) {
+                if (webView == null) return;
+                webView.onResume();
+                webView.resumeTimers();
+                webView.postDelayed(() -> {
+                    if (webView != null && getWindowToken() != null
+                            && getWindowVisibility() == View.VISIBLE) {
+                        webView.evaluateJavascript(
+                                "(function(){if(window.restartEffects)window.restartEffects();})();",
+                                null);
+                    }
+                }, 50L);
+                return;
+            }
+            if (effect == null || effect.effectLayers.isEmpty()) return;
+            for (EffectLayerView layerView : layerViews) layerView.restart();
         }
 
         private void rebuild() {
-            if (webView != null) {
-                webView.stopLoading();
-                webView.onPause();
-                webView.destroy();
-                webView = null;
-            }
+            destroyWebView();
+            disposeLayers();
             removeAllViews();
+            layerViews.clear();
             if (effect == null || effect.effectSource.isEmpty()) return;
 
             if (!effect.effectLayers.isEmpty()) {
-                WebView view = new WebView(getContext());
-                view.setBackgroundColor(Color.TRANSPARENT);
-                view.setAlpha(1f);
-                view.setClickable(false);
-                view.setFocusable(false);
-                view.setVerticalScrollBarEnabled(false);
-                view.setHorizontalScrollBarEnabled(false);
-                view.setOverScrollMode(View.OVER_SCROLL_NEVER);
-                // Chromium is required for animated APNG effect layers.
-                view.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-                view.getSettings().setJavaScriptEnabled(true);
-                view.getSettings().setDomStorageEnabled(false);
-                view.getSettings().setLoadsImagesAutomatically(true);
-                view.getSettings().setSupportZoom(false);
-                addView(view, new FrameLayout.LayoutParams(
-                        LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
-                webView = view;
-                view.loadDataWithBaseURL(
-                        CDN + "/",
-                        effectHtml(effect),
-                        "text/html",
-                        "UTF-8",
-                        null);
+                if (useWebView) {
+                    createWebView();
+                    return;
+                }
+                // React Native renders each profile-effect asset as an independent
+                // native image layer. Decode the same APNG format used by Discord.
+                for (EffectLayer layer : effect.effectLayers) addLayer(layer);
+                layoutLayers();
                 return;
             }
 
@@ -1157,9 +1197,283 @@ public final class ProfileEffects extends Plugin {
                     });
         }
 
+        private void createWebView() {
+            WebView view = new WebView(getContext());
+            view.setBackgroundColor(Color.TRANSPARENT);
+            view.setAlpha(1f);
+            view.setClickable(false);
+            view.setFocusable(false);
+            view.setVerticalScrollBarEnabled(false);
+            view.setHorizontalScrollBarEnabled(false);
+            view.setOverScrollMode(View.OVER_SCROLL_NEVER);
+            view.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            view.getSettings().setJavaScriptEnabled(true);
+            view.getSettings().setDomStorageEnabled(false);
+            view.getSettings().setLoadsImagesAutomatically(true);
+            view.getSettings().setSupportZoom(false);
+            addView(view, new FrameLayout.LayoutParams(
+                    LayoutParams.MATCH_PARENT, effectSurfaceHeight()));
+            webView = view;
+            resizeWebView();
+            view.loadDataWithBaseURL(
+                    CDN + "/",
+                    effectHtml(effect),
+                    "text/html",
+                    "UTF-8",
+                    null);
+        }
+
+        private void resizeWebView() {
+            if (webView == null) return;
+            ViewGroup.LayoutParams params = webView.getLayoutParams();
+            int height = effectSurfaceHeight();
+            if (params.height != height) {
+                params.height = height;
+                webView.setLayoutParams(params);
+            }
+        }
+
+        private int effectSurfaceHeight() {
+            if (effect == null || effect.effectLayers.isEmpty()) return 1;
+            int width = getWidth();
+            if (width <= 0) return 1;
+
+            float maxBottom = 1f;
+            for (EffectLayer layer : effect.effectLayers) {
+                float scale = width / (float) Math.max(1L, layer.width);
+                maxBottom = Math.max(maxBottom, layer.y + layer.height * scale);
+            }
+            return Math.max(1, Math.min(MAX_WEBVIEW_LAYER_SIZE, Math.round(maxBottom)));
+        }
+
+        private void pauseWebView() {
+            if (webView != null) {
+                webView.onPause();
+                webView.pauseTimers();
+            }
+        }
+
+        private void destroyWebView() {
+            if (webView == null) return;
+            webView.stopLoading();
+            webView.onPause();
+            webView.pauseTimers();
+            webView.destroy();
+            webView = null;
+        }
+
+        private void addLayer(EffectLayer layer) {
+            SimpleDraweeView image = new SimpleDraweeView(getContext());
+            image.setAdjustViewBounds(true);
+            image.setScaleType(ImageView.ScaleType.FIT_XY);
+            image.setClickable(false);
+            image.setFocusable(false);
+            image.setVisibility(View.VISIBLE);
+            image.setAlpha(1f);
+            image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            EffectLayerView layerView = new EffectLayerView(layer, image);
+            layerViews.add(layerView);
+            addView(image, new FrameLayout.LayoutParams(
+                    LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+            loadLayer(layerView);
+        }
+
+        private void loadLayer(EffectLayerView layerView) {
+            Context context = getContext().getApplicationContext();
+            Utils.threadPool.execute(() -> {
+                boolean permitAcquired = false;
+                try {
+                    if (!layerView.active) return;
+                    APNG_DECODE_PERMIT.acquire();
+                    permitAcquired = true;
+                    if (!layerView.active) return;
+                    java.io.File file = effectCacheFile(context, layerView.layer.source);
+                    if (!file.isFile() || file.length() == 0L) {
+                        Http.simpleDownload(layerView.layer.source, file);
+                    }
+                    b.l.a.a drawable;
+                    try (InputStream input = new FileInputStream(file)) {
+                        drawable = b.l.a.a.a(input, null, null);
+                    }
+                    b.l.a.a decoded = drawable;
+                    Utils.mainThread.post(() -> {
+                        if (!layerView.active || layerView.image.getParent() != EffectOverlay.this) {
+                            decoded.stop();
+                            return;
+                        }
+                        layerView.setApng(decoded);
+                    });
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                } catch (Throwable error) {
+                    Log.w(TAG, "APNG effect decode failed; using image fallback: "
+                            + layerView.layer.source, error);
+                    Utils.mainThread.post(() -> {
+                        if (layerView.active && layerView.image.getParent() == EffectOverlay.this) {
+                            if (error instanceof OutOfMemoryError) {
+                                layerView.releaseImage();
+                                layerView.image.setVisibility(View.INVISIBLE);
+                            } else {
+                                layerView.loadStatic();
+                            }
+                        }
+                    });
+                } finally {
+                    if (permitAcquired) APNG_DECODE_PERMIT.release();
+                }
+            });
+        }
+
+        private void layoutLayers() {
+            if (getWidth() <= 0) return;
+            for (EffectLayerView layerView : layerViews) {
+                FrameLayout.LayoutParams params = (FrameLayout.LayoutParams)
+                        layerView.image.getLayoutParams();
+                params.gravity = Gravity.TOP | Gravity.START;
+                params.leftMargin = 0;
+                params.topMargin = 0;
+                params.width = Math.max(1, getWidth());
+                float aspect = layerView.imageWidth > 0 && layerView.imageHeight > 0
+                        ? layerView.imageHeight / (float) layerView.imageWidth
+                        : layerView.layer.height / (float) layerView.layer.width;
+                params.height = Math.max(1, Math.round(getWidth() * aspect));
+                layerView.image.setLayoutParams(params);
+                layerView.image.setZ(layerView.layer.zIndex);
+            }
+        }
+
+        private void disposeLayers() {
+            for (EffectLayerView layerView : layerViews) layerView.dispose();
+        }
+
         private static void updateAspectRatio(SimpleDraweeView image, ImageInfo info) {
             if (info != null && info.getWidth() > 0 && info.getHeight() > 0) {
                 image.setAspectRatio(info.getWidth() / (float) info.getHeight());
+            }
+        }
+
+        private final class EffectLayerView {
+            private final EffectLayer layer;
+            private final SimpleDraweeView image;
+            private Animatable animatable;
+            private int imageWidth;
+            private int imageHeight;
+            private volatile boolean active = true;
+            private final Runnable startTask = this::startNow;
+            private final Runnable stopTask = this::finishCycle;
+
+            private EffectLayerView(EffectLayer layer, SimpleDraweeView image) {
+                this.layer = layer;
+                this.image = image;
+            }
+
+            private void setImage(ImageInfo info, Animatable animatable) {
+                setImageSize(info);
+                this.animatable = animatable;
+                restart();
+            }
+
+            private void setApng(b.l.a.a drawable) {
+                image.setImageDrawable(drawable);
+                imageWidth = drawable.getIntrinsicWidth();
+                imageHeight = drawable.getIntrinsicHeight();
+                animatable = drawable;
+                layoutLayers();
+                restart();
+            }
+
+            private void loadStatic() {
+                MGImages.setImage(image, Collections.singletonList(layer.source),
+                        0,
+                        0,
+                        false,
+                        null,
+                        MGImages.AlwaysUpdateChangeDetector.INSTANCE,
+                        new c<ImageInfo>() {
+                            @Override
+                            public void onFinalImageSet(String id, ImageInfo info,
+                                                        Animatable loadedAnimatable) {
+                                setImage(info, loadedAnimatable);
+                            }
+
+                            @Override
+                            public void onIntermediateImageSet(String id, ImageInfo info) {
+                                setImageSize(info);
+                            }
+
+                            @Override
+                            public void onFailure(String id, Throwable error) {
+                                Log.e(TAG, "Effect layer fallback failed: " + id, error);
+                            }
+                        });
+            }
+
+            private void setImageSize(ImageInfo info) {
+                if (info == null || info.getWidth() <= 0 || info.getHeight() <= 0) return;
+                imageWidth = info.getWidth();
+                imageHeight = info.getHeight();
+                layoutLayers();
+            }
+
+            private void restart() {
+                removeCallbacks(startTask);
+                removeCallbacks(stopTask);
+                stopNow();
+                if (layer.start > 0L) {
+                    // Keep delayed layers out of the first intro. Their first
+                    // decoded frame can contain visible pixels even while paused.
+                    image.setVisibility(View.INVISIBLE);
+                    postDelayed(startTask, layer.start);
+                } else {
+                    startNow();
+                }
+            }
+
+            private void startNow() {
+                image.setVisibility(View.VISIBLE);
+                if (animatable != null) animatable.start();
+                if (layer.duration > 0L && (!layer.loop || layer.loopDelay > 0L)) {
+                    postDelayed(stopTask, layer.duration);
+                }
+            }
+
+            private void stopNow() {
+                removeCallbacks(startTask);
+                removeCallbacks(stopTask);
+                if (animatable != null) animatable.stop();
+            }
+
+            private void finishCycle() {
+                if (animatable != null) animatable.stop();
+                if (!layer.loop) {
+                    // Discord profile effects can contain a one-shot intro layer
+                    // alongside a delayed looping layer. Do not leave the intro's
+                    // final frame frozen over the looping renderer.
+                    image.setVisibility(View.INVISIBLE);
+                    return;
+                }
+                if (active && layer.loop && layer.loopDelay > 0L
+                        && getWindowToken() != null && getWindowVisibility() == View.VISIBLE) {
+                    postDelayed(startTask, layer.loopDelay);
+                }
+            }
+
+            private void stop() {
+                removeCallbacks(startTask);
+                stopNow();
+            }
+
+            private void releaseImage() {
+                stopNow();
+                animatable = null;
+                image.setImageDrawable(null);
+                imageWidth = 0;
+                imageHeight = 0;
+            }
+
+            private void dispose() {
+                active = false;
+                releaseImage();
             }
         }
 
@@ -1176,8 +1490,6 @@ public final class ProfileEffects extends Plugin {
                             + ".effect{position:absolute;left:0;top:0;width:100%;"
                             + "height:auto;display:block;}"
                             + "</style>");
-            // Fetch every layer while the first layer is decoding so later animated
-            // layers do not wait for a separate request.
             for (EffectLayer layer : effect.effectLayers) {
                 html.append("<link rel=\"preload\" as=\"image\" href=\"")
                         .append(htmlEscape(layer.source))
@@ -1191,8 +1503,6 @@ public final class ProfileEffects extends Plugin {
                         .append(layer.start)
                         .append("\"");
                 if (layer.start == 0L) {
-                    // Start the first layer during initial document parsing so the
-                    // fullscreen sheet does not show a blank animation surface.
                     html.append(" src=\"")
                             .append(htmlEscape(layer.source))
                             .append("\"");

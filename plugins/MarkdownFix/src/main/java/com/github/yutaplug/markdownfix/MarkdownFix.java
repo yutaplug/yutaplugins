@@ -445,7 +445,9 @@ public final class MarkdownFix extends Plugin {
         parser.addRule(rules.createChannelMentionRule());
         parser.addRule(rules.createRoleMentionRule());
         parser.addRule(rules.createUserMentionRule());
-        parser.addRule(rules.createUnicodeEmojiRule());
+        Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> nativeUnicodeRule =
+                rules.createUnicodeEmojiRule();
+        parser.addRule(new DynamicUnicodeEmojiRule(nativeUnicodeRule));
         parser.addRule(rules.createTimestampRule());
         parser.addRule(new HeaderRule(settings));
         parser.addRule(new SubtextRule(settings));
@@ -477,13 +479,68 @@ public final class MarkdownFix extends Plugin {
         parser.addRule(rules.createChannelMentionRule());
         parser.addRule(rules.createRoleMentionRule());
         parser.addRule(rules.createUserMentionRule());
-        parser.addRule(rules.createUnicodeEmojiRule());
+        Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> nativeUnicodeRule =
+                rules.createUnicodeEmojiRule();
+        parser.addRule(new DynamicUnicodeEmojiRule(nativeUnicodeRule));
         parser.addRule(rules.createTimestampRule());
         parser.addRule(new HeaderRule(settings));
         parser.addRule(new ForumListRule(settings));
         parser.addRules(e.a(false, false));
         parser.addRule(rules.createTextReplacementRule());
         return parser;
+    }
+
+    /**
+     * Reads Discord's live emoji pattern rather than Rules' lazily cached one.
+     * NewEmojis updates that live pattern to include newer ZWJ sequences.
+     */
+    private static final class DynamicUnicodeEmojiRule
+            extends Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
+        private final Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> nativeRule;
+        private Pattern providerPattern;
+        private Pattern anchoredPattern;
+
+        private DynamicUnicodeEmojiRule(
+                Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> nativeRule) {
+            super(Pattern.compile("(?!x)x"));
+            this.nativeRule = nativeRule;
+        }
+
+        @Override
+        public Matcher match(CharSequence source, String previousMatch, MessageParseState state) {
+            // Prefer Discord's native rule for ordinary emoji so EmojiNode rendering
+            // remains exactly the same as in the unpatched message parser.
+            Matcher nativeMatcher = nativeRule.match(source, previousMatch, state);
+            Rules.EmojiDataProvider provider = Rules.access$getEmojiDataProvider$p(Rules.INSTANCE);
+            Pattern currentProviderPattern = provider.getUnicodeEmojisPattern();
+            if (currentProviderPattern != null) {
+                // TextEmoji intentionally disables Unicode emoji parsing with this
+                // unmatchable pattern so the original text remains visible.
+                if ("$a".equals(currentProviderPattern.pattern())) return null;
+                if (currentProviderPattern != providerPattern) {
+                    providerPattern = currentProviderPattern;
+                    anchoredPattern = Pattern.compile("^(" + currentProviderPattern.pattern() + ")");
+                }
+
+                Matcher liveMatcher = anchoredPattern.matcher(source);
+                if (liveMatcher.find()
+                        && (nativeMatcher == null || liveMatcher.end() > nativeMatcher.end())) {
+                    return liveMatcher;
+                }
+            }
+
+            return nativeMatcher;
+        }
+
+        @Override
+        public ParseSpec<MessageRenderContext, MessageParseState> parse(
+                Matcher matcher,
+                Parser<MessageRenderContext, ? super Node<MessageRenderContext>, MessageParseState> parser,
+                MessageParseState state) {
+            // The native parser reads the current provider map, so it can render
+            // both built-in emoji and sequences added by NewEmojis.
+            return nativeRule.parse(matcher, parser, state);
+        }
     }
 
     private static final class EscapeRule

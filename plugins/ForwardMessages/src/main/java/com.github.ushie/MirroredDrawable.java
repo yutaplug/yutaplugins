@@ -1,8 +1,10 @@
 package com.github.ushie;
 
+import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
 import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 
@@ -42,6 +44,25 @@ public class MirroredDrawable extends Drawable {
 
     @Override
     public void setColorFilter(ColorFilter colorFilter) { base.setColorFilter(colorFilter); }
+
+    @Override
+    public void setTint(int tintColor) { base.setTint(tintColor); }
+
+    @Override
+    public void setTintList(ColorStateList tint) { base.setTintList(tint); }
+
+    @Override
+    public void setTintMode(PorterDuff.Mode tintMode) { base.setTintMode(tintMode); }
+
+    @Override
+    protected boolean onStateChange(int[] state) {
+        boolean changed = base.setState(state);
+        if (changed) invalidateSelf();
+        return changed;
+    }
+
+    @Override
+    public boolean isStateful() { return base.isStateful(); }
 
     @Override
     public int getOpacity() {

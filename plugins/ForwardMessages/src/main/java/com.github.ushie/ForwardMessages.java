@@ -10,6 +10,7 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.Build;
+import android.os.SystemClock;
 import android.telephony.SignalStrength;
 import android.telephony.TelephonyManager;
 import android.view.GestureDetector;
@@ -25,6 +26,8 @@ import android.widget.Toast;
 import androidx.appcompat.widget.Toolbar;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.core.content.ContextCompat;
+import androidx.core.graphics.drawable.DrawableCompat;
+import androidx.core.widget.TextViewCompat;
 import androidx.core.widget.NestedScrollView;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -37,6 +40,7 @@ import com.aliucord.utils.DimenUtils;
 import com.discord.databinding.WidgetIncomingShareBinding;
 import com.discord.utilities.SnowflakeUtils;
 import com.discord.utilities.captcha.CaptchaHelper;
+import com.discord.utilities.color.ColorCompat;
 import com.discord.utilities.intent.IntentUtils;
 import com.discord.utilities.time.Clock;
 import com.discord.widgets.chat.list.ViewEmbedGameInvite;
@@ -72,6 +76,8 @@ public class ForwardMessages extends Plugin {
     private RecyclerView activeResultsRecyclerView;
     private Field selectedReceiverPublisherField;
     private long selectedFavorite;
+    private long lastFavoriteActionId;
+    private long lastFavoriteActionAt;
 
     @Override
     public void start(Context context) throws Throwable {
@@ -104,7 +110,21 @@ public class ForwardMessages extends Plugin {
                         com.lytefast.flexinput.R.i.UiKit_Settings_Item_Icon);
                     tw.setId(forwardId);
                     tw.setText("Forward");
-                    tw.setCompoundDrawablesRelativeWithIntrinsicBounds(forwardIcon, null, null, null);
+                    TextView replyButton = lay.findViewById(
+                        Utils.getResId("dialog_chat_actions_reply", "id"));
+                    if (replyButton != null) {
+                        tw.setTextColor(replyButton.getTextColors());
+                        int interactiveNormal = Utils.getResId(
+                            "colorInteractiveNormal", "attr");
+                        if (interactiveNormal != 0) {
+                            DrawableCompat.setTint(replyIcon,
+                                ColorCompat.getThemedColor(tw.getContext(), interactiveNormal));
+                        }
+                        TextViewCompat.setCompoundDrawableTintList(tw,
+                            TextViewCompat.getCompoundDrawableTintList(replyButton));
+                    }
+                    tw.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                        forwardIcon, null, null, null);
                     int childrenCount = lay.getChildCount();
                     boolean foundIndex = false;
                     for (int i = 0; i < childrenCount; i++) {
@@ -302,6 +322,7 @@ public class ForwardMessages extends Plugin {
                     server.setLayoutParams(serverParams);
                 }
             }
+            installFavoriteChildLongPress(row, payload);
         }));
 
         patcher.patch(WidgetIncomingShare.class.getDeclaredMethod("configureUi", WidgetIncomingShare.Model.class,
@@ -481,6 +502,37 @@ public class ForwardMessages extends Plugin {
         return hit.contains((int) x, (int) y);
     }
 
+    private void installFavoriteChildLongPress(ViewGlobalSearchItem row, Object payload) {
+        View icon = row.findViewById(Utils.getResId("item_icon_iv", "id"));
+        if (icon != null) {
+            icon.setOnLongClickListener(v -> favoritePayload(v.getContext(), payload));
+            icon.setOnClickListener(v -> row.performClick());
+        }
+
+        boolean isDm = getGuildName(payload).isEmpty();
+        View name = row.findViewById(Utils.getResId("item_name_tv", "id"));
+        if (name != null) {
+            if (isDm) {
+                name.setOnLongClickListener(null);
+                name.setOnClickListener(null);
+            } else {
+                name.setOnLongClickListener(v -> favoritePayload(v.getContext(), payload));
+                name.setOnClickListener(v -> row.performClick());
+            }
+        }
+
+        View server = row.findViewById(Utils.getResId("item_group_tv", "id"));
+        if (server != null) {
+            if (isDm) {
+                server.setOnLongClickListener(null);
+                server.setOnClickListener(null);
+            } else {
+                server.setOnLongClickListener(v -> favoritePayload(v.getContext(), payload));
+                server.setOnClickListener(v -> row.performClick());
+            }
+        }
+    }
+
     private void refreshFavoriteServers(RecyclerView recyclerView) {
         if (recyclerView.getAdapter() == null) return;
         boolean changed = false;
@@ -623,6 +675,11 @@ public class ForwardMessages extends Plugin {
     private boolean favoritePayload(Context context, Object payload) {
         long channelId = getChannelId(payload);
         if (channelId == 0) return false;
+        long now = SystemClock.uptimeMillis();
+        if (channelId == lastFavoriteActionId && now - lastFavoriteActionAt < 750)
+            return true;
+        lastFavoriteActionId = channelId;
+        lastFavoriteActionAt = now;
         String name = getChannelName(payload);
         if (name.isEmpty()) name = "Channel " + channelId;
         if (favorites.containsKey(channelId)) {

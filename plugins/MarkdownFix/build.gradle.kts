@@ -1,8 +1,10 @@
-version = "1.0.7"
+version = "1.0.8"
 description = "Backports Discord's newer Markdown formatting to chat messages."
 aliucord {
     changelog.set(
         """
+        # 1.0.8
+        * Fix NewEmojis and TextEmoji
         # 1.0.7
         * Fix consecutive bullets rendering
         # 1.0.6

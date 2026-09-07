@@ -64,7 +64,7 @@ final class MessageLoggerDatabase {
             synchronized (this) {
                 if (database == null || !database.isOpen()) return;
                 try (Cursor cursor = database.rawQuery("SELECT message_id, channel_id, guild_id, author_id, author_name, "
-                        + "author_avatar, author_bot, content, timestamp, edited_timestamp, deleted, deleted_timestamp, edits FROM messages", null)) {
+                        + "author_avatar, author_bot, content, timestamp, edited_timestamp, deleted, deleted_timestamp, edits FROM messages WHERE deleted = 1 OR edits <> ''", null)) {
                     while (cursor.moveToNext()) records.add(fromCursor(cursor));
                 } catch (Throwable ignored) {
                     // A corrupt/old row must not prevent the plugin from loading the remaining rows.
