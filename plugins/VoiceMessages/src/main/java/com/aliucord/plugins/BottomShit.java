@@ -56,6 +56,18 @@ public final class BottomShit extends BottomSheet {
                 VoiceMessages.DEFAULT_BUTTON_COLOR);
         addColorSetting(context, "Voice icon color", "Microphone color when idle", "buttonIconColor",
                 VoiceMessages.DEFAULT_ICON_COLOR);
+        CheckedSetting translucentButton = Utils.createCheckedSetting(
+                context,
+                CheckedSetting.ViewType.SWITCH,
+                "Translucent button",
+                "Use a semi-transparent background for the voice button"
+        );
+        translucentButton.setChecked(settings.getBool("translucentButton", false));
+        translucentButton.setOnCheckedListener(value -> {
+            settings.setBool("translucentButton", value);
+            VoiceMessages.refreshButtonColor();
+        });
+        addSetting(translucentButton, context, 4);
 
         addSectionHeader(context, "Audio quality", false);
         addQualitySettings(context);

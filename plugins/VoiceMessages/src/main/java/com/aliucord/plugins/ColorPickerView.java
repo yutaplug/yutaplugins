@@ -74,11 +74,11 @@ public class ColorPickerView extends View {
                 0,
                 new int[]{
                         Color.RED,
-                        Color.MAGENTA,
-                        Color.BLUE,
-                        Color.CYAN,
-                        Color.GREEN,
                         Color.YELLOW,
+                        Color.GREEN,
+                        Color.CYAN,
+                        Color.BLUE,
+                        Color.MAGENTA,
                         Color.RED
                 },
                 null,

@@ -226,7 +226,7 @@ public class VoiceMessages extends Plugin {
         recordButton.setContentDescription("Record voice message");
         var background = new GradientDrawable();
         background.setShape(GradientDrawable.OVAL);
-        background.setColor(getButtonColor());
+        background.setColor(getButtonBackgroundColor());
         recordButton.setBackground(background);
         recordButton.setMinimumWidth(0);
         recordButton.setMinimumHeight(0);
@@ -241,6 +241,7 @@ public class VoiceMessages extends Plugin {
         if (drawable != null) {
             recordIcon = drawable.mutate();
             recordIcon.setTint(getIconColor());
+            recordIcon.setAlpha(getButtonAlpha());
             recordButton.setImageDrawable(recordIcon);
         }
         recordButton.setVisibility(View.GONE);
@@ -249,6 +250,15 @@ public class VoiceMessages extends Plugin {
     private int getButtonColor() {
         int color = settings.getInt("buttonColor", DEFAULT_BUTTON_COLOR);
         return Color.alpha(color) == 0 ? DEFAULT_BUTTON_COLOR : color;
+    }
+
+    private int getButtonBackgroundColor() {
+        int color = getButtonColor();
+        return Color.argb(getButtonAlpha(), Color.red(color), Color.green(color), Color.blue(color));
+    }
+
+    private int getButtonAlpha() {
+        return settings.getBool("translucentButton", false) ? 160 : 255;
     }
 
     private int getIconColor() {
@@ -268,10 +278,13 @@ public class VoiceMessages extends Plugin {
         }
         var background = new GradientDrawable();
         background.setShape(GradientDrawable.OVAL);
-        background.setColor(getButtonColor());
+        background.setColor(getButtonBackgroundColor());
         recordButton.setBackground(background);
-        if (recordIcon != null && !isRecording) {
-            recordIcon.setTint(getIconColor());
+        if (recordIcon != null) {
+            recordIcon.setAlpha(getButtonAlpha());
+            if (!isRecording) {
+                recordIcon.setTint(getIconColor());
+            }
         }
     }
 
@@ -569,6 +582,7 @@ public class VoiceMessages extends Plugin {
         }
         if (recordIcon != null) {
             recordIcon.setTint(isRecording ? Color.rgb(237, 66, 69) : getIconColor());
+            recordIcon.setAlpha(getButtonAlpha());
         }
         if (recordButton != null) {
             recordButton.setContentDescription(isRecording
