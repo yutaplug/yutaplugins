@@ -115,6 +115,18 @@ final class MessageLoggerDatabase {
         });
     }
 
+    void clearEditHistoryAsync() {
+        executor.execute(() -> {
+            synchronized (this) {
+                if (database != null && database.isOpen()) {
+                    database.execSQL("UPDATE " + TABLE
+                            + " SET edited_timestamp = NULL, edits = ''"
+                            + " WHERE edited_timestamp IS NOT NULL OR edits <> ''");
+                }
+            }
+        });
+    }
+
     void exportAsync(File output, Runnable done) {
         executor.execute(() -> {
             try (FileWriter writer = new FileWriter(output, false)) {

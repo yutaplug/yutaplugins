@@ -63,6 +63,8 @@ public class BetterMessageLogger extends Plugin {
     private static final String TXT_NAME = "BetterMessageLogger.txt";
     private static final String DELETED_LABEL = " (deleted)";
     static final String DELETED_LABEL_COLOR = "deletedLabelColor";
+    static final String LOG_EDIT_HISTORY = "logEditHistory";
+    static final String SHOW_DELETED_TAG = "showDeletedTag";
     static final String DEFAULT_DELETED_LABEL_COLOR = "#FFFF0000";
     private static final int MAX_CACHED_MESSAGES = 512;
     private static final int MAX_TRANSIENT_RECORDS = 512;
@@ -266,9 +268,13 @@ public class BetterMessageLogger extends Plugin {
                 return;
             }
         }
+        if (!editLoggingEnabled()) {
+            record.edits = "";
+            record.editedTimestamp = null;
+        }
         String newContent = message.i();
         if (newContent != null && !newContent.equals(record.content)) {
-            record.addEdit(record.content, editTime(message));
+            if (editLoggingEnabled()) record.addEdit(record.content, editTime(message));
             record.content = newContent;
         }
         if (old != null) {
@@ -322,7 +328,13 @@ public class BetterMessageLogger extends Plugin {
         else {
             record.runtime = record.deleted || deletedMessageIds.contains(messageId) ? message : null;
             if (message.getContent() != null) record.content = message.getContent();
-            if (message.getEditedTimestamp() != null) record.editedTimestamp = message.getEditedTimestamp().g();
+            if (editLoggingEnabled() && message.getEditedTimestamp() != null) {
+                record.editedTimestamp = message.getEditedTimestamp().g();
+            }
+        }
+        if (!editLoggingEnabled()) {
+            record.edits = "";
+            record.editedTimestamp = null;
         }
         if (deletedMessageIds.contains(messageId)) {
             record.deleted = true;
@@ -487,6 +499,7 @@ public class BetterMessageLogger extends Plugin {
     private void openDatabase() {
         database = new MessageLoggerDatabase(new File(Constants.BASE_PATH, DB_NAME));
         database.open();
+        if (!editLoggingEnabled()) database.clearEditHistoryAsync();
         database.loadAllAsync(loaded -> {
             for (MessageRecord record : loaded) {
                 if (!shouldKeep(record)) {
@@ -526,12 +539,27 @@ public class BetterMessageLogger extends Plugin {
         bumpRevision();
     }
 
+    private boolean editLoggingEnabled() {
+        return settings.getBool(LOG_EDIT_HISTORY, true);
+    }
+
+    void setEditLoggingEnabled(boolean enabled) {
+        if (enabled) return;
+        for (MessageRecord record : records.values()) {
+            record.edits = "";
+            record.editedTimestamp = null;
+            persist(record);
+        }
+        if (database != null) database.clearEditHistoryAsync();
+        bumpRevision();
+    }
     void settingsChanged() {
         for (MessageRecord record : new ArrayList<>(records.values())) {
             if (!shouldKeep(record)) removeRecord(record.id);
             else persist(record);
         }
         bumpRevision();
+        refreshDeletedLabels();
     }
 
     void clearDatabase() {
@@ -602,19 +630,25 @@ public class BetterMessageLogger extends Plugin {
     }
 
     private void applyDeletedLabel(TextView textView, SpannableStringBuilder builder, boolean deleted) {
-
         DeletedLabelSpan[] oldLabels = builder.getSpans(0, builder.length(), DeletedLabelSpan.class);
-
-        if (!deleted && oldLabels.length == 0) return;
+        DeletedMessageColorSpan[] oldColors = builder.getSpans(0, builder.length(), DeletedMessageColorSpan.class);
+        boolean showTag = settings.getBool(SHOW_DELETED_TAG, true);
         int labelColor = deletedLabelColor();
-        if (deleted && oldLabels.length == 1) {
+
+        if (!deleted && oldLabels.length == 0 && oldColors.length == 0) return;
+        if (deleted && showTag && oldLabels.length == 1 && oldColors.length == 0) {
             int start = builder.getSpanStart(oldLabels[0]);
             int end = builder.getSpanEnd(oldLabels[0]);
             if (start == builder.length() - DELETED_LABEL.length() && end == builder.length()
                     && DELETED_LABEL.contentEquals(builder.subSequence(start, end))
                     && oldLabels[0].color == labelColor) return;
         }
+        if (deleted && !showTag && oldLabels.length == 0 && oldColors.length == 1
+                && builder.getSpanStart(oldColors[0]) == 0
+                && builder.getSpanEnd(oldColors[0]) == builder.length()
+                && oldColors[0].color == labelColor) return;
 
+        for (DeletedMessageColorSpan oldColor : oldColors) builder.removeSpan(oldColor);
         for (DeletedLabelSpan oldLabel : oldLabels) {
             int start = builder.getSpanStart(oldLabel);
             int end = builder.getSpanEnd(oldLabel);
@@ -622,10 +656,15 @@ public class BetterMessageLogger extends Plugin {
             builder.removeSpan(oldLabel);
         }
         if (deleted) {
-            int start = builder.length();
-            builder.append(DELETED_LABEL);
-            builder.setSpan(new DeletedLabelSpan(deletedLabelColor()), start, builder.length(),
-                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            if (showTag) {
+                int start = builder.length();
+                builder.append(DELETED_LABEL);
+                builder.setSpan(new DeletedLabelSpan(labelColor), start, builder.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            } else if (builder.length() > 0) {
+                builder.setSpan(new DeletedMessageColorSpan(labelColor), 0, builder.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
         }
         if (builder instanceof com.facebook.drawee.span.DraweeSpanStringBuilder
                 && textView instanceof com.discord.utilities.view.text.SimpleDraweeSpanTextView) {
@@ -649,7 +688,6 @@ public class BetterMessageLogger extends Plugin {
             textView.setText(builder, TextView.BufferType.SPANNABLE);
         }
     }
-
     private com.facebook.drawee.span.DraweeSpanStringBuilder getNativeTextBuilder(TextView textView) {
         if (!(textView instanceof com.discord.utilities.view.text.SimpleDraweeSpanTextView)) return null;
         try {
@@ -762,17 +800,34 @@ public class BetterMessageLogger extends Plugin {
         refreshVisibleDeletedTags();
     }
 
-    private static final class DeletedLabelSpan extends CharacterStyle {
-        private final int color;
+    private static class DeletedColorSpan extends CharacterStyle {
+        final int color;
 
-        DeletedLabelSpan(int color) {
+        DeletedColorSpan(int color) {
             this.color = color;
         }
 
         @Override
         public void updateDrawState(TextPaint paint) {
             paint.setColor(color);
+        }
+    }
+
+    private static final class DeletedLabelSpan extends DeletedColorSpan {
+        DeletedLabelSpan(int color) {
+            super(color);
+        }
+
+        @Override
+        public void updateDrawState(TextPaint paint) {
+            super.updateDrawState(paint);
             paint.setTextSize(paint.getTextSize() * 0.75f);
+        }
+    }
+
+    private static final class DeletedMessageColorSpan extends DeletedColorSpan {
+        DeletedMessageColorSpan(int color) {
+            super(color);
         }
     }
 

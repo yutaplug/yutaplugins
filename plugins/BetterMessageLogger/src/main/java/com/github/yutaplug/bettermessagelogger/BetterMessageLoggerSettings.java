@@ -67,6 +67,13 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         addSectionHeader(context, "Appearance", false);
         addAction(context, "Deleted tag color", "Current: " + currentDeletedLabelColor(),
                 () -> showColorDialog(context));
+
+        addToggle(context, "Show deleted tag", "Show the (deleted) marker after deleted messages",
+                BetterMessageLogger.SHOW_DELETED_TAG, true);
+
+        addSectionHeader(context, "Message history", false);
+        addEditLoggingToggle(context);
+
         addSectionHeader(context, "Message filters", false);
         addToggle(context, "Ignore my messages", "Do not save messages sent by your account", "ignoreOwn");
         addToggle(context, "Ignore bot messages", "Do not save messages sent by bots", "ignoreBots");
@@ -116,12 +123,34 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
     }
 
     private void addToggle(Context context, String title, String subtitle, String key) {
+        addToggle(context, title, subtitle, key, false);
+    }
+
+    private void addToggle(Context context, String title, String subtitle, String key, boolean defaultValue) {
         CheckedSetting setting = Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, title, subtitle);
-        setting.setChecked(settings.getBool(key, false));
+        setting.setChecked(settings.getBool(key, defaultValue));
         setting.setOnCheckedListener(value -> {
             settings.setBool(key, value);
             BetterMessageLogger plugin = BetterMessageLogger.getInstance();
-            if (plugin != null) plugin.settingsChanged();
+            if (plugin != null) {
+                plugin.settingsChanged();
+                if (BetterMessageLogger.SHOW_DELETED_TAG.equals(key)) plugin.refreshDeletedLabels();
+            }
+        });
+        addView(setting);
+    }
+
+    private void addEditLoggingToggle(Context context) {
+        CheckedSetting setting = Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH,
+                "Log edit history", "Save previous versions of edited messages");
+        setting.setChecked(settings.getBool(BetterMessageLogger.LOG_EDIT_HISTORY, true));
+        setting.setOnCheckedListener(value -> {
+            settings.setBool(BetterMessageLogger.LOG_EDIT_HISTORY, value);
+            BetterMessageLogger plugin = BetterMessageLogger.getInstance();
+            if (plugin != null) {
+                plugin.setEditLoggingEnabled(value);
+                plugin.settingsChanged();
+            }
         });
         addView(setting);
     }

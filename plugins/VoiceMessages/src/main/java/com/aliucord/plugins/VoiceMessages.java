@@ -9,7 +9,6 @@ import android.graphics.drawable.GradientDrawable;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaRecorder;
 import android.os.Build;
-import android.os.Bundle;
 import android.text.Editable;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -32,8 +31,9 @@ import com.aliucord.api.SettingsAPI;
 import com.aliucord.entities.Plugin;
 import com.aliucord.utils.DimenUtils;
 import com.discord.stores.StoreStream;
+import com.discord.widgets.chat.input.ChatInputViewModel;
+import com.discord.widgets.chat.input.WidgetChatInput;
 import com.discord.widgets.chat.input.WidgetChatInputEditText$setOnTextChangedListener$1;
-import com.lytefast.flexinput.fragment.FlexInputFragment;
 import com.lytefast.flexinput.widget.FlexEditText;
 
 import java.io.File;
@@ -197,37 +197,36 @@ public class VoiceMessages extends Plugin {
             return null;
         });
 
-        patcher.patch(FlexInputFragment.class.getDeclaredMethod("onViewCreated", View.class, Bundle.class), cf -> {
+        patcher.patch(WidgetChatInput.class.getDeclaredMethod("onViewBound", View.class), cf -> {
             View inputView = (View) cf.args[0];
             attachToChatInput(inputView);
             // Run after Discord finishes its first layout pass as well.
             Utils.mainThread.post(() -> attachToChatInput(inputView));
         });
 
-        patcher.patch(FlexInputFragment.class.getDeclaredMethod("onResume"), cf -> {
-            FlexInputFragment fragment = (FlexInputFragment) cf.thisObject;
-            Utils.mainThread.post(() -> {
-                View inputView = fragment.getView();
-                if (inputView != null) {
-                    attachToChatInput(inputView);
-                }
-            });
-        });
-
         patcher.patch(WidgetChatInputEditText$setOnTextChangedListener$1.class.getDeclaredMethod("afterTextChanged", Editable.class), cf -> {
             updateRecordButtonVisibility();
         });
 
-        // Observe the current activity because Android 7 can create the input after the plugin starts.
+        patcher.patch(WidgetChatInput.class.getDeclaredMethod(
+                "configureUI", ChatInputViewModel.ViewState.class
+        ), cf -> Utils.mainThread.post(this::updateRecordButtonVisibility));
+
+        // Observe only until the chat input is found. Keeping a listener on the activity decor
+        // while sheets are open can interfere with context menus such as PluginDownloader.
         Utils.mainThread.post(this::observeActivityLayout);
     }
 
     private void configureRecordButton(Context context) {
         recordButton.setContentDescription("Record voice message");
-        var background = new GradientDrawable();
-        background.setShape(GradientDrawable.OVAL);
-        background.setColor(getButtonBackgroundColor());
-        recordButton.setBackground(background);
+        if (isIntegratedButton()) {
+            recordButton.setBackground(null);
+        } else {
+            var background = new GradientDrawable();
+            background.setShape(GradientDrawable.OVAL);
+            background.setColor(getButtonBackgroundColor());
+            recordButton.setBackground(background);
+        }
         recordButton.setMinimumWidth(0);
         recordButton.setMinimumHeight(0);
         recordButton.setPadding(
@@ -261,6 +260,10 @@ public class VoiceMessages extends Plugin {
         return settings.getBool("translucentButton", false) ? 160 : 255;
     }
 
+    private boolean isIntegratedButton() {
+        return settings.getBool("integratedButton", false);
+    }
+
     private int getIconColor() {
         int color = settings.getInt("buttonIconColor", DEFAULT_ICON_COLOR);
         return Color.alpha(color) == 0 ? DEFAULT_ICON_COLOR : color;
@@ -269,6 +272,7 @@ public class VoiceMessages extends Plugin {
     static void refreshButtonColor() {
         if (instance != null) {
             instance.applyButtonColor();
+            instance.updateButtonPlacement();
         }
     }
 
@@ -276,10 +280,14 @@ public class VoiceMessages extends Plugin {
         if (recordButton == null) {
             return;
         }
-        var background = new GradientDrawable();
-        background.setShape(GradientDrawable.OVAL);
-        background.setColor(getButtonBackgroundColor());
-        recordButton.setBackground(background);
+        if (isIntegratedButton()) {
+            recordButton.setBackground(null);
+        } else {
+            var background = new GradientDrawable();
+            background.setShape(GradientDrawable.OVAL);
+            background.setColor(getButtonBackgroundColor());
+            recordButton.setBackground(background);
+        }
         if (recordIcon != null) {
             recordIcon.setAlpha(getButtonAlpha());
             if (!isRecording) {
@@ -295,7 +303,7 @@ public class VoiceMessages extends Plugin {
 
         try {
             View root = Utils.getAppActivity().getWindow().getDecorView();
-            if (root != observedActivityRoot) {
+            if (root != observedActivityRoot || inputLayoutListener == null) {
                 removeActivityLayoutObserver();
                 observedActivityRoot = root;
                 inputLayoutListener = () -> attachToChatInput(root);
@@ -361,20 +369,50 @@ public class VoiceMessages extends Plugin {
         }
 
         if (recordButton.getParent() != inputLayout) {
-            var buttonParams = new RelativeLayout.LayoutParams(
-                    DimenUtils.dpToPx(36),
-                    DimenUtils.dpToPx(36)
-            );
-            buttonParams.addRule(RelativeLayout.ALIGN_PARENT_RIGHT, RelativeLayout.TRUE);
-            buttonParams.addRule(RelativeLayout.CENTER_VERTICAL, RelativeLayout.TRUE);
-            buttonParams.rightMargin = DimenUtils.dpToPx(12);
-            if (!attachView(recordButton, inputLayout, -1, buttonParams)) {
-                return;
-            }
+            updateButtonPlacement();
+        } else if (isIntegratedButton()) {
+            updateButtonPlacement();
         }
 
         updateRecordingUi();
         updateRecordButtonVisibility();
+        removeActivityLayoutObserver();
+    }
+
+    private void updateButtonPlacement() {
+        if (recordButton == null || inputLayout == null || inputContainer == null) {
+            return;
+        }
+
+        ViewGroup target = isIntegratedButton() ? inputContainer : inputLayout;
+        if (recordButton.getParent() != target) {
+            if (!attachView(recordButton, target, -1, createButtonLayoutParams())) {
+                return;
+            }
+        } else {
+            recordButton.setLayoutParams(createButtonLayoutParams());
+        }
+        updateInputContainerLayout(recordButton.getVisibility() == View.VISIBLE);
+    }
+
+    private ViewGroup.LayoutParams createButtonLayoutParams() {
+        if (isIntegratedButton()) {
+            var params = new LinearLayout.LayoutParams(
+                    DimenUtils.dpToPx(36),
+                    DimenUtils.dpToPx(36)
+            );
+            params.gravity = Gravity.CENTER_VERTICAL;
+            return params;
+        }
+
+        var params = new RelativeLayout.LayoutParams(
+                DimenUtils.dpToPx(36),
+                DimenUtils.dpToPx(36)
+        );
+        params.addRule(RelativeLayout.ALIGN_PARENT_RIGHT, RelativeLayout.TRUE);
+        params.addRule(RelativeLayout.CENTER_VERTICAL, RelativeLayout.TRUE);
+        params.rightMargin = DimenUtils.dpToPx(12);
+        return params;
     }
 
     private boolean attachView(View view, ViewGroup target, int index, ViewGroup.LayoutParams params) {
@@ -422,7 +460,7 @@ public class VoiceMessages extends Plugin {
         }
 
         var params = (RelativeLayout.LayoutParams) rawParams;
-        int anchorId = buttonVisible
+        int anchorId = buttonVisible && !isIntegratedButton()
                 ? recordButton.getId()
                 : Utils.getResId("send_btn_container", "id");
         int rightMargin = DimenUtils.dpToPx(8);
@@ -435,16 +473,19 @@ public class VoiceMessages extends Plugin {
     }
 
     private void configureRecordingFormat() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q || settings.getBool("legacyOgg", false)) {
             outputFormat = MediaRecorder.OutputFormat.OGG;
             audioEncoder = MediaRecorder.AudioEncoder.OPUS;
             extension = ".ogg";
         } else {
-            // MPEG_2_TS was added in API 26. MPEG-4/AAC is available on Android 7.
-            outputFormat = MediaRecorder.OutputFormat.MPEG_4;
-            audioEncoder = MediaRecorder.AudioEncoder.AAC;
-            extension = ".m4a";
+            configureM4aRecordingFormat();
         }
+    }
+
+    private void configureM4aRecordingFormat() {
+        outputFormat = MediaRecorder.OutputFormat.MPEG_4;
+        audioEncoder = MediaRecorder.AudioEncoder.AAC;
+        extension = ".m4a";
     }
 
     public boolean onRecordStart() throws IOException {
@@ -463,10 +504,49 @@ public class VoiceMessages extends Plugin {
             throw new IOException("Could not create the voice recording directory");
         }
 
+        configureRecordingFormat();
         waveFormView.reset();
         outputFile = File.createTempFile("audio_record", extension, baseDirectory);
         outputFile.deleteOnExit();
 
+        MediaRecorder recorder;
+        try {
+            recorder = createRecorder(outputFile);
+        } catch (IOException | RuntimeException e) {
+            if (!isLegacyOggEnabled()) {
+                deleteFile(outputFile);
+                outputFile = null;
+                throw e;
+            }
+
+            // Ogg/Opus is not guaranteed to be available before Android 10.
+            // Keep the opt-in useful without breaking recording on unsupported devices.
+            logger.error(e);
+            deleteFile(outputFile);
+            configureM4aRecordingFormat();
+            outputFile = File.createTempFile("audio_record", extension, baseDirectory);
+            outputFile.deleteOnExit();
+            try {
+                recorder = createRecorder(outputFile);
+            } catch (IOException | RuntimeException fallbackError) {
+                deleteFile(outputFile);
+                outputFile = null;
+                throw fallbackError;
+            }
+        }
+
+        mediaRecorder = recorder;
+        isRecording = true;
+        recordingStartedAt = System.currentTimeMillis();
+        waveformReadFailed = false;
+        updateRecordingUi();
+
+        updateWaveformThread = new Thread(updateWaveform, "VoiceMessages-Waveform");
+        updateWaveformThread.start();
+        return true;
+    }
+
+    private MediaRecorder createRecorder(File file) throws IOException {
         MediaRecorder recorder = new MediaRecorder();
         try {
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
@@ -477,24 +557,18 @@ public class VoiceMessages extends Plugin {
             int quality = settings.getInt("audioQuality", 128);
             recorder.setAudioEncodingBitRate(Math.max(32000, Math.min(192000, quality * 1024)));
             setSamplingRate(recorder);
-            recorder.setOutputFile(outputFile.getAbsolutePath());
+            recorder.setOutputFile(file.getAbsolutePath());
             recorder.prepare();
             recorder.start();
-            mediaRecorder = recorder;
-            isRecording = true;
-            recordingStartedAt = System.currentTimeMillis();
-            waveformReadFailed = false;
-            updateRecordingUi();
+            return recorder;
         } catch (IOException | RuntimeException e) {
             releaseRecorder(recorder);
-            deleteFile(outputFile);
-            outputFile = null;
             throw e;
         }
+    }
 
-        updateWaveformThread = new Thread(updateWaveform, "VoiceMessages-Waveform");
-        updateWaveformThread.start();
-        return true;
+    private boolean isLegacyOggEnabled() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && settings.getBool("legacyOgg", false);
     }
 
     private void setSamplingRate(MediaRecorder recorder) {
@@ -599,9 +673,34 @@ public class VoiceMessages extends Plugin {
         Editable text = editText.getText();
         boolean hasAttachments = attachmentPreview != null
                 && attachmentPreview.getVisibility() == View.VISIBLE;
-        boolean buttonVisible = !hasAttachments && (isRecording || text == null || text.length() == 0);
+        boolean canType = isRecording || canUseComposer();
+        boolean buttonVisible = canType
+                && !hasAttachments
+                && (isRecording || text == null || text.length() == 0);
         recordButton.setVisibility(buttonVisible ? View.VISIBLE : View.GONE);
         updateInputContainerLayout(buttonVisible);
+    }
+
+    private boolean canUseComposer() {
+        if (!editText.isEnabled() || !editText.isFocusable() || !isViewTreeVisible(editText)) {
+            return false;
+        }
+        View cannotSendText = inputLayout == null
+                ? null
+                : inputLayout.findViewById(Utils.getResId("cannot_send_text", "id"));
+        return cannotSendText == null || !isViewTreeVisible(cannotSendText);
+    }
+
+    private boolean isViewTreeVisible(View view) {
+        View current = view;
+        while (current != null) {
+            if (current.getVisibility() != View.VISIBLE) {
+                return false;
+            }
+            ViewParent parent = current.getParent();
+            current = parent instanceof View ? (View) parent : null;
+        }
+        return true;
     }
 
     private boolean stopRecorder(MediaRecorder recorder) {

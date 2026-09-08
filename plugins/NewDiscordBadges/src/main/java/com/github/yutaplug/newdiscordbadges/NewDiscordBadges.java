@@ -1,12 +1,10 @@
 package com.github.yutaplug.newdiscordbadges;
 
 import android.content.Context;
-import android.os.Bundle;
 import android.util.Base64;
 import android.view.View;
 
 import androidx.recyclerview.widget.RecyclerView;
-import androidx.recyclerview.widget.LinearLayoutManager;
 
 import com.aliucord.Http;
 import com.aliucord.Utils;
@@ -19,7 +17,6 @@ import com.aliucord.api.rn.user.ProfileBadge;
 import com.aliucord.api.rn.user.RNUserProfile;
 import com.discord.models.user.User;
 import com.discord.databinding.WidgetUserSheetBinding;
-import com.discord.databinding.UserProfileHeaderViewBinding;
 import com.discord.widgets.user.usersheet.WidgetUserSheet;
 import com.discord.widgets.user.usersheet.WidgetUserSheetViewModel;
 import com.discord.widgets.user.Badge;
@@ -261,10 +258,17 @@ public final class NewDiscordBadges extends Plugin {
                     UserProfileHeaderView header = (UserProfileHeaderView) frame.thisObject;
                     UserProfileHeaderViewModel.ViewState.Loaded state =
                             (UserProfileHeaderViewModel.ViewState.Loaded) frame.args[0];
-                    // Discord's core DiscordBadges hook also runs after this method and
-                    // appends the RN badges. Run after the current callback stack so the
-                    // final adapter state is merged exactly once.
-                    header.post(() -> bindProfileHeader(header, state));
+                    User user = state.getUser();
+                    if (user == null || user.getId() <= 0L) return;
+                    Long guildId = null;
+                    if (state.getGuildMember() != null
+                            && state.getGuildMember().getGuildId() > 0L) {
+                        guildId = state.getGuildMember().getGuildId();
+                    }
+                    // This hook runs after Discord has finished replacing the native
+                    // adapter data. Bind synchronously so an old posted callback cannot
+                    // overwrite a newer custom-status/profile state.
+                    bindProfileHeader(header, user, guildId, parseRnBadges(state.getUserProfile()));
                 })
         );
 
@@ -294,122 +298,6 @@ public final class NewDiscordBadges extends Plugin {
         } catch (RuntimeException error) {
             logger.error("Could not hook the modern profile-sheet UI", error);
         }
-        try {
-            patcher.patch(
-                    WidgetUserSheet.class,
-                    "onResume",
-                    new Class<?>[]{},
-                    new Hook(frame -> {
-                        if (!(frame.thisObject instanceof WidgetUserSheet)) return;
-                        try {
-                            WidgetUserSheet sheet = (WidgetUserSheet) frame.thisObject;
-                            WidgetUserSheetViewModel viewModel =
-                                    WidgetUserSheet.access$getViewModel$p(sheet);
-                            WidgetUserSheetViewModel.ViewState state =
-                                    WidgetUserSheetViewModel.access$getViewState$p(viewModel);
-                            if (state instanceof WidgetUserSheetViewModel.ViewState.Loaded) {
-                                bindSheetHeader(
-                                        sheet,
-                                        (WidgetUserSheetViewModel.ViewState.Loaded) state
-                                );
-                            }
-                        } catch (RuntimeException error) {
-                            logger.error("Could not rebind badges on profile-sheet resume", error);
-                        }
-                    })
-            );
-        } catch (RuntimeException error) {
-            logger.error("Could not hook user-sheet resume", error);
-        }
-        try {
-            patcher.patch(
-                    WidgetUserSheet.class,
-                    "onViewCreated",
-                    new Class<?>[]{View.class, Bundle.class},
-                    new Hook(frame -> {
-                        if (!(frame.thisObject instanceof WidgetUserSheet)
-                                || frame.args.length == 0
-                                || !(frame.args[0] instanceof View)) {
-                            return;
-                        }
-                        scheduleSheetRebind(
-                                (WidgetUserSheet) frame.thisObject,
-                                (View) frame.args[0]
-                        );
-                    })
-            );
-        } catch (RuntimeException error) {
-            logger.error("Could not hook profile-sheet creation", error);
-        }
-        try {
-            patcher.patch(
-                    WidgetUserSheet.class,
-                    "configureDeveloperSection",
-                    new Class<?>[]{WidgetUserSheetViewModel.ViewState.Loaded.class},
-                    new Hook(frame -> {
-                        if (frame.thisObject instanceof WidgetUserSheet
-                                && frame.args.length > 0
-                                && frame.args[0] instanceof WidgetUserSheetViewModel.ViewState.Loaded) {
-                            bindSheetHeader(
-                                    (WidgetUserSheet) frame.thisObject,
-                                    (WidgetUserSheetViewModel.ViewState.Loaded) frame.args[0]
-                            );
-                        }
-                    })
-            );
-        } catch (RuntimeException error) {
-            // This private helper is only an early timing optimization. The public
-            // configureUI and onResume hooks above are sufficient on client variants
-            // where Discord changes or removes it.
-            logger.error("Could not hook early profile-sheet badge binding", error);
-        }
-    }
-
-    private void configureBadgeRow(UserProfileHeaderView header) {
-        try {
-            UserProfileHeaderViewBinding binding =
-                    UserProfileHeaderView.access$getBinding$p(header);
-            if (binding == null || binding.h == null) return;
-
-            RecyclerView badgeRow = binding.h;
-            badgeRow.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
-            if (!(badgeRow.getLayoutManager() instanceof LinearLayoutManager)
-                    || ((LinearLayoutManager) badgeRow.getLayoutManager()).getOrientation()
-                    != LinearLayoutManager.HORIZONTAL) {
-                badgeRow.setLayoutManager(
-                        new LinearLayoutManager(
-                                header.getContext(),
-                                LinearLayoutManager.HORIZONTAL,
-                                false
-                        )
-                );
-            }
-            badgeRow.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        } catch (RuntimeException error) {
-            logger.error("Could not configure the profile badge row", error);
-        }
-    }
-
-    private void scheduleSheetRebind(WidgetUserSheet sheet, View root) {
-        Runnable rebind = () -> {
-            try {
-                WidgetUserSheetViewModel viewModel =
-                        WidgetUserSheet.access$getViewModel$p(sheet);
-                WidgetUserSheetViewModel.ViewState state =
-                        WidgetUserSheetViewModel.access$getViewState$p(viewModel);
-                if (state instanceof WidgetUserSheetViewModel.ViewState.Loaded) {
-                    bindSheetHeader(
-                            sheet,
-                            (WidgetUserSheetViewModel.ViewState.Loaded) state
-                    );
-                }
-            } catch (RuntimeException error) {
-                logger.error("Could not rebind badges after profile-sheet creation", error);
-            }
-        };
-        root.post(rebind);
-        root.postDelayed(rebind, 250L);
-        root.postDelayed(rebind, 1000L);
     }
 
     private void bindSheetHeader(
@@ -429,13 +317,8 @@ public final class NewDiscordBadges extends Plugin {
         List<RemoteBadge> rnBadges = parseRnBadges(state.getUserProfile());
         Long boundGuildId = guildId;
         if (user != null) {
-            // configureDeveloperSection can run before the RecyclerView has its
-            // native data. Rebind after layout so the fetched gifting entry is
-            // not lost to that first adapter initialization.
-            Runnable bind = () -> bindProfileHeader(binding.J, user, boundGuildId, rnBadges);
-            binding.J.post(bind);
-            binding.J.postDelayed(bind, 250L);
-            binding.J.postDelayed(bind, 1000L);
+            // configureUI runs after the native header has been initialized.
+            bindProfileHeader(binding.J, user, boundGuildId, rnBadges);
         }
     }
 
@@ -460,17 +343,10 @@ public final class NewDiscordBadges extends Plugin {
             List<RemoteBadge> rnBadges) {
         if (user == null || user.getId() <= 0L) return;
 
-        configureBadgeRow(header);
         String key = profileKey(user.getId(), guildId);
-        boundProfiles.put(header, key);
+        String previousKey = boundProfiles.put(header, key);
+        boolean newProfile = !key.equals(previousKey);
         registerProfileAdapter(header);
-
-        // RNUserProfile is the same parsed model consumed by Aliucord's native
-        // DiscordBadges bridge. Use it immediately so gifting badges do not depend
-        // on a second request or on which profile-sheet callback ran first.
-        if (!rnBadges.isEmpty()) {
-            applyRemoteBadges(header, rnBadges);
-        }
 
         CachedBadges cached = badgeCache.get(key);
         boolean freshCache = isFresh(cached);
@@ -482,14 +358,23 @@ public final class NewDiscordBadges extends Plugin {
                         + ", gifting=" + hasEvolvingGiftingBadge(knownBadges)
                         + ", ids=" + badgeIds(knownBadges)
         );
-        if (freshCache) {
-            applyRemoteBadges(header, knownBadges);
-        } else {
-            if (rnBadges.isEmpty()) applyRemoteBadges(header, Collections.emptyList());
+        if (newProfile) {
+            // A newly created header is not registered with the setData pre-hook
+            // until this method runs, so seed it once when cached/RN badges exist.
+            if (!rnBadges.isEmpty()) applyRemoteBadges(header, rnBadges);
+            if (freshCache) {
+                applyRemoteBadges(header, knownBadges);
+            } else if (rnBadges.isEmpty()) {
+                applyRemoteBadges(header, Collections.emptyList());
+            }
         }
-        // Older cached responses and RN parsers can expose Nitro but omit the newer
-        // gifting entry. Treat such a cache as incomplete and refresh it immediately.
-        if (!freshCache || !hasEvolvingGiftingBadge(knownBadges)) {
+        // The native badge builder and the setData pre-hook already merge these
+        // entries before RecyclerView receives its data. Mutating the adapter here
+        // would notify it again on every custom-status/profile-state update.
+        // A fresh response is authoritative, including a response with no gifting
+        // badge. Retrying that negative result on every render causes profile sheets
+        // to refresh repeatedly and can make custom status appear to flicker.
+        if (!freshCache) {
             requestBadges(header, user.getId(), guildId, key);
         }
     }
@@ -593,12 +478,12 @@ public final class NewDiscordBadges extends Plugin {
                             + ", ids=" + badgeIds(result)
             );
 
-            // Do not replace a working RN badge list with an empty response after a
-            // route failure or a profile variant that has no parsed badge container.
-            if (result.isEmpty()) return;
-
             final List<RemoteBadge> fetched = result;
             badgeCache.put(key, new CachedBadges(fetched));
+
+            // Cache empty responses too. Otherwise every native state update retries
+            // all profile variants and can make the sheet appear to refresh.
+            if (fetched.isEmpty()) return;
 
             UserProfileHeaderView target = headerReference.get();
             if (target == null) return;

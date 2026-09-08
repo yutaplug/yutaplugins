@@ -1449,6 +1449,7 @@ public final class ProfileEffects extends Plugin {
                     // Discord profile effects can contain a one-shot intro layer
                     // alongside a delayed looping layer. Do not leave the intro's
                     // final frame frozen over the looping renderer.
+                    releaseImage();
                     image.setVisibility(View.INVISIBLE);
                     return;
                 }
@@ -1501,6 +1502,10 @@ public final class ProfileEffects extends Plugin {
                         .append(htmlEscape(layer.source))
                         .append("\" data-start=\"")
                         .append(layer.start)
+                        .append("\" data-duration=\"")
+                        .append(layer.duration)
+                        .append("\" data-loop=\"")
+                        .append(layer.loop)
                         .append("\"");
                 if (layer.start == 0L) {
                     html.append(" src=\"")
@@ -1522,14 +1527,21 @@ public final class ProfileEffects extends Plugin {
                     + "effectTimers=[];"
                     + "document.querySelectorAll('[data-src]').forEach(function(img){"
                     + "var start=Number(img.getAttribute('data-start'))||0;"
+                    + "var duration=Number(img.getAttribute('data-duration'))||0;"
+                    + "var loop=img.getAttribute('data-loop')==='true';"
+                    + "img.style.visibility='hidden';"
                     + "effectTimers.push(window.setTimeout(function(){"
+                    + "img.style.visibility='visible';"
                     + "img.src=img.getAttribute('data-src');"
                     + "},start));"
+                    + "if(!loop&&duration>0){effectTimers.push(window.setTimeout(function(){"
+                    + "img.removeAttribute('src');img.style.visibility='hidden';"
+                    + "},start+duration));}"
                     + "});"
                     + "}"
                     + "window.restartEffects=function(){"
                     + "document.querySelectorAll('[data-src]').forEach(function(img){"
-                    + "img.removeAttribute('src');"
+                    + "img.removeAttribute('src');img.style.visibility='hidden';"
                     + "});"
                     + "window.setTimeout(startEffects,0);"
                     + "};"

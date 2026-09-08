@@ -1,8 +1,10 @@
-version = "1.0.5"
+version = "1.0.6"
 description = "Backports viewing Discord Nitro profile effects and profile frames."
 aliucord {
     changelog.set(
         """
+        # 1.0.6
+        * Fix WebView layer removing
         # 1.0.5
         * Replace the effect WebView with native APNG rendering
         * Hide one-shot APNG layers after playback completes

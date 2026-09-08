@@ -1,9 +1,13 @@
-version = "1.0.11"
+version = "1.0.12"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.12
+        * Add option to disable deleted tag
+        * Add option to disable edit logs
+
         # 1.0.11
         * Fix PluginDownloader in link context menu
 

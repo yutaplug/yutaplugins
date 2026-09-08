@@ -4,11 +4,18 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.TextView;
@@ -51,6 +58,18 @@ public final class BottomShit extends BottomSheet {
         highSamplingRate.setOnCheckedListener(value -> settings.setBool("highSamplingRate", value));
         addSetting(highSamplingRate, context, 4);
 
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            CheckedSetting legacyOgg = Utils.createCheckedSetting(
+                    context,
+                    CheckedSetting.ViewType.SWITCH,
+                    "Try Ogg/Opus recording",
+                    "Experimental on Android 7–9; falls back to M4A if unsupported"
+            );
+            legacyOgg.setChecked(settings.getBool("legacyOgg", false));
+            legacyOgg.setOnCheckedListener(value -> settings.setBool("legacyOgg", value));
+            addSetting(legacyOgg, context, 4);
+        }
+
         addSectionHeader(context, "Appearance", false);
         addColorSetting(context, "Voice button color", "Button background color", "buttonColor",
                 VoiceMessages.DEFAULT_BUTTON_COLOR);
@@ -68,6 +87,18 @@ public final class BottomShit extends BottomSheet {
             VoiceMessages.refreshButtonColor();
         });
         addSetting(translucentButton, context, 4);
+        CheckedSetting integratedButton = Utils.createCheckedSetting(
+                context,
+                CheckedSetting.ViewType.SWITCH,
+                "Integrate button into chatbox",
+                "Show only the microphone icon inside the message composer"
+        );
+        integratedButton.setChecked(settings.getBool("integratedButton", false));
+        integratedButton.setOnCheckedListener(value -> {
+            settings.setBool("integratedButton", value);
+            VoiceMessages.refreshButtonColor();
+        });
+        addSetting(integratedButton, context, 4);
 
         addSectionHeader(context, "Audio quality", false);
         addQualitySettings(context);
@@ -216,14 +247,47 @@ public final class BottomShit extends BottomSheet {
         dialogTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         dialogTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         dialogTitle.setPadding(0, 0, 0, dp(context, 4));
-        TextView hex = new TextView(context);
+        EditText hex = new EditText(context);
+        hex.setSingleLine(true);
+        hex.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        hex.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        hex.setSelectAllOnFocus(true);
         hex.setGravity(Gravity.CENTER);
         hex.setTextColor(themeColor(context, "colorHeaderPrimary", Color.WHITE));
+        hex.setHintTextColor(themeColor(context, "colorTextMuted", Color.LTGRAY));
         hex.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         hex.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        hex.setText(colorHex(initialColor));
+        hex.setOnClickListener(ignored -> {
+            hex.requestFocus();
+            hex.setSelection(hex.length());
+            InputMethodManager inputMethodManager = (InputMethodManager) context
+                    .getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (inputMethodManager != null) {
+                inputMethodManager.showSoftInput(hex, InputMethodManager.SHOW_IMPLICIT);
+            }
+        });
+        hex.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence text, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable text) {
+                Integer color = parseHexColor(text.toString());
+                if (color != null) {
+                    picker.setColor(color);
+                }
+            }
+        });
 
         LinearLayout content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
+        content.setFocusableInTouchMode(true);
         content.setPadding(dp(context, 20), dp(context, 8), dp(context, 20), dp(context, 8));
         content.addView(dialogTitle, new LinearLayout.LayoutParams(-1, -2));
         TextView description = new TextView(context);
@@ -239,7 +303,15 @@ public final class BottomShit extends BottomSheet {
         content.addView(hex, hexParams);
         updatePreview(hex, initialColor);
 
-        picker.setOnColorChangedListener(color -> updatePreview(hex, color));
+        picker.setOnColorChangedListener(color -> {
+            updatePreview(hex, color);
+            hex.clearFocus();
+            InputMethodManager inputMethodManager = (InputMethodManager) context
+                    .getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (inputMethodManager != null) {
+                inputMethodManager.hideSoftInputFromWindow(hex.getWindowToken(), 0);
+            }
+        });
         androidx.appcompat.app.AlertDialog alertDialog = new androidx.appcompat.app.AlertDialog.Builder(context)
                 .setView(content)
                 .setNeutralButton("Reset", (ignoredDialog, which) -> {
@@ -249,21 +321,28 @@ public final class BottomShit extends BottomSheet {
                     VoiceMessages.refreshButtonColor();
                 })
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Save", (ignoredDialog, which) -> {
-                    int color = picker.getColor();
-                    settings.setInt(key, color);
-                    updateSwatch(swatch, color, context);
-                    summaryView.setText(subtitle + " • " + colorHex(color));
-                    VoiceMessages.refreshButtonColor();
-                })
+                .setPositiveButton("Save", null)
                 .create();
         alertDialog.show();
+        content.requestFocus();
         alertDialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)
                 .setTextColor(themeColor(context, "colorBrand", VoiceMessages.DEFAULT_BUTTON_COLOR));
         alertDialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)
                 .setTextColor(themeColor(context, "colorBrand", VoiceMessages.DEFAULT_BUTTON_COLOR));
         alertDialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
                 .setTextColor(themeColor(context, "colorBrand", VoiceMessages.DEFAULT_BUTTON_COLOR));
+        alertDialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+            Integer color = parseHexColor(hex.getText().toString());
+            if (color == null) {
+                hex.setError("Use #RRGGBB");
+                return;
+            }
+            settings.setInt(key, color);
+            updateSwatch(swatch, color, context);
+            summaryView.setText(subtitle + " • " + colorHex(color));
+            VoiceMessages.refreshButtonColor();
+            alertDialog.dismiss();
+        });
     }
 
     private void updatePreview(TextView preview, int color) {
@@ -277,6 +356,21 @@ public final class BottomShit extends BottomSheet {
 
     private String colorHex(int color) {
         return String.format(Locale.ROOT, "#%06X", color & 0xFFFFFF);
+    }
+
+    private Integer parseHexColor(String value) {
+        String hex = value.trim();
+        if (hex.startsWith("#")) {
+            hex = hex.substring(1);
+        }
+        if (hex.length() != 6) {
+            return null;
+        }
+        try {
+            return Color.parseColor("#" + hex);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
     }
 
     private android.graphics.drawable.Drawable selectableBackground(Context context) {
