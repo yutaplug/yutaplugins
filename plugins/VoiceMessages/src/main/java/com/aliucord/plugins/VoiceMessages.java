@@ -43,6 +43,11 @@ import java.util.UUID;
 @SuppressWarnings("unused")
 @AliucordPlugin
 public class VoiceMessages extends Plugin {
+    static final int DEFAULT_BUTTON_COLOR = Color.rgb(88, 101, 242);
+    static final int DEFAULT_ICON_COLOR = Color.WHITE;
+    private static final String BUTTON_TAG = "VoiceMessages.RecordButton";
+    private static VoiceMessages instance;
+
     private MediaRecorder mediaRecorder;
     private volatile boolean isRecording;
     private volatile boolean waveformReadFailed;
@@ -56,6 +61,7 @@ public class VoiceMessages extends Plugin {
     private FlexEditText editText;
     private ViewGroup inputContainer;
     private RelativeLayout inputLayout;
+    private View attachmentPreview;
     private AppCompatImageButton recordButton;
     private Drawable recordIcon;
     private View observedActivityRoot;
@@ -109,6 +115,7 @@ public class VoiceMessages extends Plugin {
     @SuppressLint("ClickableViewAccessibility")
     @Override
     public void start(Context context) throws NoSuchMethodException {
+        instance = this;
         configureRecordingFormat();
         staticSettings = settings;
 
@@ -120,6 +127,7 @@ public class VoiceMessages extends Plugin {
         waveFormView = new WaveFormView(context);
         recordButton = new AppCompatImageButton(context);
         recordButton.setId(View.generateViewId());
+        recordButton.setTag(BUTTON_TAG);
         configureRecordButton(context);
 
         recordButton.setOnTouchListener((view, motionEvent) -> {
@@ -218,7 +226,7 @@ public class VoiceMessages extends Plugin {
         recordButton.setContentDescription("Record voice message");
         var background = new GradientDrawable();
         background.setShape(GradientDrawable.OVAL);
-        background.setColor(Color.rgb(88, 101, 242));
+        background.setColor(getButtonColor());
         recordButton.setBackground(background);
         recordButton.setMinimumWidth(0);
         recordButton.setMinimumHeight(0);
@@ -232,10 +240,39 @@ public class VoiceMessages extends Plugin {
         var drawable = ContextCompat.getDrawable(context, com.lytefast.flexinput.R.e.ic_mic_grey_24dp);
         if (drawable != null) {
             recordIcon = drawable.mutate();
-            recordIcon.setTint(Color.WHITE);
+            recordIcon.setTint(getIconColor());
             recordButton.setImageDrawable(recordIcon);
         }
         recordButton.setVisibility(View.GONE);
+    }
+
+    private int getButtonColor() {
+        int color = settings.getInt("buttonColor", DEFAULT_BUTTON_COLOR);
+        return Color.alpha(color) == 0 ? DEFAULT_BUTTON_COLOR : color;
+    }
+
+    private int getIconColor() {
+        int color = settings.getInt("buttonIconColor", DEFAULT_ICON_COLOR);
+        return Color.alpha(color) == 0 ? DEFAULT_ICON_COLOR : color;
+    }
+
+    static void refreshButtonColor() {
+        if (instance != null) {
+            instance.applyButtonColor();
+        }
+    }
+
+    private void applyButtonColor() {
+        if (recordButton == null) {
+            return;
+        }
+        var background = new GradientDrawable();
+        background.setShape(GradientDrawable.OVAL);
+        background.setColor(getButtonColor());
+        recordButton.setBackground(background);
+        if (recordIcon != null && !isRecording) {
+            recordIcon.setTint(getIconColor());
+        }
     }
 
     private void observeActivityLayout() {
@@ -295,16 +332,22 @@ public class VoiceMessages extends Plugin {
         editText = candidateEditText;
         inputContainer = candidateContainer;
         inputLayout = (RelativeLayout) candidateParent;
+        attachmentPreview = root.findViewById(Utils.getResId("attachment_preview_container", "id"));
+
+        View existingButton = inputLayout.findViewWithTag(BUTTON_TAG);
+        if (existingButton != null && existingButton != recordButton) {
+            inputLayout.removeView(existingButton);
+        }
 
         if (waveFormView.getParent() != candidateContainer) {
-            detachFromParent(waveFormView);
             var waveformParams = new LinearLayout.LayoutParams(0, DimenUtils.dpToPx(30), 1f);
             waveformParams.gravity = Gravity.CENTER_VERTICAL;
-            candidateContainer.addView(waveFormView, 0, waveformParams);
+            if (!attachView(waveFormView, candidateContainer, 0, waveformParams)) {
+                return;
+            }
         }
 
         if (recordButton.getParent() != inputLayout) {
-            detachFromParent(recordButton);
             var buttonParams = new RelativeLayout.LayoutParams(
                     DimenUtils.dpToPx(36),
                     DimenUtils.dpToPx(36)
@@ -312,11 +355,40 @@ public class VoiceMessages extends Plugin {
             buttonParams.addRule(RelativeLayout.ALIGN_PARENT_RIGHT, RelativeLayout.TRUE);
             buttonParams.addRule(RelativeLayout.CENTER_VERTICAL, RelativeLayout.TRUE);
             buttonParams.rightMargin = DimenUtils.dpToPx(12);
-            inputLayout.addView(recordButton, buttonParams);
+            if (!attachView(recordButton, inputLayout, -1, buttonParams)) {
+                return;
+            }
         }
 
         updateRecordingUi();
         updateRecordButtonVisibility();
+    }
+
+    private boolean attachView(View view, ViewGroup target, int index, ViewGroup.LayoutParams params) {
+        ViewParent currentParent = view.getParent();
+        if (currentParent == target) {
+            return true;
+        }
+        if (currentParent instanceof ViewGroup) {
+            ((ViewGroup) currentParent).removeView(view);
+        }
+        if (view.getParent() != null) {
+            scheduleActivityObservationRetry();
+            return false;
+        }
+
+        try {
+            if (index < 0) {
+                target.addView(view, params);
+            } else {
+                target.addView(view, index, params);
+            }
+            return true;
+        } catch (IllegalStateException e) {
+            logger.error(e);
+            scheduleActivityObservationRetry();
+            return false;
+        }
     }
 
     private void detachFromParent(View view) {
@@ -496,7 +568,7 @@ public class VoiceMessages extends Plugin {
             waveFormView.setVisibility(isRecording ? View.VISIBLE : View.GONE);
         }
         if (recordIcon != null) {
-            recordIcon.setTint(isRecording ? Color.rgb(237, 66, 69) : Color.WHITE);
+            recordIcon.setTint(isRecording ? Color.rgb(237, 66, 69) : getIconColor());
         }
         if (recordButton != null) {
             recordButton.setContentDescription(isRecording
@@ -511,7 +583,9 @@ public class VoiceMessages extends Plugin {
         }
 
         Editable text = editText.getText();
-        boolean buttonVisible = isRecording || text == null || text.length() == 0;
+        boolean hasAttachments = attachmentPreview != null
+                && attachmentPreview.getVisibility() == View.VISIBLE;
+        boolean buttonVisible = !hasAttachments && (isRecording || text == null || text.length() == 0);
         recordButton.setVisibility(buttonVisible ? View.VISIBLE : View.GONE);
         updateInputContainerLayout(buttonVisible);
     }
@@ -622,7 +696,11 @@ public class VoiceMessages extends Plugin {
         editText = null;
         inputContainer = null;
         inputLayout = null;
+        attachmentPreview = null;
         waveFormView = null;
+        if (instance == this) {
+            instance = null;
+        }
         observedActivityRoot = null;
     }
 }

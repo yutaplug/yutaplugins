@@ -1,9 +1,15 @@
-version = "1.1.4"
+version = "1.1.5"
 description = "Send Voice Messages"
 
 aliucord {
     changelog.set(
         """
+        # 1.1.5
+        * Fix crash
+        * Remove the button when an attachment is added
+        * Increase sampling rate on by default
+        * Modernized Settings UI
+        * Added color picker
         # 1.1.4
         * Restore and redesign the voice message button
         * Support replying with voice messages
