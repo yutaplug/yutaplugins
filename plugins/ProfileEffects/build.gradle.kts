@@ -1,8 +1,10 @@
-version = "1.0.6"
+version = "1.0.7"
 description = "Backports viewing Discord Nitro profile effects and profile frames."
 aliucord {
     changelog.set(
         """
+        # 1.0.7
+        * Return to WebView for compatibility
         # 1.0.6
         * Fix WebView layer removing
         # 1.0.5
