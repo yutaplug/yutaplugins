@@ -1,9 +1,11 @@
-version = "1.1.7"
+version = "1.1.8"
 description = "Send Voice Messages"
 
 aliucord {
     changelog.set(
         """
+        # 1.1.8
+        * Fix crash
         # 1.1.7
         * Add option to integrate button into chatbox
         * Fix button showing up in locked channels

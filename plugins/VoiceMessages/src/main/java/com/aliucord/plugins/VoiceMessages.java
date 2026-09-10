@@ -45,6 +45,7 @@ import java.util.UUID;
 public class VoiceMessages extends Plugin {
     static final int DEFAULT_BUTTON_COLOR = Color.rgb(88, 101, 242);
     static final int DEFAULT_ICON_COLOR = Color.WHITE;
+    private static final long MIN_RECORDING_MILLIS = 500;
     private static final String BUTTON_TAG = "VoiceMessages.RecordButton";
     private static VoiceMessages instance;
 
@@ -67,6 +68,7 @@ public class VoiceMessages extends Plugin {
     private View observedActivityRoot;
     private ViewTreeObserver.OnGlobalLayoutListener inputLayoutListener;
     private boolean activityObservationRetryScheduled;
+    private boolean delayedStopPending;
 
     public static SettingsAPI staticSettings;
     int outputFormat = MediaRecorder.OutputFormat.MPEG_4;
@@ -537,6 +539,7 @@ public class VoiceMessages extends Plugin {
 
         mediaRecorder = recorder;
         isRecording = true;
+        delayedStopPending = false;
         recordingStartedAt = System.currentTimeMillis();
         waveformReadFailed = false;
         updateRecordingUi();
@@ -594,6 +597,21 @@ public class VoiceMessages extends Plugin {
             return;
         }
 
+        long elapsedMillis = Math.max(0, System.currentTimeMillis() - recordingStartedAt);
+        if (send && elapsedMillis < MIN_RECORDING_MILLIS) {
+            if (!delayedStopPending) {
+                delayedStopPending = true;
+                Utils.mainThread.postDelayed(() -> {
+                    delayedStopPending = false;
+                    if (isRecording) {
+                        onRecordStop(true, discordid);
+                    }
+                }, MIN_RECORDING_MILLIS - elapsedMillis);
+            }
+            return;
+        }
+        delayedStopPending = false;
+
         isRecording = false;
         if (updateWaveformThread != null) {
             updateWaveformThread.interrupt();
@@ -603,12 +621,11 @@ public class VoiceMessages extends Plugin {
         outputFile = null;
         String recordingExtension = extension;
         String waveform = waveFormView.getWaveForm();
-        long elapsedMillis = Math.max(0, System.currentTimeMillis() - recordingStartedAt);
         VoiceMessageBody.MessageReference reply = recordingReply;
         recordingReply = null;
         MediaRecorder recorder = mediaRecorder;
         mediaRecorder = null;
-        boolean stopped = stopRecorder(recorder);
+        boolean stopped = send ? stopRecorder(recorder) : releaseRecorder(recorder);
         updateRecordingUi();
 
         if (!send || !stopped || recordedFile == null) {
@@ -714,7 +731,7 @@ public class VoiceMessages extends Plugin {
                 recorder.stop();
                 stopped = true;
             } catch (RuntimeException e) {
-                logger.error(e);
+                logger.debug("MediaRecorder could not finalize the recording; discarding it");
             } finally {
                 releaseRecorder(recorder);
             }
@@ -722,20 +739,17 @@ public class VoiceMessages extends Plugin {
         return stopped;
     }
 
-    private void releaseRecorder(MediaRecorder recorder) {
+    private boolean releaseRecorder(MediaRecorder recorder) {
         if (recorder == null) {
-            return;
-        }
-        try {
-            recorder.reset();
-        } catch (RuntimeException e) {
-            logger.error(e);
+            return true;
         }
         try {
             recorder.release();
         } catch (RuntimeException e) {
             logger.error(e);
+            return false;
         }
+        return true;
     }
 
     private float getRecordingDurationSeconds(File file, long fallbackMillis) {

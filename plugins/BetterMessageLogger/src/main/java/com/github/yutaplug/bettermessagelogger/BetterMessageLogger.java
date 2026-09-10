@@ -215,6 +215,7 @@ public class BetterMessageLogger extends Plugin {
     }
 
     private void captureMessageBeforeDelete(StoreMessages store, ModelMessageDelete event) {
+        if (isHideMessagesDeleteCall()) return;
         List<Long> ids = event.getMessageIds();
         if (ids == null) return;
         for (Long id : ids) {
@@ -295,6 +296,7 @@ public class BetterMessageLogger extends Plugin {
         bumpRevision();
     }
     private void handleDeletedMessages(ModelMessageDelete event) {
+        if (isHideMessagesDeleteCall()) return;
         List<Long> ids = event.getMessageIds();
         if (ids == null) return;
         for (Long id : ids) {
@@ -319,6 +321,17 @@ public class BetterMessageLogger extends Plugin {
         refreshVisibleDeletedTags();
         bumpRevision();
     }
+
+    private static boolean isHideMessagesDeleteCall() {
+        // HideMessages hides a message by directly invoking StoreMessages.handleMessageDelete
+        // from its context-menu click handler. That local call has no API marker, so identify
+        // only that plugin's call stack and leave normal Discord deletion events untouched.
+        for (StackTraceElement element : Thread.currentThread().getStackTrace()) {
+            if (element.getClassName().contains("HideMessages")) return true;
+        }
+        return false;
+    }
+
     private void remember(com.discord.models.message.Message message) {
         if (message == null) return;
         long messageId = message.getId();
