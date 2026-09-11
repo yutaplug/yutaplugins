@@ -2,13 +2,20 @@ package com.github.yutaplug.bettermessagelogger;
 
 import android.app.AlertDialog;
 import android.content.Context;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
+import android.graphics.Paint;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Bundle;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -29,6 +36,8 @@ import java.util.Set;
 
 public final class BetterMessageLoggerSettings extends BottomSheet {
     private SettingsAPI settings;
+    private TextView deletedLabelColorSubtitle;
+    private TextView deletedMessageColorSubtitle;
 
     public BetterMessageLoggerSettings(SettingsAPI settings) {
         this.settings = settings;
@@ -65,12 +74,12 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         });
 
         addSectionHeader(context, "Appearance", false);
-        addAction(context, "Deleted tag color", "Current: " + currentColor(
+        deletedLabelColorSubtitle = addAction(context, "Deleted tag color", "Current: " + currentColor(
                         BetterMessageLogger.DELETED_LABEL_COLOR,
                         BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR),
                 () -> showColorDialog(context, BetterMessageLogger.DELETED_LABEL_COLOR,
                         "Deleted tag color", "Deleted tag color updated"));
-        addAction(context, "Deleted message color", "Color applied to deleted message text. Current: "
+        deletedMessageColorSubtitle = addAction(context, "Deleted message color", "Color applied to deleted message text. Current: "
                         + currentColor(BetterMessageLogger.DELETED_MESSAGE_COLOR,
                         BetterMessageLogger.DEFAULT_DELETED_MESSAGE_COLOR),
                 () -> showColorDialog(context, BetterMessageLogger.DELETED_MESSAGE_COLOR,
@@ -166,7 +175,7 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         addView(setting);
     }
 
-    private void addAction(Context context, String title, String subtitle, Runnable action) {
+    private TextView addAction(Context context, String title, String subtitle, Runnable action) {
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.VERTICAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -191,6 +200,7 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.bottomMargin = dp(context, 4);
         getLinearLayout().addView(row, params);
+        return subtitleView;
     }
 
     private void addButton(Context context, String title, String iconName, Runnable action) {
@@ -235,22 +245,82 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
     }
 
     private void showColorDialog(Context context, String key, String title, String successMessage) {
-        EditText input = new EditText(context);
-        input.setSingleLine(true);
-        input.setSelectAllOnFocus(true);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        input.setHint("#RRGGBB or #AARRGGBB");
         String defaultColor = BetterMessageLogger.DELETED_LABEL_COLOR.equals(key)
                 ? BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR
                 : BetterMessageLogger.DEFAULT_DELETED_MESSAGE_COLOR;
-        input.setText(settings.getString(key, defaultColor));
-        input.setTextColor(Color.WHITE);
-        input.setHintTextColor(Color.LTGRAY);
+        int initialColor = parseColor(currentColor(key, defaultColor), Color.WHITE);
+        ColorPickerView picker = new ColorPickerView(context, initialColor);
+
+        LinearLayout content = new LinearLayout(context);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(context, 20), dp(context, 8), dp(context, 20), dp(context, 8));
+
+        TextView description = new TextView(context);
+        description.setText("Choose a color or enter a hexadecimal value.");
+        description.setTextColor(themeColor(context, "colorTextMuted", Color.LTGRAY));
+        description.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        LinearLayout.LayoutParams descriptionParams = new LinearLayout.LayoutParams(-1, -2);
+        descriptionParams.bottomMargin = dp(context, 12);
+        content.addView(description, descriptionParams);
+        content.addView(picker, new LinearLayout.LayoutParams(-1, dp(context, 240)));
+
+        TextView preview = new TextView(context);
+        preview.setGravity(Gravity.CENTER);
+        preview.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        preview.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        preview.setPadding(dp(context, 8), 0, dp(context, 8), 0);
+        LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, dp(context, 42));
+        previewParams.topMargin = dp(context, 10);
+        content.addView(preview, previewParams);
+
+        EditText input = new EditText(context);
+        input.setSingleLine(true);
+        input.setSelectAllOnFocus(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        input.setHint("#RRGGBB or #AARRGGBB");
+        input.setText(colorHex(initialColor));
+        input.setGravity(Gravity.CENTER);
+        input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        input.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(-1, dp(context, 48));
+        inputParams.topMargin = dp(context, 8);
+        content.addView(input, inputParams);
+        updateColorPreview(preview, initialColor);
+
+        final boolean[] updatingInput = {false};
+        picker.setOnColorChangedListener(color -> {
+            String value = colorHex(color);
+            if (!value.equalsIgnoreCase(input.getText().toString())) {
+                updatingInput[0] = true;
+                input.setText(value);
+                input.setSelection(input.length());
+                updatingInput[0] = false;
+            }
+            updateColorPreview(preview, color);
+        });
+        input.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence text, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable text) {
+                if (updatingInput[0]) return;
+                Integer color = parseColor(text.toString());
+                if (color != null) {
+                    picker.setColor(color);
+                    updateColorPreview(preview, color);
+                }
+            }
+        });
 
         AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle(title)
-                .setMessage("Enter a hexadecimal color.")
-                .setView(input)
+                .setView(content)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Save", null)
                 .create();
@@ -258,15 +328,16 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
             styleDialog(dialog, input);
             TextView save = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
             if (save != null) save.setOnClickListener(button -> {
-                String value = normalizeColor(input.getText().toString());
-                try {
-                    Color.parseColor(value);
+                Integer color = parseColor(input.getText().toString());
+                if (color != null) {
+                    String value = colorHex(color);
                     settings.setString(key, value);
                     BetterMessageLogger plugin = BetterMessageLogger.getInstance();
                     if (plugin != null) plugin.refreshDeletedLabels();
+                    refreshColorSubtitles();
                     dialog.dismiss();
                     Utils.showToast(successMessage);
-                } catch (Throwable error) {
+                } else {
                     Utils.showToast("Enter #RRGGBB or #AARRGGBB");
                 }
             });
@@ -291,7 +362,50 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
                 BetterMessageLogger.DEFAULT_DELETED_MESSAGE_COLOR);
         BetterMessageLogger plugin = BetterMessageLogger.getInstance();
         if (plugin != null) plugin.refreshDeletedLabels();
+        refreshColorSubtitles();
         Utils.showToast("Deleted colors reset");
+    }
+
+    private void refreshColorSubtitles() {
+        if (deletedLabelColorSubtitle != null) {
+            deletedLabelColorSubtitle.setText("Current: " + currentColor(
+                    BetterMessageLogger.DELETED_LABEL_COLOR,
+                    BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR));
+        }
+        if (deletedMessageColorSubtitle != null) {
+            deletedMessageColorSubtitle.setText("Color applied to deleted message text. Current: "
+                    + currentColor(BetterMessageLogger.DELETED_MESSAGE_COLOR,
+                    BetterMessageLogger.DEFAULT_DELETED_MESSAGE_COLOR));
+        }
+    }
+
+    private Integer parseColor(String value) {
+        try {
+            return Color.parseColor(normalizeColor(value));
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private int parseColor(String value, int fallback) {
+        Integer color = parseColor(value);
+        return color == null ? fallback : color;
+    }
+
+    private String colorHex(int color) {
+        return String.format(Locale.ROOT, "#%08X", color);
+    }
+
+    private void updateColorPreview(TextView preview, int color) {
+        preview.setText(colorHex(color));
+        preview.setTextColor(contrastColor(color));
+        preview.setBackgroundColor(color);
+    }
+
+    private int contrastColor(int color) {
+        int brightness = (Color.red(color) * 299 + Color.green(color) * 587
+                + Color.blue(color) * 114) / 1000;
+        return brightness < 128 ? Color.WHITE : Color.BLACK;
     }
 
     private String normalizeColor(String raw) {
