@@ -1,9 +1,13 @@
-version = "1.0.13"
+version = "1.0.14"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.14
+        * Add option to show edit logs in chat history (like other loggers)
+        * Add option to change text color (eleted tag doesnt need to be hidden now)
+
         # 1.0.13
         * Fix HideMessages
 

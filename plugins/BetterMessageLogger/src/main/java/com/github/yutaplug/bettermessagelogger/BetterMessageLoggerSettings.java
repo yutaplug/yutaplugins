@@ -65,14 +65,25 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         });
 
         addSectionHeader(context, "Appearance", false);
-        addAction(context, "Deleted tag color", "Current: " + currentDeletedLabelColor(),
-                () -> showColorDialog(context));
+        addAction(context, "Deleted tag color", "Current: " + currentColor(
+                        BetterMessageLogger.DELETED_LABEL_COLOR,
+                        BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR),
+                () -> showColorDialog(context, BetterMessageLogger.DELETED_LABEL_COLOR,
+                        "Deleted tag color", "Deleted tag color updated"));
+        addAction(context, "Deleted message color", "Color applied to deleted message text. Current: "
+                        + currentColor(BetterMessageLogger.DELETED_MESSAGE_COLOR,
+                        BetterMessageLogger.DEFAULT_DELETED_MESSAGE_COLOR),
+                () -> showColorDialog(context, BetterMessageLogger.DELETED_MESSAGE_COLOR,
+                        "Deleted message color", "Deleted message color updated"));
+        addButton(context, "Reset deleted colors", "ic_refresh_24dp", () -> resetDeletedColors());
 
         addToggle(context, "Show deleted tag", "Show the (deleted) marker after deleted messages",
                 BetterMessageLogger.SHOW_DELETED_TAG, true);
 
         addSectionHeader(context, "Message history", false);
         addEditLoggingToggle(context);
+        addToggle(context, "Show edit history in chat", "Display previous versions above edited messages",
+                BetterMessageLogger.INLINE_EDIT_HISTORY);
 
         addSectionHeader(context, "Message filters", false);
         addToggle(context, "Ignore my messages", "Do not save messages sent by your account", "ignoreOwn");
@@ -223,19 +234,21 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         return result;
     }
 
-    private void showColorDialog(Context context) {
+    private void showColorDialog(Context context, String key, String title, String successMessage) {
         EditText input = new EditText(context);
         input.setSingleLine(true);
         input.setSelectAllOnFocus(true);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         input.setHint("#RRGGBB or #AARRGGBB");
-        input.setText(settings.getString(BetterMessageLogger.DELETED_LABEL_COLOR,
-                BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR));
+        String defaultColor = BetterMessageLogger.DELETED_LABEL_COLOR.equals(key)
+                ? BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR
+                : BetterMessageLogger.DEFAULT_DELETED_MESSAGE_COLOR;
+        input.setText(settings.getString(key, defaultColor));
         input.setTextColor(Color.WHITE);
         input.setHintTextColor(Color.LTGRAY);
 
         AlertDialog dialog = new AlertDialog.Builder(context)
-                .setTitle("Deleted tag color")
+                .setTitle(title)
                 .setMessage("Enter a hexadecimal color.")
                 .setView(input)
                 .setNegativeButton("Cancel", null)
@@ -248,11 +261,11 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
                 String value = normalizeColor(input.getText().toString());
                 try {
                     Color.parseColor(value);
-                    settings.setString(BetterMessageLogger.DELETED_LABEL_COLOR, value);
+                    settings.setString(key, value);
                     BetterMessageLogger plugin = BetterMessageLogger.getInstance();
                     if (plugin != null) plugin.refreshDeletedLabels();
                     dialog.dismiss();
-                    Utils.showToast("Deleted tag color updated");
+                    Utils.showToast(successMessage);
                 } catch (Throwable error) {
                     Utils.showToast("Enter #RRGGBB or #AARRGGBB");
                 }
@@ -261,15 +274,24 @@ public final class BetterMessageLoggerSettings extends BottomSheet {
         dialog.show();
     }
 
-    private String currentDeletedLabelColor() {
-        String value = normalizeColor(settings.getString(BetterMessageLogger.DELETED_LABEL_COLOR,
-                BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR));
+    private String currentColor(String key, String defaultColor) {
+        String value = normalizeColor(settings.getString(key, defaultColor));
         try {
             Color.parseColor(value);
             return value;
         } catch (Throwable ignored) {
-            return BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR;
+            return defaultColor;
         }
+    }
+
+    private void resetDeletedColors() {
+        settings.setString(BetterMessageLogger.DELETED_LABEL_COLOR,
+                BetterMessageLogger.DEFAULT_DELETED_LABEL_COLOR);
+        settings.setString(BetterMessageLogger.DELETED_MESSAGE_COLOR,
+                BetterMessageLogger.DEFAULT_DELETED_MESSAGE_COLOR);
+        BetterMessageLogger plugin = BetterMessageLogger.getInstance();
+        if (plugin != null) plugin.refreshDeletedLabels();
+        Utils.showToast("Deleted colors reset");
     }
 
     private String normalizeColor(String raw) {

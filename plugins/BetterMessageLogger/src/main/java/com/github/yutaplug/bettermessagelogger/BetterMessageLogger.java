@@ -6,7 +6,10 @@ import android.graphics.drawable.Drawable;
 import android.text.Spanned;
 import android.text.TextPaint;
 import android.text.SpannableStringBuilder;
+import android.text.format.DateUtils;
 import android.text.style.CharacterStyle;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.RelativeSizeSpan;
 import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
@@ -30,6 +33,10 @@ import com.discord.widgets.chat.list.actions.WidgetChatListActions;
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage;
 import com.discord.widgets.chat.list.entries.MessageEntry;
 import com.discord.widgets.chat.list.model.WidgetChatListModelMessages;
+import com.discord.utilities.textprocessing.DiscordParser;
+import com.discord.utilities.textprocessing.MessagePreprocessor;
+import com.discord.utilities.textprocessing.MessageRenderContext;
+import com.discord.utilities.view.text.SimpleDraweeSpanTextView;
 import com.discord.utilities.color.ColorCompat;
 import com.discord.utilities.drawable.DrawableCompat;
 
@@ -40,7 +47,6 @@ import java.lang.reflect.Method;
 import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -60,12 +66,16 @@ import rx.subjects.BehaviorSubject;
 @AliucordPlugin
 public class BetterMessageLogger extends Plugin {
     private static final String DB_NAME = "BetterMessageLogger.db";
+    private static final String DB_DIRECTORY = "BetterMessageLogger";
     private static final String TXT_NAME = "BetterMessageLogger.txt";
     private static final String DELETED_LABEL = " (deleted)";
     static final String DELETED_LABEL_COLOR = "deletedLabelColor";
+    static final String DELETED_MESSAGE_COLOR = "deletedMessageColor";
     static final String LOG_EDIT_HISTORY = "logEditHistory";
+    static final String INLINE_EDIT_HISTORY = "inlineEditHistory";
     static final String SHOW_DELETED_TAG = "showDeletedTag";
     static final String DEFAULT_DELETED_LABEL_COLOR = "#FFFF0000";
+    static final String DEFAULT_DELETED_MESSAGE_COLOR = "#FFFFFFFF";
     private static final int MAX_CACHED_MESSAGES = 512;
     private static final int MAX_TRANSIENT_RECORDS = 512;
     private static BetterMessageLogger instance;
@@ -75,8 +85,9 @@ public class BetterMessageLogger extends Plugin {
     private final MessageCache boundMessages = new MessageCache(MAX_CACHED_MESSAGES);
     private final Map<WidgetChatListAdapterItemMessage, Long> boundMessageItems =
             Collections.synchronizedMap(new java.util.WeakHashMap<>());
-    private final Set<Long> deletedMessageIds = ConcurrentHashMap.newKeySet();
-    private final Set<Long> recentlyDeletedMessageIds = ConcurrentHashMap.newKeySet();
+    private final Set<Long> deletedMessageIds = Collections.newSetFromMap(new ConcurrentHashMap<Long, Boolean>());
+    private final Set<Long> recentlyDeletedMessageIds =
+            Collections.newSetFromMap(new ConcurrentHashMap<Long, Boolean>());
     private final java.util.concurrent.ConcurrentLinkedDeque<Long> transientRecordIds =
             new java.util.concurrent.ConcurrentLinkedDeque<>();
     private final Map<Long, LoadedRange> loadedRanges = new ConcurrentHashMap<>();
@@ -85,6 +96,9 @@ public class BetterMessageLogger extends Plugin {
     private MessageLoggerDatabase database;
     private volatile boolean databaseEnabled;
     private Context context;
+    private Method getMessageRenderContext;
+    private Method getMessagePreprocessor;
+    private Method getSpoilerClickHandler;
 
     static BetterMessageLogger getInstance() {
         return instance;
@@ -98,6 +112,7 @@ public class BetterMessageLogger extends Plugin {
                 .withArgs(settings);
         databaseEnabled = settings.getBool("database", false);
         if (databaseEnabled) openDatabase();
+        initializeInlineEditHistory();
 
         patcher.patch(StoreMessages.class, "handleMessageCreate", new Class<?>[]{List.class}, new Hook(frame -> {
             Object value = frame.args[0];
@@ -200,6 +215,19 @@ public class BetterMessageLogger extends Plugin {
                     scheduleDeletedLabel(item, messageId);
                 }));
 
+        patcher.patch(WidgetChatListAdapterItemMessage.class, "processMessageText",
+                new Class<?>[]{SimpleDraweeSpanTextView.class, MessageEntry.class}, new Hook(frame -> {
+                    if (!settings.getBool(INLINE_EDIT_HISTORY, false)
+                            || !(frame.thisObject instanceof WidgetChatListAdapterItemMessage)
+                            || !(frame.args[0] instanceof SimpleDraweeSpanTextView)
+                            || !(frame.args[1] instanceof MessageEntry)) return;
+                    MessageEntry entry = (MessageEntry) frame.args[1];
+                    MessageRecord record = records.get(entry.getMessage().getId());
+                    if (record == null || record.edits.isEmpty()) return;
+                    appendInlineEditHistory((WidgetChatListAdapterItemMessage) frame.thisObject,
+                            (SimpleDraweeSpanTextView) frame.args[0], entry, record);
+                }));
+
         patcher.patch(WidgetChatListActions.class, "configureUI",
                 new Class<?>[]{WidgetChatListActions.Model.class}, new Hook(frame -> {
                     if (!(frame.args[0] instanceof WidgetChatListActions.Model)) return;
@@ -209,9 +237,86 @@ public class BetterMessageLogger extends Plugin {
                     MessageRecord record = records.get(message.getId());
                     if (record == null || !shouldKeep(record)) return;
                     WidgetChatListActions sheet = (WidgetChatListActions) frame.thisObject;
-                    if (!record.edits.isEmpty()) addHistoryAction(sheet, record);
+                    if (!record.edits.isEmpty() && !settings.getBool(INLINE_EDIT_HISTORY, false)) {
+                        addHistoryAction(sheet, record);
+                    }
                     if (record.deleted || !record.edits.isEmpty()) addDeleteAction(sheet, record);
         }));
+    }
+
+    private void initializeInlineEditHistory() {
+        try {
+            getMessageRenderContext = WidgetChatListAdapterItemMessage.class.getDeclaredMethod(
+                    "getMessageRenderContext", Context.class, MessageEntry.class,
+                    kotlin.jvm.functions.Function1.class);
+            getMessagePreprocessor = WidgetChatListAdapterItemMessage.class.getDeclaredMethod(
+                    "getMessagePreprocessor", long.class, com.discord.models.message.Message.class,
+                    com.discord.stores.StoreMessageState.State.class);
+            getSpoilerClickHandler = WidgetChatListAdapterItemMessage.class.getDeclaredMethod(
+                    "getSpoilerClickHandler", com.discord.models.message.Message.class);
+            getMessageRenderContext.setAccessible(true);
+            getMessagePreprocessor.setAccessible(true);
+            getSpoilerClickHandler.setAccessible(true);
+        } catch (Throwable error) {
+            getMessageRenderContext = null;
+            getMessagePreprocessor = null;
+            getSpoilerClickHandler = null;
+            logger.error("Could not initialize inline edit history", error);
+        }
+    }
+
+    private void appendInlineEditHistory(WidgetChatListAdapterItemMessage item,
+                                         SimpleDraweeSpanTextView textView,
+                                         MessageEntry entry, MessageRecord record) {
+        if (getMessageRenderContext == null || getMessagePreprocessor == null
+                || getSpoilerClickHandler == null) return;
+        try {
+            com.discord.models.message.Message message = entry.getMessage();
+            Context renderContext = textView.getContext();
+            Object spoilerClickHandler = getSpoilerClickHandler.invoke(item, message);
+            MessageRenderContext messageRenderContext = (MessageRenderContext) getMessageRenderContext.invoke(
+                    item, renderContext, entry, spoilerClickHandler);
+            MessagePreprocessor messagePreprocessor = (MessagePreprocessor) getMessagePreprocessor.invoke(
+                    item, StoreStreamAccess.meId(), message, entry.getMessageState());
+            DiscordParser.ParserOptions parserOptions = message.isWebhook()
+                    ? DiscordParser.ParserOptions.ALLOW_MASKED_LINKS
+                    : DiscordParser.ParserOptions.DEFAULT;
+            int mutedAttribute = Utils.getResId("colorTextMuted", "attr");
+            int mutedColor = mutedAttribute == 0 ? Color.LTGRAY
+                    : ColorCompat.getThemedColor(renderContext, mutedAttribute);
+            com.facebook.drawee.span.DraweeSpanStringBuilder builder =
+                    new com.facebook.drawee.span.DraweeSpanStringBuilder();
+            int historyEnd = 0;
+            for (String edit : record.edits.split("\u001e")) {
+                if (edit.isEmpty()) continue;
+                String[] parts = edit.split("\u001f", 2);
+                if (parts.length != 2) continue;
+                long timestamp;
+                try {
+                    timestamp = Long.parseLong(parts[0]);
+                } catch (NumberFormatException ignored) {
+                    continue;
+                }
+                builder.append(DiscordParser.parseChannelMessage(renderContext, parts[1],
+                        messageRenderContext, messagePreprocessor, parserOptions, false));
+                int tagStart = builder.length();
+                builder.append(" (edited: ")
+                        .append(DateUtils.getRelativeDateTimeString(renderContext, timestamp,
+                                DateUtils.DAY_IN_MILLIS, DateUtils.DAY_IN_MILLIS * 2L,
+                                DateUtils.FORMAT_ABBREV_ALL))
+                        .append(")\n");
+                builder.setSpan(new RelativeSizeSpan(0.75f), tagStart, builder.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                historyEnd = builder.length();
+            }
+            if (historyEnd == 0) return;
+            builder.setSpan(new ForegroundColorSpan(mutedColor), 0, historyEnd,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            builder.append(textView.getText());
+            textView.setDraweeSpanStringBuilder(builder);
+        } catch (Throwable error) {
+            logger.error("Could not render inline edit history", error);
+        }
     }
 
     private void captureMessageBeforeDelete(StoreMessages store, ModelMessageDelete event) {
@@ -396,8 +501,14 @@ public class BetterMessageLogger extends Plugin {
         if (oldestLoadedId != Long.MAX_VALUE) {
             if (loadedRange == null) {
                 LoadedRange created = new LoadedRange();
-                LoadedRange existing = loadedRanges.putIfAbsent(channelId, created);
-                loadedRange = existing == null ? created : existing;
+                synchronized (loadedRanges) {
+                    LoadedRange existing = loadedRanges.get(channelId);
+                    if (existing == null) {
+                        loadedRanges.put(channelId, created);
+                        existing = created;
+                    }
+                    loadedRange = existing;
+                }
             }
             loadedRange.include(oldestLoadedId, newestLoadedId);
         }
@@ -412,7 +523,7 @@ public class BetterMessageLogger extends Plugin {
                     || !shouldKeep(record) || present.contains(record.id)) continue;
             result.add(record.toMessage());
         }
-        result.sort(Comparator.comparingLong(com.discord.models.message.Message::getId));
+        Collections.sort(result, (first, second) -> Long.compare(first.getId(), second.getId()));
         return result;
     }
 
@@ -502,7 +613,11 @@ public class BetterMessageLogger extends Plugin {
             Long oldestId = transientRecordIds.pollFirst();
             if (oldestId == null) break;
             MessageRecord oldest = records.get(oldestId);
-            if (oldest != null && !oldest.deleted && oldest.edits.isEmpty()) records.remove(oldestId, oldest);
+            if (oldest != null && !oldest.deleted && oldest.edits.isEmpty()) {
+                synchronized (records) {
+                    if (records.get(oldestId) == oldest) records.remove(oldestId);
+                }
+            }
         }
     }
     private void persist(MessageRecord record) {
@@ -510,7 +625,10 @@ public class BetterMessageLogger extends Plugin {
     }
 
     private void openDatabase() {
-        database = new MessageLoggerDatabase(new File(Constants.BASE_PATH, DB_NAME));
+        File databaseDirectory = new File(Constants.BASE_PATH, DB_DIRECTORY);
+        if (!databaseDirectory.exists()) databaseDirectory.mkdirs();
+        migrateDatabaseFiles(databaseDirectory);
+        database = new MessageLoggerDatabase(new File(databaseDirectory, DB_NAME));
         database.open();
         if (!editLoggingEnabled()) database.clearEditHistoryAsync();
         database.loadAllAsync(loaded -> {
@@ -538,6 +656,21 @@ public class BetterMessageLogger extends Plugin {
             }
             bumpRevision();
         });
+    }
+
+    private void migrateDatabaseFiles(File databaseDirectory) {
+        File oldDatabase = new File(Constants.BASE_PATH, DB_NAME);
+        File newDatabase = new File(databaseDirectory, DB_NAME);
+        if (newDatabase.exists() || !oldDatabase.exists()) return;
+        if (!oldDatabase.renameTo(newDatabase)) {
+            logger.warn("Could not move the BetterMessageLogger database to its folder");
+            return;
+        }
+        String[] sidecars = {"-wal", "-shm", "-journal"};
+        for (String sidecar : sidecars) {
+            File oldSidecar = new File(Constants.BASE_PATH, DB_NAME + sidecar);
+            if (oldSidecar.exists()) oldSidecar.renameTo(new File(databaseDirectory, DB_NAME + sidecar));
+        }
     }
     void setDatabaseEnabled(boolean enabled) {
         if (databaseEnabled == enabled) return;
@@ -647,19 +780,25 @@ public class BetterMessageLogger extends Plugin {
         DeletedMessageColorSpan[] oldColors = builder.getSpans(0, builder.length(), DeletedMessageColorSpan.class);
         boolean showTag = settings.getBool(SHOW_DELETED_TAG, true);
         int labelColor = deletedLabelColor();
+        int messageColor = deletedMessageColor();
 
         if (!deleted && oldLabels.length == 0 && oldColors.length == 0) return;
-        if (deleted && showTag && oldLabels.length == 1 && oldColors.length == 0) {
-            int start = builder.getSpanStart(oldLabels[0]);
-            int end = builder.getSpanEnd(oldLabels[0]);
-            if (start == builder.length() - DELETED_LABEL.length() && end == builder.length()
-                    && DELETED_LABEL.contentEquals(builder.subSequence(start, end))
-                    && oldLabels[0].color == labelColor) return;
+        if (deleted && oldLabels.length == (showTag ? 1 : 0) && oldColors.length == 1) {
+            int messageEnd = builder.length();
+            boolean validLabel = !showTag;
+            if (showTag) {
+                int labelStart = builder.getSpanStart(oldLabels[0]);
+                int labelEnd = builder.getSpanEnd(oldLabels[0]);
+                validLabel = labelStart == builder.length() - DELETED_LABEL.length()
+                        && labelEnd == builder.length()
+                        && DELETED_LABEL.contentEquals(builder.subSequence(labelStart, labelEnd))
+                        && oldLabels[0].color == labelColor;
+                messageEnd = labelStart;
+            }
+            if (validLabel && builder.getSpanStart(oldColors[0]) == 0
+                    && builder.getSpanEnd(oldColors[0]) == messageEnd
+                    && oldColors[0].color == messageColor) return;
         }
-        if (deleted && !showTag && oldLabels.length == 0 && oldColors.length == 1
-                && builder.getSpanStart(oldColors[0]) == 0
-                && builder.getSpanEnd(oldColors[0]) == builder.length()
-                && oldColors[0].color == labelColor) return;
 
         for (DeletedMessageColorSpan oldColor : oldColors) builder.removeSpan(oldColor);
         for (DeletedLabelSpan oldLabel : oldLabels) {
@@ -669,13 +808,14 @@ public class BetterMessageLogger extends Plugin {
             builder.removeSpan(oldLabel);
         }
         if (deleted) {
+            if (builder.length() > 0) {
+                builder.setSpan(new DeletedMessageColorSpan(messageColor), 0, builder.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
             if (showTag) {
                 int start = builder.length();
                 builder.append(DELETED_LABEL);
                 builder.setSpan(new DeletedLabelSpan(labelColor), start, builder.length(),
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            } else if (builder.length() > 0) {
-                builder.setSpan(new DeletedMessageColorSpan(labelColor), 0, builder.length(),
                         Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
         }
@@ -806,6 +946,15 @@ public class BetterMessageLogger extends Plugin {
             return Color.parseColor(settings.getString(DELETED_LABEL_COLOR, DEFAULT_DELETED_LABEL_COLOR));
         } catch (Throwable ignored) {
             return Color.RED;
+        }
+    }
+
+    private int deletedMessageColor() {
+        try {
+            return Color.parseColor(settings.getString(DELETED_MESSAGE_COLOR,
+                    DEFAULT_DELETED_MESSAGE_COLOR));
+        } catch (Throwable ignored) {
+            return Color.WHITE;
         }
     }
 
