@@ -8,8 +8,10 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaRecorder;
+import android.net.Uri;
 import android.os.Build;
 import android.text.Editable;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -17,11 +19,15 @@ import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.ViewTreeObserver;
 import android.widget.LinearLayout;
+import android.widget.PopupWindow;
 import android.widget.RelativeLayout;
+import android.widget.TextView;
 
 import androidx.appcompat.widget.AppCompatImageButton;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentManager;
 
 import com.aliucord.Constants;
 import com.aliucord.Utils;
@@ -30,15 +36,20 @@ import com.aliucord.api.CommandsAPI;
 import com.aliucord.api.SettingsAPI;
 import com.aliucord.entities.Plugin;
 import com.aliucord.utils.DimenUtils;
+import com.discord.app.AppActivity;
 import com.discord.stores.StoreStream;
+import com.discord.utilities.color.ColorCompat;
 import com.discord.widgets.chat.input.ChatInputViewModel;
 import com.discord.widgets.chat.input.WidgetChatInput;
 import com.discord.widgets.chat.input.WidgetChatInputEditText$setOnTextChangedListener$1;
 import com.lytefast.flexinput.widget.FlexEditText;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.UUID;
+import java.util.concurrent.Future;
 
 @SuppressWarnings("unused")
 @AliucordPlugin
@@ -47,6 +58,8 @@ public class VoiceMessages extends Plugin {
     static final int DEFAULT_ICON_COLOR = Color.WHITE;
     private static final long MIN_RECORDING_MILLIS = 500;
     private static final String BUTTON_TAG = "VoiceMessages.RecordButton";
+    static final int AUDIO_FILE_PICKER_REQUEST_CODE = 4832;
+    static final String AUDIO_FILE_PICKER_TAG = "VoiceMessages.AudioFilePicker";
     private static VoiceMessages instance;
 
     private MediaRecorder mediaRecorder;
@@ -68,7 +81,12 @@ public class VoiceMessages extends Plugin {
     private View observedActivityRoot;
     private ViewTreeObserver.OnGlobalLayoutListener inputLayoutListener;
     private boolean activityObservationRetryScheduled;
+    private PopupWindow voiceModePopup;
     private boolean delayedStopPending;
+    private volatile boolean audioFileSendInProgress;
+    private volatile Future<?> audioFileTask;
+    private long audioFileChannelId;
+    private VoiceMessageBody.MessageReference audioFileReply;
 
     public static SettingsAPI staticSettings;
     int outputFormat = MediaRecorder.OutputFormat.MPEG_4;
@@ -135,14 +153,10 @@ public class VoiceMessages extends Plugin {
         recordButton.setOnTouchListener((view, motionEvent) -> {
             switch (motionEvent.getAction()) {
                 case MotionEvent.ACTION_DOWN:
-                    try {
-                        recordingChannelId = StoreStream.getChannelsSelected().getId();
-                        recordingReply = getPendingReply(recordingChannelId);
-                        onRecordStart();
-                    } catch (IOException | RuntimeException e) {
-                        logger.error(e);
-                        Utils.showToast("Unable to start voice recording");
+                    if (isRecording) {
+                        return true;
                     }
+                    showVoiceModePopup();
                     return true;
                 case MotionEvent.ACTION_UP:
                     if (isRecording) {
@@ -271,9 +285,158 @@ public class VoiceMessages extends Plugin {
         return Color.alpha(color) == 0 ? DEFAULT_ICON_COLOR : color;
     }
 
+    static VoiceMessages getInstance() {
+        return instance;
+    }
+
+    private void showVoiceModePopup() {
+        if (recordButton == null || isRecording || voiceModePopup != null) {
+            return;
+        }
+
+        Context context = recordButton.getContext();
+        int popupWidth = DimenUtils.dpToPx(280);
+        LinearLayout menu = new LinearLayout(context);
+        menu.setOrientation(LinearLayout.VERTICAL);
+        menu.setPadding(
+                DimenUtils.dpToPx(6),
+                DimenUtils.dpToPx(6),
+                DimenUtils.dpToPx(6),
+                DimenUtils.dpToPx(6)
+        );
+        GradientDrawable menuBackground = new GradientDrawable();
+        menuBackground.setColor(themeColor(context, "colorBackgroundSecondary", Color.rgb(32, 34, 37)));
+        menuBackground.setCornerRadius(DimenUtils.dpToPx(12));
+        menuBackground.setStroke(
+                DimenUtils.dpToPx(1),
+                themeColor(context, "colorBackgroundTertiary", Color.rgb(64, 68, 75))
+        );
+        menu.setBackground(menuBackground);
+
+        TextView recordOption = createVoiceModeOption(
+                context,
+                "Send Voice Message",
+                this::startNormalVoiceRecording
+        );
+        TextView fileOption = createVoiceModeOption(
+                context,
+                "Send .mp3/.wav/etc. as Voice Message",
+                ignored -> openAudioFilePicker()
+        );
+        menu.addView(recordOption);
+        menu.addView(fileOption);
+
+        PopupWindow popup = new PopupWindow(
+                menu,
+                popupWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                true
+        );
+        popup.setBackgroundDrawable(menuBackground);
+        popup.setOutsideTouchable(true);
+        popup.setFocusable(true);
+        popup.setElevation(DimenUtils.dpToPx(8));
+        popup.setOnDismissListener(() -> {
+            if (voiceModePopup == popup) {
+                voiceModePopup = null;
+            }
+        });
+        voiceModePopup = popup;
+
+        menu.measure(
+                View.MeasureSpec.makeMeasureSpec(popupWidth, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        );
+        int popupHeight = menu.getMeasuredHeight();
+        popup.setHeight(popupHeight);
+        try {
+            popup.showAsDropDown(
+                    recordButton,
+                    recordButton.getWidth() - popupWidth,
+                    -recordButton.getHeight() - popupHeight - DimenUtils.dpToPx(8)
+            );
+        } catch (RuntimeException e) {
+            voiceModePopup = null;
+            logger.error(e);
+        }
+    }
+
+    private TextView createVoiceModeOption(Context context, String label, View.OnClickListener listener) {
+        TextView option = new TextView(context);
+        option.setText(label);
+        option.setTextColor(themeColor(context, "colorHeaderPrimary", Color.WHITE));
+        option.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        option.setGravity(Gravity.CENTER_VERTICAL);
+        option.setMinHeight(DimenUtils.dpToPx(48));
+        option.setPadding(
+                DimenUtils.dpToPx(12),
+                0,
+                DimenUtils.dpToPx(12),
+                0
+        );
+        option.setClickable(true);
+        option.setFocusable(true);
+        TypedValue selectableValue = new TypedValue();
+        if (context.getTheme().resolveAttribute(
+                android.R.attr.selectableItemBackground,
+                selectableValue,
+                true
+        ) && selectableValue.resourceId != 0) {
+            option.setBackground(ContextCompat.getDrawable(context, selectableValue.resourceId));
+        }
+        option.setOnClickListener(ignored -> {
+            dismissVoiceModePopup();
+            listener.onClick(option);
+        });
+        return option;
+    }
+
+    private void startNormalVoiceRecording(View ignored) {
+        try {
+            recordingChannelId = StoreStream.getChannelsSelected().getId();
+            recordingReply = getPendingReply(recordingChannelId);
+            onRecordStart();
+        } catch (IOException | RuntimeException e) {
+            logger.error(e);
+            Utils.showToast("Unable to start voice recording");
+        }
+    }
+
+    private void dismissVoiceModePopup() {
+        if (voiceModePopup != null) {
+            voiceModePopup.dismiss();
+            voiceModePopup = null;
+        }
+    }
+
+    private int themeColor(Context context, String attribute, int fallback) {
+        int id = Utils.getResId(attribute, "attr");
+        if (id == 0) {
+            return fallback;
+        }
+
+        TypedValue value = new TypedValue();
+        if (!context.getTheme().resolveAttribute(id, value, true)) {
+            return fallback;
+        }
+        if (value.type >= TypedValue.TYPE_FIRST_COLOR_INT
+                && value.type <= TypedValue.TYPE_LAST_COLOR_INT) {
+            return value.data;
+        }
+        if (value.resourceId != 0) {
+            try {
+                return ContextCompat.getColor(context, value.resourceId);
+            } catch (RuntimeException ignored) {
+                // Fall through to Discord's themed color resolver.
+            }
+        }
+        return ColorCompat.getThemedColor(context, id);
+    }
+
     static void refreshButtonColor() {
         if (instance != null) {
             instance.applyButtonColor();
+            instance.updateRecordingUi();
             instance.updateButtonPlacement();
         }
     }
@@ -341,15 +504,19 @@ public class VoiceMessages extends Plugin {
     }
 
     private void attachToChatInput(View root) {
+        attachToChatInput(root, true);
+    }
+
+    private boolean attachToChatInput(View root, boolean updateVisibility) {
         if (root == null || recordButton == null) {
-            return;
+            return false;
         }
 
         FlexEditText candidateEditText = root.findViewById(Utils.getResId("text_input", "id"));
         ViewGroup candidateContainer = root.findViewById(Utils.getResId("main_input_container", "id"));
         ViewParent candidateParent = candidateContainer == null ? null : candidateContainer.getParent();
         if (candidateEditText == null || candidateContainer == null || !(candidateParent instanceof RelativeLayout)) {
-            return;
+            return false;
         }
 
         editText = candidateEditText;
@@ -366,7 +533,7 @@ public class VoiceMessages extends Plugin {
             var waveformParams = new LinearLayout.LayoutParams(0, DimenUtils.dpToPx(30), 1f);
             waveformParams.gravity = Gravity.CENTER_VERTICAL;
             if (!attachView(waveFormView, candidateContainer, 0, waveformParams)) {
-                return;
+                return false;
             }
         }
 
@@ -377,8 +544,11 @@ public class VoiceMessages extends Plugin {
         }
 
         updateRecordingUi();
-        updateRecordButtonVisibility();
+        if (updateVisibility) {
+            updateRecordButtonVisibility();
+        }
         removeActivityLayoutObserver();
+        return true;
     }
 
     private void updateButtonPlacement() {
@@ -466,7 +636,8 @@ public class VoiceMessages extends Plugin {
                 ? recordButton.getId()
                 : Utils.getResId("send_btn_container", "id");
         int rightMargin = DimenUtils.dpToPx(8);
-        if (params.getRule(RelativeLayout.LEFT_OF) == anchorId && params.rightMargin == rightMargin) {
+        int[] rules = params.getRules();
+        if (rules[RelativeLayout.LEFT_OF] == anchorId && params.rightMargin == rightMargin) {
             return;
         }
         params.addRule(RelativeLayout.LEFT_OF, anchorId);
@@ -547,6 +718,117 @@ public class VoiceMessages extends Plugin {
         updateWaveformThread = new Thread(updateWaveform, "VoiceMessages-Waveform");
         updateWaveformThread.start();
         return true;
+    }
+
+    private void openAudioFilePicker() {
+        if (audioFileSendInProgress) {
+            return;
+        }
+
+        try {
+            AppActivity activity = Utils.getAppActivity();
+            FragmentManager fragmentManager = activity.getSupportFragmentManager();
+            if (fragmentManager.isStateSaved()) {
+                Utils.showToast("Please try again in a moment");
+                return;
+            }
+            if (fragmentManager.findFragmentByTag(AUDIO_FILE_PICKER_TAG) != null) {
+                return;
+            }
+
+            audioFileChannelId = StoreStream.getChannelsSelected().getId();
+            audioFileReply = getPendingReply(audioFileChannelId);
+            AudioFilePickerFragment picker = new AudioFilePickerFragment();
+            fragmentManager.beginTransaction().add(picker, AUDIO_FILE_PICKER_TAG).commitNow();
+            picker.open();
+        } catch (RuntimeException e) {
+            clearAudioFileSelection();
+            logger.error(e);
+            Utils.showToast("Unable to open the audio file picker");
+        }
+    }
+
+    void onAudioFilePickerCancelled() {
+        clearAudioFileSelection();
+    }
+
+    void onAudioFilePicked(Uri uri) {
+        if (uri == null) {
+            clearAudioFileSelection();
+            return;
+        }
+
+        long channelId = audioFileChannelId;
+        VoiceMessageBody.MessageReference reply = audioFileReply;
+        clearAudioFileSelection();
+        if (channelId == 0L || audioFileSendInProgress) {
+            return;
+        }
+
+        audioFileSendInProgress = true;
+        updateRecordButtonVisibility();
+        Utils.showToast("Sending audio file");
+        audioFileTask = Utils.threadPool.submit(() -> sendAudioFile(uri, channelId, reply));
+    }
+
+    private void sendAudioFile(Uri uri, long channelId, VoiceMessageBody.MessageReference reply) {
+        File audioFile = null;
+        try {
+            audioFile = copyAudioFile(uri);
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            if (!audioFile.isFile() || audioFile.length() <= 0) {
+                throw new IOException("The selected audio file is empty");
+            }
+
+            float duration = getRecordingDurationSeconds(audioFile, 1000L);
+            String waveform = android.util.Base64.encodeToString(new byte[]{1}, android.util.Base64.NO_WRAP);
+            String filename = DiscordAPI.uploadFile(audioFile, channelId, ".ogg");
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            DiscordAPI.sendVoiceMessage(filename, duration, waveform, channelId, ".ogg", reply);
+            if (reply != null) {
+                StoreStream.Companion.getPendingReplies().onDeletePendingReply(channelId);
+            }
+        } catch (IOException | RuntimeException e) {
+            logger.error(e);
+            Utils.showToast("Failed to send audio file");
+        } finally {
+            deleteFile(audioFile);
+            if (instance == this) {
+                audioFileTask = null;
+                audioFileSendInProgress = false;
+                Utils.mainThread.post(this::updateRecordButtonVisibility);
+            }
+        }
+    }
+
+    private File copyAudioFile(Uri uri) throws IOException {
+        File baseDirectory = new File(Constants.BASE_PATH);
+        if (!baseDirectory.isDirectory() && !baseDirectory.mkdirs()) {
+            throw new IOException("Could not create the voice message directory");
+        }
+
+        File destination = File.createTempFile("audio_file", ".ogg", baseDirectory);
+        destination.deleteOnExit();
+        try (InputStream input = Utils.getAppContext().getContentResolver().openInputStream(uri);
+             FileOutputStream output = new FileOutputStream(destination)) {
+            if (input == null) {
+                throw new IOException("Could not read the selected audio file");
+            }
+
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+        } catch (IOException | RuntimeException e) {
+            deleteFile(destination);
+            throw e;
+        }
+        return destination;
     }
 
     private MediaRecorder createRecorder(File file) throws IOException {
@@ -678,7 +960,7 @@ public class VoiceMessages extends Plugin {
         if (recordButton != null) {
             recordButton.setContentDescription(isRecording
                     ? "Stop recording voice message"
-                    : "Record voice message");
+                    : "Choose voice message type");
         }
     }
 
@@ -691,7 +973,8 @@ public class VoiceMessages extends Plugin {
         boolean hasAttachments = attachmentPreview != null
                 && attachmentPreview.getVisibility() == View.VISIBLE;
         boolean canType = isRecording || canUseComposer();
-        boolean buttonVisible = canType
+        boolean buttonVisible = !audioFileSendInProgress
+                && canType
                 && !hasAttachments
                 && (isRecording || text == null || text.length() == 0);
         recordButton.setVisibility(buttonVisible ? View.VISIBLE : View.GONE);
@@ -803,8 +1086,35 @@ public class VoiceMessages extends Plugin {
         }
     }
 
+    private void clearAudioFileSelection() {
+        audioFileChannelId = 0L;
+        audioFileReply = null;
+    }
+
+    private void removeAudioFilePicker() {
+        try {
+            AppActivity activity = Utils.getAppActivity();
+            FragmentManager fragmentManager = activity.getSupportFragmentManager();
+            Fragment picker = fragmentManager.findFragmentByTag(AUDIO_FILE_PICKER_TAG);
+            if (picker != null) {
+                fragmentManager.beginTransaction().remove(picker).commitAllowingStateLoss();
+            }
+        } catch (RuntimeException e) {
+            logger.debug("Could not remove the audio file picker fragment");
+        }
+    }
+
     @Override
     public void stop(Context context) {
+        dismissVoiceModePopup();
+        removeAudioFilePicker();
+        clearAudioFileSelection();
+        Future<?> pendingAudioFileTask = audioFileTask;
+        if (pendingAudioFileTask != null) {
+            pendingAudioFileTask.cancel(true);
+            audioFileTask = null;
+        }
+        audioFileSendInProgress = false;
         if (isRecording) {
             onRecordStop(false, 0L);
         } else {
