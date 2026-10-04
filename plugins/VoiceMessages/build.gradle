@@ -1,9 +1,13 @@
-version = "1.1.13"
+version = "1.1.14"
 description = "Send Voice Messages"
 
 aliucord {
     changelog.set(
         """
+        # 1.1.14
+        * Another redesign
+        * Added cooldown when hold to record is enabled to avoid accidental taps
+        * Voice button now dims instead of disappearing after sending
         # 1.1.13
         * Redesign
         # 1.1.12

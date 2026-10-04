@@ -100,6 +100,10 @@ class VoiceMessages : Plugin() {
     private var activePointer = MotionEvent.INVALID_POINTER_ID
     private var clickEligible = false
     private var holdRecording = false
+
+    // Hold to record: recording starts only after a short hold, and presses right after one ends are ignored.
+    private var holdStart: Runnable? = null
+    private var holdCooldownUntil = 0L
     private var delayedStop: Runnable? = null
     private var sendTask: Future<*>? = null
     private var sending = false
@@ -292,10 +296,20 @@ class VoiceMessages : Plugin() {
                             activePointer = event.getPointerId(0)
                             clickEligible = true
                             if (recording == null && settings.getBool("disableSelectionPopup", false)) {
-                                holdRecording = startRecording()
-                                view.isPressed = holdRecording
-                                if (holdRecording) view.parent?.requestDisallowInterceptTouchEvent(true)
-                                updateRecordingUi()
+                                if (SystemClock.elapsedRealtime() < holdCooldownUntil) {
+                                    clickEligible = false
+                                    return@setOnTouchListener true
+                                }
+                                view.isPressed = true
+                                view.parent?.requestDisallowInterceptTouchEvent(true)
+                                holdStart = Runnable {
+                                    holdStart = null
+                                    if (activePointer == MotionEvent.INVALID_POINTER_ID) return@Runnable
+                                    holdRecording = startRecording()
+                                    view.isPressed = holdRecording
+                                    if (!holdRecording) view.parent?.requestDisallowInterceptTouchEvent(false)
+                                    updateRecordingUi()
+                                }.also { Utils.mainThread.postDelayed(it, HOLD_START_DELAY_MILLIS) }
                             }
                             true
                         }
@@ -307,6 +321,7 @@ class VoiceMessages : Plugin() {
                                 event.getY(index) < -slop || event.getY(index) > view.height + slop
                             ) {
                                 clickEligible = false
+                                cancelHoldStart()
                                 if (holdRecording) {
                                     finishRecording(false)
                                     Utils.showToast("Voice recording cancelled")
@@ -319,8 +334,12 @@ class VoiceMessages : Plugin() {
                             if (event.getPointerId(event.actionIndex) == activePointer) {
                                 val held = holdRecording
                                 val canClick = clickEligible
+                                // Released before the hold delay: treat it as an accidental tap.
+                                val tooShort = cancelHoldStart()
                                 clearPress()
-                                if (held) {
+                                if (tooShort) {
+                                    Utils.showToast("Hold the button to record")
+                                } else if (held) {
                                     finishRecording(true)
                                 } else if (canClick && (recording != null || !settings.getBool("disableSelectionPopup", false))) {
                                     view.performClick()
@@ -330,6 +349,7 @@ class VoiceMessages : Plugin() {
                         }
 
                         MotionEvent.ACTION_CANCEL -> {
+                            cancelHoldStart()
                             if (holdRecording) finishRecording(false)
                             clearPress()
                             true
@@ -337,6 +357,7 @@ class VoiceMessages : Plugin() {
 
                         MotionEvent.ACTION_POINTER_UP -> {
                             if (event.getPointerId(event.actionIndex) == activePointer) {
+                                cancelHoldStart()
                                 if (holdRecording) finishRecording(false)
                                 clearPress()
                             }
@@ -436,15 +457,16 @@ class VoiceMessages : Plugin() {
             attachmentAdapter = list?.adapter
             attachmentAdapter?.registerAdapterDataObserver(adapterObserver)
         }
+        // Stay in place while uploading so the composer does not jump; the button is disabled until done.
         val visible =
-            !sending && (
-                recording != null || (
-                    canAttach(selected) && input.isEnabled && input.isFocusable &&
-                        treeVisible(input) && (blocked == null || !treeVisible(blocked)) && input.text.isNullOrEmpty() &&
-                        (attachmentAdapter?.itemCount ?: 0) == 0
-                )
+            sending || recording != null || (
+                canAttach(selected) && input.isEnabled && input.isFocusable &&
+                    treeVisible(input) && (blocked == null || !treeVisible(blocked)) && input.text.isNullOrEmpty() &&
+                    (attachmentAdapter?.itemCount ?: 0) == 0
             )
         current.visibility = if (visible) View.VISIBLE else View.GONE
+        current.isEnabled = !sending
+        current.alpha = if (sending) 0.4f else 1f
         val group = container ?: return
         val params = group.layoutParams as? RelativeLayout.LayoutParams ?: return
         val original = originalContainerParams ?: return
@@ -534,6 +556,14 @@ class VoiceMessages : Plugin() {
                 settings.getBool("disableSelectionPopup", false) -> "Hold to record voice message"
                 else -> "Choose voice message type"
             }
+    }
+
+    /** Returns true when a press was still waiting for the hold delay. */
+    private fun cancelHoldStart(): Boolean {
+        val pending = holdStart ?: return false
+        Utils.mainThread.removeCallbacks(pending)
+        holdStart = null
+        return true
     }
 
     private fun clearPress() {
@@ -724,6 +754,7 @@ class VoiceMessages : Plugin() {
         delayedStop?.let { Utils.mainThread.removeCallbacks(it) }
         delayedStop = null
         recording = null
+        if (holdRecording) holdCooldownUntil = SystemClock.elapsedRealtime() + HOLD_COOLDOWN_MILLIS
         holdRecording = false
         clearPress()
         Utils.mainThread.removeCallbacks(sample)
@@ -1124,6 +1155,7 @@ class VoiceMessages : Plugin() {
         sending = false
         Utils.mainThread.removeCallbacks(sample)
         Utils.mainThread.removeCallbacks(discoverInput)
+        cancelHoldStart()
         removeGlobalListener()
         detachComposer()
         patcher.unpatchAll()
@@ -1137,6 +1169,8 @@ class VoiceMessages : Plugin() {
         internal val DEFAULT_BUTTON_COLOR = Color.rgb(88, 101, 242)
         internal const val DEFAULT_ICON_COLOR = Color.WHITE
         private const val MIN_RECORDING_MILLIS = 500L
+        private const val HOLD_START_DELAY_MILLIS = 300L
+        private const val HOLD_COOLDOWN_MILLIS = 1000L
         private const val MIN_FREE_CACHE_BYTES = 16L * 1024 * 1024
         private const val BUTTON_TAG = "VoiceMessages.RecordButton"
         private const val SHEET_TAG = "VoiceMessages.VoiceMode"
