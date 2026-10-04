@@ -1,9 +1,15 @@
-version = "1.0.21"
+version = "1.0.22"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.22
+        * Logged images and videos are saved and stay visible after restarting the app.
+        * Media is pre-downloaded as messages arrive, so deleted attachments show even if you weren't in the channel (can be turned off).
+        * Deleted media also shows for the current session when the database is off.
+        * Added a Message Logger entry to server, channel and DM long-press menus to block or allow them quickly.
+        * Compact settings, filter lists with names, and a cleaner edit history popup.
         # 1.0.21
         * Redesign
         # 1.0.20

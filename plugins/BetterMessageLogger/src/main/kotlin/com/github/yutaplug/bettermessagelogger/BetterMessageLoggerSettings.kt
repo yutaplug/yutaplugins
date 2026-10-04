@@ -23,7 +23,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
     private lateinit var ui: LoggerUi
     private var storageCaption: TextView? = null
     private var databaseToggle: CheckedSetting? = null
-    private val captions = HashMap<String, TextView>()
+    private val values = HashMap<String, TextView>()
     private var dialog: AlertDialog? = null
 
     override fun onViewBound(view: View) {
@@ -31,111 +31,78 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         setActionBarTitle("BetterMessageLogger")
         setActionBarSubtitle("Plugin settings")
         ui = LoggerUi(requireContext())
-        linearLayout.setPadding(0, ui.dp(16), 0, ui.dp(24))
+        linearLayout.setPadding(0, 0, 0, ui.dp(16))
         linearLayout.setBackgroundColor(ui.background)
-        linearLayout.addView(
-            ui
-                .text("Deleted messages and previous versions, right in your chats.", 14f, ui.muted)
-                .apply { setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(16)) },
-        )
 
-        val storage = section("Storage", "Saved logs are stored in Aliucord/BetterMessageLogger.db.")
-        databaseToggle =
-            toggle(
-                storage,
-                "database",
-                "Save logs across restarts",
-                "Keep deleted messages and edit history on this device.",
-            ) {
-                BetterMessageLogger.instance?.setDatabaseEnabled(it)
-                updateStorage()
-            }
-        storageCaption = ui.text("", 12f, ui.muted).apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), ui.dp(8)) }
-        storage.addView(storageCaption)
-        ui.divider(storage)
-        ui.action(storage, "Export DB to TXT", "Save readable logs to Aliucord/BetterMessageLogger.txt") {
+        val storage = section("Storage", first = true)
+        databaseToggle = toggle(storage, "database", "Save logs across restarts", null) {
+            BetterMessageLogger.instance?.setDatabaseEnabled(it)
+            updateStorage()
+        }
+        storageCaption = ui.caption("").also(storage::addView)
+        toggle(
+            storage,
+            Keys.PREFETCH_MEDIA,
+            "Pre-download media",
+            "Save images and videos as they arrive so deleted media still shows. Uses extra data.",
+            true,
+        ) {}
+        ui.row(storage, "Export to TXT", null, "ic_file_download_white_24dp") {
             BetterMessageLogger.instance?.exportDatabaseToText()
         }
-        ui.divider(storage)
-        ui.action(storage, "Clear saved logs", "Delete saved messages and edit history.", ui.danger) { confirmClear() }
+        ui.row(storage, "Clear saved logs", null, "ic_delete_24dp", ui.danger) { confirmClear() }
 
-        val appearance = section("Appearance", "Customize the deleted tag and message text colors.")
-        captions[Keys.DELETED_LABEL_COLOR] =
-            ui.action(appearance, "Deleted tag color", colorValue(Keys.DELETED_LABEL_COLOR)) {
-                colorDialog(Keys.DELETED_LABEL_COLOR, "Deleted tag color")
-            }
-        captions[Keys.DELETED_MESSAGE_COLOR] =
-            ui.action(appearance, "Deleted text color", colorValue(Keys.DELETED_MESSAGE_COLOR)) {
+        val appearance = section("Appearance")
+        toggle(appearance, Keys.SHOW_DELETED_TAG, "Show deleted tag", null, true) {
+            BetterMessageLogger.instance?.refreshAppearance()
+        }
+        values[Keys.DELETED_LABEL_COLOR] = ui.row(appearance, "Deleted tag color", colorValue(Keys.DELETED_LABEL_COLOR)) {
+            colorDialog(Keys.DELETED_LABEL_COLOR, "Deleted tag color")
+        }
+        values[Keys.DELETED_MESSAGE_COLOR] =
+            ui.row(appearance, "Deleted text color", colorValue(Keys.DELETED_MESSAGE_COLOR)) {
                 colorDialog(Keys.DELETED_MESSAGE_COLOR, "Deleted text color")
             }
-        toggle(appearance, Keys.SHOW_DELETED_TAG, "Show deleted tag", "Append (deleted) to logged messages.", true) {
-            BetterMessageLogger.instance?.refreshAppearance()
-            updateColors()
-        }
-        ui.action(appearance, "Reset colors", "Restore the default red tag and white message text.") {
+        ui.row(appearance, "Reset colors", null) {
             settings.setString(Keys.DELETED_LABEL_COLOR, Keys.DEFAULT_DELETED_LABEL_COLOR)
             settings.setString(Keys.DELETED_MESSAGE_COLOR, Keys.DEFAULT_DELETED_MESSAGE_COLOR)
             BetterMessageLogger.instance?.refreshAppearance()
             updateColors()
         }
 
-        val history = section("Edit history", "Open View Edit History from a message's context menu.")
-        toggle(
-            history,
-            Keys.LOG_EDIT_HISTORY,
-            "Log edit history",
-            "Keep previous text versions. Turning this off clears saved edit history.",
-            true,
-        ) {
+        val history = section("Edit history")
+        toggle(history, Keys.LOG_EDIT_HISTORY, "Log edit history", "Turning this off clears saved history.", true) {
             BetterMessageLogger.instance?.setEditLoggingEnabled(it)
             updateStorage()
         }
-        ui.divider(history)
-        toggle(
-            history,
-            Keys.INLINE_EDIT_HISTORY,
-            "Show history in chat",
-            "Display previous versions above the current message.",
-        ) {
+        toggle(history, Keys.INLINE_EDIT_HISTORY, "Show history in chat", "Previous versions appear above messages.") {
             BetterMessageLogger.instance?.refreshAppearance()
         }
 
-        val people = section("People", "Filters also remove matching entries from saved logs.")
-        toggle(
-            people,
-            "ignoreOwn",
-            "Ignore my messages",
-            "Skip messages from your current account.",
-        ) { filtersChanged() }
-        toggle(people, "ignoreBots", "Ignore bot messages", "Skip messages sent by bots.") { filtersChanged() }
-        idAction(people, "ignoredUsers", "Ignored users", "Messages from these users are skipped.")
-
-        val channels =
-            section(
-                "Channels and servers",
-                "A non-empty allow list limits logging to its entries. Block lists always take priority.",
-            )
-        idAction(channels, "blackChannels", "Blocked channels", "Skip these server channels.")
-        idAction(channels, "whiteChannels", "Allowed channels", "Only log these server channels.")
-        ui.divider(channels)
-        idAction(channels, "blackServers", "Blocked servers", "Skip every channel in these servers.")
-        idAction(channels, "whiteServers", "Allowed servers", "Only log channels in these servers.")
-
-        val dms = section("Direct messages", "DM filters are separate from server-channel filters.")
-        idAction(dms, "blackDms", "Blocked DMs", "Skip these DM channel IDs.")
-        idAction(dms, "whiteDms", "Allowed DMs", "Only log these DM channel IDs.")
+        val filters = section("Filters")
+        toggle(filters, "ignoreOwn", "Ignore my messages", null) { filtersChanged() }
+        toggle(filters, "ignoreBots", "Ignore bot messages", null) { filtersChanged() }
+        listRow(filters, IdLists.IGNORED_USERS, "Ignored users")
+        ui.divider(filters)
+        listRow(filters, IdLists.BLOCKED_SERVERS, "Blocked servers")
+        listRow(filters, IdLists.ALLOWED_SERVERS, "Allowed servers")
+        listRow(filters, IdLists.BLOCKED_CHANNELS, "Blocked channels")
+        listRow(filters, IdLists.ALLOWED_CHANNELS, "Allowed channels")
+        listRow(filters, IdLists.BLOCKED_DMS, "Blocked DMs")
+        listRow(filters, IdLists.ALLOWED_DMS, "Allowed DMs")
+        filters.addView(
+            ui.caption(
+                "Long-press a server, channel or DM to add it. Non-empty allow lists limit logging to their " +
+                    "entries; block lists take priority.",
+            ).apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), 0) },
+        )
         updateColors()
         updateStorage()
     }
 
-    private fun section(title: String, description: String): LinearLayout {
-        linearLayout.addView(DiscordSettingsUi.divider(requireContext()), LinearLayout.LayoutParams(-1, ui.dp(1)))
-        linearLayout.addView(DiscordSettingsUi.header(requireContext(), title))
-        linearLayout.addView(
-            ui.text(description, 14f, ui.muted).apply {
-                setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(8))
-            },
-        )
+    private fun section(title: String, first: Boolean = false): LinearLayout {
+        if (!first) ui.divider(linearLayout)
+        ui.header(linearLayout, title)
         return ui.column().also { linearLayout.addView(it, LinearLayout.LayoutParams(-1, -2)) }
     }
 
@@ -143,66 +110,51 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         parent: LinearLayout,
         key: String,
         title: String,
-        subtitle: String,
+        subtitle: String?,
         default: Boolean = false,
         changed: (Boolean) -> Unit,
-    ): CheckedSetting {
-        val toggle = Utils.createCheckedSetting(requireContext(), CheckedSetting.ViewType.SWITCH, title, subtitle)
-        toggle.isChecked = settings.getBool(key, default)
-        toggle.setOnCheckedListener {
-            settings.setBool(key, it)
-            changed(it)
-        }
-        parent.addView(toggle)
-        return toggle
+    ): CheckedSetting = ui.switch(title, subtitle, settings.getBool(key, default)) {
+        settings.setBool(key, it)
+        changed(it)
+    }.also(parent::addView)
+
+    private fun listRow(parent: LinearLayout, key: String, title: String) {
+        values[key] = ui.row(parent, title, count(key)) { idDialog(key, title) }
     }
+
+    private fun count(key: String) = IdLists.read(settings, key).size.let { if (it == 0) "None" else it.toString() }
 
     private fun updateStorage() {
         val target = storageCaption ?: return
-        target.text =
-            if (settings.getBool(
-                    "database",
-                    false,
-                )
-            ) {
-                "Opening database…"
-            } else {
-                "Database off · logs stay in memory for this session"
-            }
+        val enabled = settings.getBool("database", false)
+        target.text = if (enabled) "Opening database…" else "Off · logs last until the app restarts"
         BetterMessageLogger.instance?.storageStatistics { stats ->
             // Aliucord attaches the proxy fragment, so this page's isAdded remains false.
             // The caption is cleared on destruction and replaced when the view is rebuilt.
             if (storageCaption !== target) return@storageStatistics
-            databaseToggle?.isChecked = settings.getBool("database", false)
-            if (stats != null) {
-                val size = android.text.format.Formatter.formatShortFileSize(requireContext(), stats.bytes)
-                val paused = if (settings.getBool("database", false)) "" else " · saving paused"
-                target.text =
-                    "${stats.messages} saved messages · ${stats.edits} edits · $size\nAliucord/BetterMessageLogger.db$paused"
-            } else if (settings.getBool("database", false)) {
-                target.text = "Could not read database statistics"
-            } else {
-                target.text = "Database off · logs stay in memory for this session"
+            val on = settings.getBool("database", false)
+            databaseToggle?.isChecked = on
+            target.text = when {
+                stats != null -> {
+                    val size = android.text.format.Formatter.formatShortFileSize(requireContext(), stats.bytes)
+                    "${stats.messages} messages · ${stats.edits} edits · $size${if (on) "" else " · paused"}"
+                }
+
+                on -> "Could not read database statistics"
+                else -> "Off · logs last until the app restarts"
             }
         }
     }
 
     private fun confirmClear() {
-        val content = ui.dialogContent()
-        content.addView(ui.text("Delete all saved messages and edit history?", 16f))
-        content.addView(
-            ui.card().apply {
-                addView(ui.text("This cannot be undone. Exported TXT files are kept.", 14f, ui.muted))
-            },
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(16) },
-        )
+        val content = ui.dialogContent(20).apply {
+            addView(ui.text("Saved messages, edit history and media will be deleted. Exported TXT files are kept.", 15f, ui.normal))
+        }
         showDialog(
-            AlertDialog
-                .Builder(requireContext())
-                .setCustomTitle(DiscordSettingsUi.title(requireContext(), "Clear saved logs?"))
-                .setView(content)
+            ui
+                .dialog("Clear saved logs?", content)
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Clear logs") { _, _ ->
+                .setPositiveButton("Clear") { _, _ ->
                     BetterMessageLogger.instance?.clearDatabase { if (storageCaption != null) updateStorage() }
                 }.create(),
         ) {
@@ -211,102 +163,67 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         }
     }
 
-    private fun idAction(parent: LinearLayout, key: String, title: String, description: String) {
-        captions[key] =
-            ui.action(parent, title, "$description · ${readIds(key).size} added") { idDialog(key, title, description) }
-    }
-
-    private fun readIds(key: String): LinkedHashSet<Long> = settings
-        .getString(key, "")
-        .orEmpty()
-        .split(',')
-        .mapNotNull { it.trim().toLongOrNull()?.takeIf { value -> value > 0 } }
-        .toCollection(LinkedHashSet())
-
-    private fun idDialog(key: String, title: String, description: String) {
-        val content = ui.dialogContent()
-        content.addView(ui.text(description, 13f, ui.muted))
-        val count = ui.text("", 12f, ui.muted).apply { setPadding(0, ui.dp(16), 0, ui.dp(8)) }
-        content.addView(count)
+    private fun idDialog(key: String, title: String) {
+        val content = ui.dialogContent(0)
         val list = ui.column()
-        content.addView(
-            ui.scroll(list),
-            LinearLayout.LayoutParams(-1, -2),
-        )
-        content.addView(ui.text("Add an ID", 13f, ui.muted).apply { setPadding(0, ui.dp(18), 0, ui.dp(8)) })
-        val input = ui.input("Paste an ID").apply {
+        content.addView(ui.scroll(list, 0.4f), LinearLayout.LayoutParams(-1, -2))
+        val inputRow = LinearLayout(requireContext()).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(ui.dp(16), 0, ui.dp(8), 0)
+        }
+        val input = ui.input(if (key == IdLists.IGNORED_USERS) "Add a user ID" else "Add an ID").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
-        content.addView(input, LinearLayout.LayoutParams(-1, -2))
+        inputRow.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
 
         fun updateList() {
-            val ids = readIds(key)
-            count.text = "${ids.size} ${if (ids.size == 1) "entry" else "entries"}"
-            captions[key]?.text = "$description · ${ids.size} added"
+            val ids = IdLists.read(settings, key)
+            values[key]?.text = count(key)
             list.removeAllViews()
             if (ids.isEmpty()) {
-                list.addView(
-                    ui.card().apply {
-                        addView(ui.text("No IDs added", 15f))
-                        addView(
-                            ui
-                                .text("Paste an ID below, then tap Add.", 13f, ui.muted)
-                                .apply { setPadding(0, ui.dp(6), 0, 0) },
-                        )
-                    },
-                )
+                list.addView(ui.caption("Nothing added yet.").apply { setPadding(ui.dp(16), ui.dp(4), ui.dp(16), ui.dp(12)) })
             }
             ids.forEach { id ->
                 val row = LinearLayout(requireContext()).apply {
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(ui.dp(12), 0, 0, 0)
-                    background = ui.card().background
+                    minimumHeight = ui.dp(48)
+                    setPadding(ui.dp(16), 0, ui.dp(8), 0)
                 }
+                val labels = ui.column()
+                val name = IdLists.describe(requireContext(), key, id)
+                labels.addView(ui.text(name ?: id.toString(), 15f, ui.normal).apply { setSingleLine(true) })
+                if (name != null) labels.addView(ui.text(id.toString(), 12f, ui.muted).apply { setTextIsSelectable(true) })
+                row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
                 row.addView(
-                    ui.text(id.toString(), 14f).apply { setTextIsSelectable(true) },
-                    LinearLayout.LayoutParams(0, -2, 1f),
-                )
-                row.addView(
-                    ui.smallButton("Remove", ui.danger) {
-                        val updated = readIds(key).apply { remove(id) }
-                        settings.setString(key, updated.joinToString(","))
+                    ui.iconButton("ic_close_grey_24dp", "Remove") {
+                        IdLists.set(settings, key, id, false)
                         filtersChanged()
                         updateList()
                     },
                 )
-                list.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = ui.dp(8) })
+                list.addView(row, LinearLayout.LayoutParams(-1, -2))
             }
         }
-        updateList()
-        val dialog = AlertDialog
-            .Builder(requireContext())
-            .setCustomTitle(DiscordSettingsUi.title(requireContext(), title))
-            .setView(content)
-            .setNegativeButton("Close", null)
-            .setPositiveButton("Add", null)
-            .create()
-        showDialog(dialog) {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val id = input.text.toString().trim().toLongOrNull()?.takeIf { it > 0 }
-                when {
-                    id == null -> {
-                        input.error = "Enter a positive numeric ID"
-                    }
 
-                    id in readIds(key) -> {
-                        input.error = "This ID is already added"
-                    }
-
-                    else -> {
-                        settings.setString(key, readIds(key).apply { add(id) }.joinToString(","))
-                        input.error = null
-                        input.text?.clear()
-                        filtersChanged()
-                        updateList()
-                    }
+        fun add() {
+            val id = input.text.toString().trim().toLongOrNull()?.takeIf { it > 0 }
+            when {
+                id == null -> input.error = "Enter a numeric ID"
+                IdLists.contains(settings, key, id) -> input.error = "Already added"
+                else -> {
+                    IdLists.set(settings, key, id, true)
+                    input.error = null
+                    input.text?.clear()
+                    filtersChanged()
+                    updateList()
                 }
             }
         }
+        inputRow.addView(ui.iconButton("ic_add_24dp", "Add", ui.brand) { add() })
+        ui.divider(content)
+        content.addView(inputRow, LinearLayout.LayoutParams(-1, -2))
+        updateList()
+        showDialog(ui.dialog(title, content).setPositiveButton("Done", null).create())
     }
 
     private fun filtersChanged() {
@@ -314,52 +231,43 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         updateStorage()
     }
 
-    private fun colorValue(key: String): String = settings
-        .getString(
-            key,
-            if (key ==
-                Keys.DELETED_LABEL_COLOR
-            ) {
-                Keys.DEFAULT_DELETED_LABEL_COLOR
-            } else {
-                Keys.DEFAULT_DELETED_MESSAGE_COLOR
-            },
-        ).let { raw ->
-            parseColor(raw)?.let(::hex)
-                ?: if (key ==
-                    Keys.DELETED_LABEL_COLOR
-                ) {
-                    Keys.DEFAULT_DELETED_LABEL_COLOR
-                } else {
-                    Keys.DEFAULT_DELETED_MESSAGE_COLOR
-                }
-        }
+    private fun colorValue(key: String): String {
+        val fallback =
+            if (key == Keys.DELETED_LABEL_COLOR) Keys.DEFAULT_DELETED_LABEL_COLOR else Keys.DEFAULT_DELETED_MESSAGE_COLOR
+        return parseColor(settings.getString(key, fallback))?.let(::hex) ?: fallback
+    }
 
     private fun updateColors() {
-        listOf(Keys.DELETED_LABEL_COLOR, Keys.DELETED_MESSAGE_COLOR).forEach { captions[it]?.text = colorValue(it) }
+        listOf(Keys.DELETED_LABEL_COLOR, Keys.DELETED_MESSAGE_COLOR).forEach { key ->
+            values[key]?.apply {
+                text = colorValue(key)
+                val swatch = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(Color.parseColor(colorValue(key)))
+                    setStroke(ui.dp(1), ui.muted)
+                    setSize(ui.dp(14), ui.dp(14))
+                }
+                setCompoundDrawablesRelativeWithIntrinsicBounds(swatch, null, null, null)
+                compoundDrawablePadding = ui.dp(8)
+            }
+        }
     }
 
     private fun colorDialog(key: String, title: String) {
-        val content = ui.dialogContent()
-        content.addView(
-            ui.text(
-                "Drag to choose a color or enter a hex value. " +
-                    "The first two digits in an 8-digit value control opacity.",
-                13f,
-                ui.muted,
-            ),
-        )
+        val content = ui.dialogContent(20)
         val picker = ColorPickerView(requireContext(), Color.parseColor(colorValue(key)))
-        val palette = ui.card().apply { addView(picker, LinearLayout.LayoutParams(-1, ui.dp(190))) }
-        content.addView(palette, LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(16) })
-        content.addView(ui.text("Hex color", 13f, ui.muted).apply { setPadding(0, ui.dp(16), 0, ui.dp(8)) })
+        content.addView(
+            ui.card().apply { addView(picker, LinearLayout.LayoutParams(-1, ui.dp(160))) },
+            LinearLayout.LayoutParams(-1, -2),
+        )
         val input = ui.input("#RRGGBB or #AARRGGBB").apply {
             setText(colorValue(key))
             setSelectAllOnFocus(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
             contentDescription = "Hex color"
         }
-        content.addView(input)
+        content.addView(input, LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(8) })
+        content.addView(ui.text("Use 8 digits to set opacity.", 12f, ui.muted))
         var updating = false
         picker.onColorChanged = { color ->
             updating = true
@@ -380,10 +288,8 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
                 }
             }
         })
-        val dialog = AlertDialog
-            .Builder(requireContext())
-            .setCustomTitle(DiscordSettingsUi.title(requireContext(), title))
-            .setView(ui.scroll(content, 0.60f))
+        val dialog = ui
+            .dialog(title, ui.scroll(content, 0.6f))
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Save", null)
             .create()
@@ -418,12 +324,29 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         value.show()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Context-menu filter changes happen while this page is in the back stack.
+        if (::ui.isInitialized) {
+            listOf(
+                IdLists.IGNORED_USERS,
+                IdLists.BLOCKED_SERVERS,
+                IdLists.ALLOWED_SERVERS,
+                IdLists.BLOCKED_CHANNELS,
+                IdLists.ALLOWED_CHANNELS,
+                IdLists.BLOCKED_DMS,
+                IdLists.ALLOWED_DMS,
+            ).forEach { key -> values[key]?.text = count(key) }
+            updateColors()
+        }
+    }
+
     override fun onDestroyView() {
         dialog?.dismiss()
         dialog = null
         storageCaption = null
         databaseToggle = null
-        captions.clear()
+        values.clear()
         super.onDestroyView()
     }
 }

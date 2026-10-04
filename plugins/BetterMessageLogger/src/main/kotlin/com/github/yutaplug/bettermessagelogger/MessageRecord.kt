@@ -35,17 +35,12 @@ internal data class MessageRecord(
         InboundGatewayGsonParser.INSTANCE.gatewayGsonInstance.toJson(it.synthesizeApiMessage())
     } ?: payload
 
+    /** A private copy that never shares mutable attachment objects with Discord's message store. */
+    fun toDetachedMessage(): Message = parse(runCatching { serializedMessage() }.getOrNull()) ?: toMessage()
+
     fun toMessage(): Message {
         message?.let { return it }
-        payload?.let {
-            try {
-                val api = InboundGatewayGsonParser.INSTANCE.gatewayGsonInstance
-                    .fromJson(it, com.discord.api.message.Message::class.java)
-                if (api.o() == id && api.g() == channelId) return Message(api)
-            } catch (_: Exception) {
-                // Older or damaged payloads still have a usable text-only record.
-            }
-        }
+        parse(payload)?.let { return it }
         val author = User(
             authorId,
             authorName,
@@ -112,6 +107,18 @@ internal data class MessageRecord(
             null,
             null,
         )
+    }
+
+    private fun parse(json: String?): Message? {
+        json ?: return null
+        return try {
+            val api = InboundGatewayGsonParser.INSTANCE.gatewayGsonInstance
+                .fromJson(json, com.discord.api.message.Message::class.java)
+            if (api.o() == id && api.g() == channelId) Message(api) else null
+        } catch (_: Exception) {
+            // Older or damaged payloads still have a usable text-only record.
+            null
+        }
     }
 
     companion object {

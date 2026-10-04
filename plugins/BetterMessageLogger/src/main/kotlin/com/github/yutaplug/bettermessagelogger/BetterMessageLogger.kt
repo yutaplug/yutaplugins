@@ -15,6 +15,7 @@ import com.discord.models.message.Message
 import com.discord.stores.StoreMessages
 import com.discord.stores.StoreMessagesLoader
 import com.discord.stores.StoreStream
+import com.discord.utilities.embed.EmbedResourceUtils
 import com.discord.widgets.chat.list.actions.WidgetChatListActions
 import com.discord.widgets.chat.list.model.WidgetChatListModelMessages.MessagesWithMetadata
 import java.io.File
@@ -34,6 +35,8 @@ class BetterMessageLogger : Plugin() {
     private val revisionNumber = AtomicLong()
 
     @Volatile private var database: MessageLoggerDatabase? = null
+
+    @Volatile private var media: MessageMediaStore? = null
     private lateinit var decorations: MessageDecorations
 
     @Volatile private var running = false
@@ -53,6 +56,11 @@ class BetterMessageLogger : Plugin() {
         settingsTab =
             SettingsTab(BetterMessageLoggerSettings::class.java, SettingsTab.Type.PAGE).withArgs(settings)
         try {
+            media = MessageMediaStore(
+                File(Constants.BASE_PATH, MEDIA_DIR),
+                { action, error -> logger.error("Could not $action", error) },
+                ::bumpRevision,
+            )
             decorations =
                 MessageDecorations(settings, ::record, { message ->
                     boundMessages.put(message.id, message)
@@ -67,6 +75,10 @@ class BetterMessageLogger : Plugin() {
             patchMessages()
             patchDisplayModel()
             patchActions()
+            patchMediaPreviews()
+            LoggerContextMenus(settings, ::settingsChanged) { action, error ->
+                logger.error("Could not $action", error)
+            }.patch(patcher)
             databaseEnabled = settings.getBool("database", false)
             if (databaseEnabled ||
                 File(Constants.BASE_PATH, DB_NAME).exists() ||
@@ -87,7 +99,11 @@ class BetterMessageLogger : Plugin() {
             arrayOf(List::class.java),
             Hook { frame ->
                 (frame.args[0] as? List<*>)?.filterIsInstance<ApiMessage>()?.forEach { api ->
-                    safely("read created message") { remember(Message(api)) }
+                    safely("read created message") {
+                        val message = Message(api)
+                        remember(message)
+                        prefetch(message)
+                    }
                 }
             },
         )
@@ -149,7 +165,13 @@ class BetterMessageLogger : Plugin() {
             arrayOf(StoreMessagesLoader.ChannelChunk::class.java),
             Hook { frame ->
                 safely("cache loaded messages") {
-                    (frame.args[0] as StoreMessagesLoader.ChannelChunk).messages.orEmpty().forEach(::remember)
+                    (frame.args[0] as StoreMessagesLoader.ChannelChunk).messages.orEmpty().forEach { message ->
+                        remember(message)
+                        // Older history is rarely deleted; avoid downloading media while scrolling back.
+                        if (System.currentTimeMillis() - snowflakeTime(message.id) < PREFETCH_LOADED_AGE) {
+                            prefetch(message)
+                        }
+                    }
                     bumpRevision()
                 }
             },
@@ -172,7 +194,7 @@ class BetterMessageLogger : Plugin() {
                     source,
                     revision,
                     Func2<Message?, Long, Message?> { current, _ ->
-                        current ?: record(id)?.takeIf { it.channelId == channelId && it.deleted }?.toMessage()
+                        current ?: record(id)?.takeIf { it.channelId == channelId && it.deleted }?.let(::display)
                     },
                 )
             },
@@ -231,6 +253,22 @@ class BetterMessageLogger : Plugin() {
                         Utils.showToast("Logged message deleted")
                     }
                 }
+            },
+        )
+    }
+
+    private fun patchMediaPreviews() {
+        patcher.patchRequired(
+            EmbedResourceUtils::class.java,
+            "getPreviewUrls",
+            arrayOf(
+                String::class.java,
+                Int::class.javaPrimitiveType!!,
+                Int::class.javaPrimitiveType!!,
+                Boolean::class.javaPrimitiveType!!,
+            ),
+            Hook { frame ->
+                media?.previewUrls(frame.args[0] as String)?.let { frame.result = it }
             },
         )
     }
@@ -312,7 +350,14 @@ class BetterMessageLogger : Plugin() {
                 (it.id in state.recentDeletes || range?.contains(it.id) == true)
         }
         if (deleted.isEmpty()) return@synchronized current
-        (current + deleted.map { it.toMessage() }).sortedBy { it.id }
+        (current + deleted.map(::display)).sortedBy { it.id }
+    }
+
+    private fun display(record: MessageRecord): Message {
+        val store = media
+        if (store == null || !store.hasMedia(record.id)) return record.toMessage()
+        // Localize a private copy; the live message may still be shared with Discord's stores.
+        return store.localize(if (record.message == null) record.toMessage() else record.toDetachedMessage())
     }
 
     private fun requestRange(channelId: Long, range: LongRange) {
@@ -324,13 +369,18 @@ class BetterMessageLogger : Plugin() {
             if (!running) return@loadRangeAsync
             var changed = false
             synchronized(lock) {
-                if (!databaseEnabled || state.generation != generation || state.requestedRanges[channelId] != range) {
+                if (!databaseEnabled) return@synchronized
+                val requested = state.requestedRanges[channelId]
+                if (state.generation != generation || requested != range) {
+                    // Invalidated with no newer request for this channel; render again so it is re-queried.
+                    if (requested == null) changed = true
                     return@synchronized
                 }
                 result.onSuccess { loaded ->
                     loaded.forEach { saved ->
                         if (!shouldKeep(saved)) {
                             db.removeAsync(saved.id)
+                            media?.removeAsync(saved.id)
                             return@forEach
                         }
                         val current = state.records[saved.id]
@@ -346,6 +396,8 @@ class BetterMessageLogger : Plugin() {
                             )
                         }
                         state.put(combined)
+                        // Retries media of messages saved before their attachments could be stored.
+                        media?.saveAsync(combined, true)
                         changed = true
                     }
                 }
@@ -374,10 +426,25 @@ class BetterMessageLogger : Plugin() {
         liveMessages.remove(id)
         boundMessages.remove(id)
         database?.removeAsync(id)
+        media?.removeAsync(id)
+    }
+
+    private fun prefetch(message: Message) {
+        if (!settings.getBool(PREFETCH_MEDIA, true)) return
+        // Records exist only for real messages that pass the logging filters.
+        if (record(message.id) != null) media?.prefetchAsync(message)
     }
 
     private fun persist(record: MessageRecord) {
-        if (databaseEnabled && record.logged) database?.saveAsync(record)
+        if (!record.logged) return
+        if (databaseEnabled) database?.saveAsync(record)
+        // Without the database, media is kept for this session only.
+        media?.saveAsync(record, databaseEnabled)
+    }
+
+    /** Runs after queued database pruning, removing media of messages that are no longer saved. */
+    private fun sweepMedia(db: MessageLoggerDatabase) {
+        db.messageIdsAsync { result -> result.onSuccess { ids -> if (running) media?.retainAsync(ids) } }
     }
 
     private fun ensureDatabase(): MessageLoggerDatabase {
@@ -403,6 +470,7 @@ class BetterMessageLogger : Plugin() {
                         val currentFilters = filters
                         db.pruneAsync { currentFilters.keep(it, resolveGuildId(it.channelId, it.guildId)) }
                         if (!editLoggingEnabled()) db.clearEditsAsync()
+                        sweepMedia(db)
                         state.invalidateLoads()
                         if (databaseEnabled) state.records.values.forEach(::persist)
                     }
@@ -431,6 +499,7 @@ class BetterMessageLogger : Plugin() {
                     val currentFilters = filters
                     db.pruneAsync { currentFilters.keep(it, resolveGuildId(it.channelId, it.guildId)) }
                     if (!editLoggingEnabled()) db.clearEditsAsync()
+                    sweepMedia(db)
                     state.records.values.forEach(::persist)
                 }
             }
@@ -444,7 +513,10 @@ class BetterMessageLogger : Plugin() {
             synchronized(lock) {
                 state.invalidateLoads()
                 state.records.values.toList().forEach { state.put(it.copy(edits = emptyList())) }
-                database?.clearEditsAsync()
+                database?.let {
+                    it.clearEditsAsync()
+                    sweepMedia(it)
+                }
             }
         }
         decorations.refresh(removeHistory = true)
@@ -457,7 +529,10 @@ class BetterMessageLogger : Plugin() {
             state.invalidateLoads()
             state.records.values.toList().filterNot(::shouldKeep).forEach { removeRecord(it.id) }
             val currentFilters = filters
-            database?.pruneAsync { currentFilters.keep(it, resolveGuildId(it.channelId, it.guildId)) }
+            database?.let { db ->
+                db.pruneAsync { currentFilters.keep(it, resolveGuildId(it.channelId, it.guildId)) }
+                sweepMedia(db)
+            }
         }
         decorations.refresh(removeHistory = true)
         bumpRevision()
@@ -473,6 +548,7 @@ class BetterMessageLogger : Plugin() {
             state.clear()
             liveMessages.evictAll()
             boundMessages.evictAll()
+            media?.clearAsync()
             ensureDatabase().clearAsync { result ->
                 Utils.mainThread.post {
                     if (running) {
@@ -549,6 +625,8 @@ class BetterMessageLogger : Plugin() {
             database?.stop()
             database = null
             databaseReady = false
+            media?.stop()
+            media = null
         }
         if (instance === this) instance = null
     }
@@ -586,6 +664,11 @@ class BetterMessageLogger : Plugin() {
     companion object {
         internal const val DB_NAME = "BetterMessageLogger.db"
         internal const val TXT_NAME = "BetterMessageLogger.txt"
+        internal const val MEDIA_DIR = "BetterMessageLoggerMedia"
+        internal const val PREFETCH_MEDIA = "prefetchMedia"
+        private const val PREFETCH_LOADED_AGE = 24L * 60 * 60 * 1000
+
+        private fun snowflakeTime(id: Long) = (id shr 22) + 1420070400000L
         internal const val DELETED_LABEL_COLOR = "deletedLabelColor"
         internal const val DELETED_MESSAGE_COLOR = "deletedMessageColor"
         internal const val LOG_EDIT_HISTORY = "logEditHistory"

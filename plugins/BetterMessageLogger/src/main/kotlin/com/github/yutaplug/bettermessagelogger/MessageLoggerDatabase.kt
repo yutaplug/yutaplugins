@@ -258,6 +258,14 @@ internal class MessageLoggerDatabase(
         }
     }
 
+    fun messageIdsAsync(done: (Result<Set<Long>>) -> Unit) = enqueue("list saved messages", done) {
+        db().rawQuery("SELECT message_id FROM messages", null).use { cursor ->
+            val result = HashSet<Long>()
+            while (cursor.moveToNext()) result.add(cursor.getLong(0))
+            result
+        }
+    }
+
     fun clearAsync(done: (Result<Unit>) -> Unit) = enqueue("clear saved logs", done) {
         db().delete("messages", null, null)
         // Reclaim disk space and remove deleted content from reusable SQLite pages.

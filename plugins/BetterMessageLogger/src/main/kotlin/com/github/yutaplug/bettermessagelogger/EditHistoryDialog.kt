@@ -3,8 +3,6 @@ package com.github.yutaplug.bettermessagelogger
 import android.content.Context
 import android.view.Gravity
 import android.widget.LinearLayout
-import android.widget.ScrollView
-import androidx.appcompat.app.AlertDialog
 import com.aliucord.Utils
 import java.text.DateFormat
 import java.util.Date
@@ -13,78 +11,60 @@ internal object EditHistoryDialog {
     fun show(context: Context, record: MessageRecord) {
         val ui = LoggerUi(context)
         val format = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-        val content = ui.column().apply { setPadding(ui.dp(20), ui.dp(4), ui.dp(20), ui.dp(8)) }
+        val content = ui.dialogContent()
         content.addView(
             ui
                 .text(
-                    "${record.authorName} · ${record.edits.size} saved ${if (record.edits.size == 1) "edit" else "edits"}",
-                    14f,
+                    "${record.authorName} · ${record.edits.size} ${if (record.edits.size == 1) "edit" else "edits"}",
+                    13f,
                     ui.muted,
-                ).apply { setPadding(0, 0, 0, ui.dp(16)) },
+                ).apply { setPadding(0, 0, 0, ui.dp(8)) },
         )
         val list = ui.column()
-        val availableHeight = (context.resources.displayMetrics.heightPixels * 0.55f).toInt()
-        val scroll = object : ScrollView(context) {
-            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-                val limit = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED) {
-                    availableHeight
-                } else {
-                    minOf(availableHeight, MeasureSpec.getSize(heightMeasureSpec))
-                }
-                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(limit, MeasureSpec.AT_MOST))
-            }
-        }.apply {
-            isFillViewport = false
-            addView(list, android.widget.FrameLayout.LayoutParams(-1, -2))
-        }
         // WRAP_CONTENT with a maximum keeps small histories compact and long ones scrollable.
-        content.addView(scroll, LinearLayout.LayoutParams(-1, -2))
+        content.addView(ui.scroll(list, 0.55f), LinearLayout.LayoutParams(-1, -2))
 
         fun version(label: String, date: String, body: String, current: Boolean = false) {
-            val card = ui.card()
+            val card = ui.card().apply { setPadding(ui.dp(12), ui.dp(4), ui.dp(4), ui.dp(10)) }
             val header = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+            val labels = ui.column()
+            labels.addView(ui.text(label, 14f, if (current) ui.brand else ui.primary))
+            labels.addView(ui.text(date, 12f, ui.muted))
+            header.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
             header.addView(
-                ui.text(label, 15f, if (current) ui.brand else ui.primary),
-                LinearLayout.LayoutParams(0, -2, 1f),
-            )
-            header.addView(
-                ui.smallButton("Copy") {
+                ui.iconButton("ic_copy_24dp", "Copy") {
                     Utils.setClipboard("Message version", body)
-                    Utils.showToast("Version copied")
+                    Utils.showToast("Copied")
                 },
             )
             card.addView(header)
-            card.addView(ui.text(date, 12f, ui.muted))
             card.addView(
-                ui.text(body.ifEmpty { "No text content" }, 15f).apply {
-                    setPadding(0, ui.dp(12), 0, ui.dp(4))
+                ui.text(body.ifEmpty { "No text content" }, 15f, if (body.isEmpty()) ui.muted else ui.normal).apply {
+                    setPadding(0, ui.dp(4), ui.dp(8), 0)
                     setLineSpacing(ui.dp(2).toFloat(), 1f)
                     setTextIsSelectable(true)
                 },
             )
-            list.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = ui.dp(10) })
+            list.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = ui.dp(8) })
         }
 
         version(
-            if (record.deleted) "Final version · deleted" else "Current version",
+            if (record.deleted) "Final version · deleted" else "Current",
             format.format(Date(record.editedTimestamp ?: record.timestamp)),
             record.content,
             true,
         )
-        record.edits.withIndex().reversed().forEach { (index, edit) ->
+        var index = record.edits.size - 1
+        while (index >= 0) {
+            val edit = record.edits[index]
             version(
-                if (index == 0) "Original message" else "Previous version ${index + 1}",
+                if (index == 0) "Original" else "Version ${index + 1}",
                 "Replaced ${format.format(Date(edit.timestamp))}",
                 edit.content,
             )
+            index--
         }
-        val dialog = AlertDialog
-            .Builder(
-                context,
-            ).setCustomTitle(DiscordSettingsUi.title(context, "Edit history"))
-            .setView(content)
-            .setPositiveButton("Close", null)
-            .create()
+        val dialog = ui.dialog("Edit history", content).setPositiveButton("Close", null).create()
         ui.style(dialog)
         dialog.show()
     }

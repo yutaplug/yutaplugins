@@ -3,22 +3,27 @@ package com.github.yutaplug.bettermessagelogger
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.graphics.Typeface
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import com.aliucord.Utils
 import com.discord.utilities.color.ColorCompat
+import com.discord.utilities.drawable.DrawableCompat
+import com.discord.views.CheckedSetting
 
-/** Shared, theme-aware spacing and surfaces for settings and history. */
+/** Shared, theme-aware spacing and surfaces for settings, filters and history. */
 internal class LoggerUi(val context: Context) {
     val primary get() = theme("colorHeaderPrimary", Color.WHITE)
+    val normal get() = theme("colorTextNormal", Color.WHITE)
     val muted get() = theme("colorTextMuted", Color.LTGRAY)
+    val icon get() = theme("colorInteractiveNormal", Color.LTGRAY)
     val brand get() = theme("colorBrand", Color.rgb(88, 101, 242))
     val surface get() = theme("colorBackgroundSecondary", Color.rgb(47, 49, 54))
     val background get() = theme("colorBackgroundPrimary", Color.rgb(54, 57, 63))
@@ -38,8 +43,8 @@ internal class LoggerUi(val context: Context) {
 
     fun column() = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
 
-    fun dialogContent() = column().apply {
-        setPadding(dp(20), dp(4), dp(20), dp(12))
+    fun dialogContent(horizontal: Int = 16) = column().apply {
+        setPadding(dp(horizontal), 0, dp(horizontal), dp(8))
         isFocusableInTouchMode = true
     }
 
@@ -49,8 +54,8 @@ internal class LoggerUi(val context: Context) {
         setHintTextColor(muted)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
         setSingleLine(true)
-        setPadding(0, dp(12), 0, dp(12))
-        minimumHeight = dp(52)
+        setPadding(0, dp(10), 0, dp(10))
+        minimumHeight = dp(48)
         background = null
     }
 
@@ -74,49 +79,93 @@ internal class LoggerUi(val context: Context) {
             setColor(surface)
             cornerRadius = dp(4).toFloat()
         }
-        setPadding(dp(12), dp(12), dp(12), dp(12))
+        setPadding(dp(12), dp(10), dp(12), dp(10))
     }
 
+    /** Discord's full-width settings divider. */
     fun divider(parent: LinearLayout) {
-        parent.addView(
-            View(context).apply {
-                setBackgroundColor(muted)
-                alpha = 0.12f
-            },
-            LinearLayout.LayoutParams(-1, dp(1)).apply {
-                topMargin = dp(6)
-                bottomMargin = dp(6)
-            },
-        )
+        parent.addView(DiscordSettingsUi.divider(context), LinearLayout.LayoutParams(-1, dp(1)))
     }
 
-    fun action(
+    fun header(parent: LinearLayout, title: String) {
+        parent.addView(DiscordSettingsUi.header(context, title))
+    }
+
+    fun caption(value: CharSequence) = text(value, 12f, muted).apply {
+        setPadding(dp(16), dp(2), dp(16), dp(8))
+    }
+
+    fun switch(title: String, subtitle: String?, checked: Boolean, changed: (Boolean) -> Unit): CheckedSetting =
+        Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, title, subtitle).apply {
+            isChecked = checked
+            setOnCheckedListener { changed(it) }
+        }
+
+    /**
+     * A single-line settings row: icon, title and an optional trailing value, sized like Discord's
+     * icon rows. Returns the value view so callers can update it.
+     */
+    fun row(
         parent: LinearLayout,
         title: String,
-        subtitle: String,
-        color: Int = primary,
+        value: CharSequence? = null,
+        iconName: String? = null,
+        color: Int = normal,
         click: () -> Unit,
     ): TextView {
-        val row = column().apply {
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            minimumHeight = dp(64)
+        val row = LinearLayout(context).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(48)
+            setPadding(dp(16), dp(4), dp(16), dp(4))
             isFocusable = true
-            contentDescription = "$title. $subtitle"
+            selectable(this)
+            setOnClickListener { click() }
         }
-        row.addView(text(title, 16f, color))
-        val caption = text(subtitle, 13f, muted).apply { setPadding(0, dp(4), 0, 0) }
-        row.addView(caption)
-        // A selectable background works on Android 5, unlike View.foreground.
-        val value = TypedValue()
-        if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, value, true) &&
-            value.resourceId != 0
-        ) {
-            row.background = context.getDrawable(value.resourceId)
+        iconName?.let { name ->
+            val res = Utils.getResId(name, "drawable")
+            if (res != 0) {
+                row.addView(
+                    ImageView(context).apply {
+                        setImageDrawable(DrawableCompat.getDrawable(context, res, if (color == normal) icon else color))
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    },
+                    LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(24) },
+                )
+            }
         }
-        row.setOnClickListener { click() }
+        row.addView(
+            text(title, 16f, color).apply {
+                setSingleLine(true)
+                ellipsize = TextUtils.TruncateAt.END
+            },
+            LinearLayout.LayoutParams(0, -2, 1f),
+        )
+        val trailing = text(value ?: "", 14f, muted).apply {
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+            gravity = Gravity.END
+            maxWidth = dp(160)
+            setPadding(dp(12), 0, 0, 0)
+            visibility = if (value == null) View.GONE else View.VISIBLE
+        }
+        row.addView(trailing, LinearLayout.LayoutParams(-2, -2))
         parent.addView(row, LinearLayout.LayoutParams(-1, -2))
-        return caption
+        return trailing
     }
+
+    fun iconButton(iconName: String, description: String, color: Int = icon, click: () -> Unit) =
+        ImageView(context).apply {
+            val res = Utils.getResId(iconName, "drawable")
+            if (res != 0) setImageDrawable(DrawableCompat.getDrawable(context, res, color))
+            scaleType = ImageView.ScaleType.CENTER
+            contentDescription = description
+            isFocusable = true
+            minimumWidth = dp(40)
+            minimumHeight = dp(40)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            selectable(this, borderless = true)
+            setOnClickListener { click() }
+        }
 
     @Suppress("DEPRECATION") // ADJUST_RESIZE is needed on the Android 5+ versions this plugin supports.
     fun style(dialog: AlertDialog) {
@@ -128,13 +177,18 @@ internal class LoggerUi(val context: Context) {
         dialog.findViewById<TextView>(android.R.id.message)?.setTextColor(primary)
     }
 
-    fun heading(title: String) = text(title, 17f).apply { setTypeface(typeface, Typeface.BOLD) }
+    fun dialog(title: String, content: View) = AlertDialog
+        .Builder(context)
+        .setCustomTitle(DiscordSettingsUi.title(context, title))
+        .setView(content)
 
-    fun smallButton(title: String, color: Int = brand, click: () -> Unit) = text(title, 13f, color).apply {
-        gravity = Gravity.CENTER
-        setPadding(dp(12), dp(10), dp(12), dp(10))
-        minimumHeight = dp(48)
-        isFocusable = true
-        setOnClickListener { click() }
+    private fun selectable(view: View, borderless: Boolean = false) {
+        // A selectable background works on Android 5, unlike View.foreground.
+        val value = TypedValue()
+        val attribute =
+            if (borderless) android.R.attr.selectableItemBackgroundBorderless else android.R.attr.selectableItemBackground
+        if (context.theme.resolveAttribute(attribute, value, true) && value.resourceId != 0) {
+            view.background = context.getDrawable(value.resourceId)
+        }
     }
 }

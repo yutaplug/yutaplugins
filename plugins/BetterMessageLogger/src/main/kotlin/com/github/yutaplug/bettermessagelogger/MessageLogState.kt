@@ -39,9 +39,11 @@ internal class MessageLogState {
     }
 
     fun remove(id: Long) {
-        records.remove(id)?.let { if (it.logged) loggedCount-- else transientCount-- }
+        val removed = records.remove(id) ?: return
+        if (removed.logged) loggedCount-- else transientCount--
         recentDeletes.remove(id)
-        invalidateLoads()
+        // Only saved records can be restored by an in-flight load; ignored live messages must not discard it.
+        if (removed.logged) invalidateLoads()
     }
 
     fun resetRange(channelId: Long) {
