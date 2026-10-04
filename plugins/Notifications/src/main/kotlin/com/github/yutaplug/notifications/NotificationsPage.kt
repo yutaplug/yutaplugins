@@ -1,6 +1,5 @@
 package com.github.yutaplug.notifications
 
-import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
@@ -13,6 +12,7 @@ import com.discord.app.AppFragment
 import com.discord.stores.StoreStream
 import com.discord.utilities.color.ColorCompat
 import com.discord.views.CheckedSetting
+import com.lytefast.flexinput.R
 import rx.Subscription
 
 internal class NotificationsPage(
@@ -44,25 +44,25 @@ internal class NotificationsPage(
         val scroll = view.findViewById<ViewGroup>(Utils.getResId("settings_account_scroll", "id"))
         val body = scroll.getChildAt(0) as LinearLayout
         body.removeAllViews()
-        body.setPadding(0, dp(16), 0, dp(24))
+        body.setPadding(0, 0, 0, dp(16))
         controls.clear()
         badgeControls.clear()
         deviceControls.clear()
         deviceSubscription?.unsubscribe()
-        statusView = text("Loading notification settings...")
+        // Only shown while loading or after a failure; tapping retries.
+        statusView = caption("Loading notification settings…")
             .apply {
                 setOnClickListener { preferences.refresh() }
             }.also { body.addView(it) }
         val native = StoreStream.getNotifications()
-        heading(body, "IN-APP NOTIFICATIONS")
+        heading(body, "In-app notifications", first = true)
         device(body, "Get notifications within Discord", { DeviceNotifications.current().isEnabledInApp }) {
             native.setEnabledInApp(it, true)
         }
-        heading(body, "SYSTEM NOTIFICATIONS", divider = true)
+        heading(body, "System notifications")
         device(body, "Get notifications outside of Discord", { DeviceNotifications.current().isEnabled }) {
             native.setEnabled(it)
         }
-        heading(body, "BEHAVIOR")
         device(body, "Disable notifications light", { DeviceNotifications.current().isDisableBlink }) {
             native.setNotificationLightDisabled(it)
         }
@@ -75,31 +75,30 @@ internal class NotificationsPage(
             { DeviceNotifications.current().isWake },
             DeviceNotifications::wake,
         )
-        heading(body, "SOUNDS", divider = true)
-        device(body, "Disable Sounds", { DeviceNotifications.current().isDisableSound }) {
+        device(body, "Disable sounds", { DeviceNotifications.current().isDisableSound }) {
             native.setNotificationSoundDisabled(it)
         }
-        heading(body, "REACTION NOTIFICATIONS", divider = true)
-        body.addView(text("Receive notifications when your messages are reacted to."))
+        heading(body, "Reaction notifications")
+        body.addView(caption("When your messages get reactions."))
         for (option in NotificationOption.reactions()) accountControl(body, option)
-        heading(body, "OTHER NOTIFICATIONS")
+        heading(body, "Other notifications")
         for (option in NotificationOption.other()) accountControl(body, option)
-        heading(body, "WHAT FRIENDS ARE TOLD")
+        heading(body, "What friends are told")
         accountControl(body, NotificationOption.SHARE_ONLINE)
         accountControl(body, NotificationOption.SHARE_PROFILE)
-        heading(body, "BADGES")
-        badgeStatus = text("").also { body.addView(it) }
+        heading(body, "Badges")
+        badgeStatus = caption("").also { body.addView(it) }
         badge(
             body,
             16,
             "Experimental Unreads",
-            "Allows you to pick which channels are most important in a server.",
+            "Pick which channels are most important in a server.",
         )
         badge(
             body,
             32,
             "Mention on all messages",
-            "Increment the mention counter on all messages in channels with notification level of All Messages.",
+            "Count every message in channels set to All Messages as a mention.",
         )
         renderDevice()
         deviceSubscription = native.settings.W({
@@ -113,8 +112,8 @@ internal class NotificationsPage(
 
     private fun accountControl(body: LinearLayout, option: NotificationOption) {
         val type = if (option.scalarValue == null) CheckedSetting.ViewType.SWITCH else CheckedSetting.ViewType.RADIO
-        val control = Utils.createCheckedSetting(requireContext(), type, option.title, option.description).apply {
-            setPadding(dp(16), dp(16), dp(16), dp(16))
+        val description = option.description.takeIf { it.isNotEmpty() }
+        val control = Utils.createCheckedSetting(requireContext(), type, option.title, description).apply {
             setOnCheckedListener { checked ->
                 if (option.scalarValue == null || checked) {
                     preferences.choose(option, checked)
@@ -129,7 +128,6 @@ internal class NotificationsPage(
 
     private fun device(body: LinearLayout, title: String, read: () -> Boolean, write: (Boolean) -> Unit) {
         val control = Utils.createCheckedSetting(requireContext(), CheckedSetting.ViewType.SWITCH, title, null).apply {
-            setPadding(dp(16), dp(16), dp(16), dp(16))
             setOnCheckedListener {
                 write(it)
                 renderDevice()
@@ -151,7 +149,6 @@ internal class NotificationsPage(
                 title,
                 description,
             ).apply {
-                setPadding(dp(16), dp(16), dp(16), dp(16))
                 setLabelTagText(Utils.getResId("beta", "string"))
                 setLabelTagVisibility(true)
                 setOnCheckedListener { badges.choose(bit, it) }
@@ -170,22 +167,24 @@ internal class NotificationsPage(
         }
     }
 
-    private fun heading(body: LinearLayout, title: String, divider: Boolean = false) {
-        if (divider) {
+    /** Discord's settings section header, preceded by the native divider. */
+    private fun heading(body: LinearLayout, title: String, first: Boolean = false) {
+        if (!first) {
             body.addView(
                 View(requireContext()).apply {
-                    setBackgroundColor(
-                        ColorCompat.getThemedColor(context, Utils.getResId("colorBackgroundModifierAccent", "attr")),
-                    )
-                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
+                    setBackgroundColor(color("colorBackgroundModifierAccent"))
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)),
             )
         }
         body.addView(
-            text(title).apply {
-                setTypeface(typeface, Typeface.BOLD)
-                setTextColor(ColorCompat.getThemedColor(context, Utils.getResId("colorTextMuted", "attr")))
-                setPadding(dp(16), dp(24), dp(16), dp(12))
+            TextView(requireContext(), null, 0, R.i.UiKit_Settings_Item_Header).apply {
+                text = title
+                setTextColor(color("colorHeaderSecondary"))
+                setPadding(dp(16), dp(16), dp(16), dp(8))
+                isAllCaps = true
+                background = null
             },
         )
     }
@@ -209,14 +208,16 @@ internal class NotificationsPage(
         }
     }
 
-    private fun text(value: String): TextView = TextView(requireContext()).apply {
+    private fun caption(value: String): TextView = TextView(requireContext(), null, 0, R.i.UiKit_TextView).apply {
         text = value
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        setTextColor(ColorCompat.getThemedColor(context, Utils.getResId("colorTextNormal", "attr")))
-        setPadding(dp(16), dp(12), dp(16), dp(12))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        setTextColor(color("colorTextMuted"))
+        setPadding(dp(16), dp(4), dp(16), dp(8))
         layoutParams =
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
+
+    private fun color(attribute: String) = ColorCompat.getThemedColor(requireContext(), Utils.getResId(attribute, "attr"))
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 

@@ -81,7 +81,7 @@ internal class NotificationPreferences {
                 result
                     .onSuccess {
                         confirmed = NotificationProto.values(it)
-                        status = if (pending.isEmpty()) "" else "Saving changes..."
+                        status = ""
                     }.onFailure { status = "Could not load settings: ${reason(it)}. Tap to retry." }
                 render()
                 schedule()
@@ -100,7 +100,8 @@ internal class NotificationPreferences {
         if (option.scalarValue != null) {
             for (other in NotificationOption.reactions()) if (other !== option) pending.remove(other)
         }
-        status = "Saving changes..."
+        // Saving is silent; the status row only reports loading and failures.
+        status = ""
         render()
         schedule()
     }
@@ -122,7 +123,7 @@ internal class NotificationPreferences {
         pending.clear()
         saving = changes
         busy = true
-        status = "Saving changes..."
+        status = ""
         nextWriteAt = SystemClock.elapsedRealtime() + 10_000L
         val requestGeneration = generation
         render()
@@ -135,7 +136,7 @@ internal class NotificationPreferences {
                 result
                     .onSuccess {
                         confirmed = NotificationProto.values(it)
-                        status = if (pending.isEmpty()) "Settings saved." else "Saving changes..."
+                        status = ""
                     }.onFailure { failure ->
                         // Discard unsaved choices and disable switches. A fresh read
                         // reconciles an ambiguous PATCH failure when the user taps retry.

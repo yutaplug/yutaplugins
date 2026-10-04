@@ -1,5 +1,17 @@
-version = "1.0.0"
+version = "1.0.1"
 description = "Backports account notification preferences to a dedicated Notifications settings page."
+
+aliucord {
+    changelog.set(
+        """
+        # 1.0.1
+        * Redesign the settings page with native Discord headers and spacing.
+        * Remove the "Settings saved" and "Saving changes" status messages; only loading and errors are shown.
+        # 1.0.0
+        * Initial release
+        """.trimIndent(),
+    )
+}
 
 dependencies {
     testImplementation("junit:junit:4.13.2")

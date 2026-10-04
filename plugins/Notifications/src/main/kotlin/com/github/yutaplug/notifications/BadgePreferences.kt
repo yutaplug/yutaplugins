@@ -123,7 +123,7 @@ internal class BadgePreferences {
         }
         require(bit == 16 || bit == 32)
         pending[bit] = enabled
-        status = "Saving badge preferences..."
+        status = ""
         render()
         schedule()
     }
@@ -164,7 +164,7 @@ internal class BadgePreferences {
                 result
                     .onSuccess { actual ->
                         confirmed = actual
-                        status = if (pending.isEmpty()) "Badge preferences saved." else "Saving badge preferences..."
+                        status = ""
                     }.onFailure {
                         pending.clear()
                         if (it is NotificationFailure) {
