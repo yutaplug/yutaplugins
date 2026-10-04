@@ -2,6 +2,7 @@ package com.github.yutaplug.markdownfix
 
 import android.content.Context
 import android.text.SpannableStringBuilder
+import android.widget.TextView
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
@@ -21,15 +22,19 @@ import com.discord.utilities.textprocessing.node.ZeroSpaceWidthNode
 import com.facebook.drawee.span.DraweeSpanStringBuilder
 import com.facebook.drawee.span.SimpleDraweeSpanTextView
 import java.util.WeakHashMap
+import com.discord.utilities.view.text.SimpleDraweeSpanTextView as DiscordDraweeSpanTextView
 
 @AliucordPlugin
 class MarkdownFix : Plugin() {
     private var games: GameProfileResolver? = null
-    private val textViews = WeakHashMap<SimpleDraweeSpanTextView, Boolean>()
+
+    // Chat messages use Discord's own SimpleDraweeSpanTextView, other surfaces Fresco's; track both.
+    private val textViews = WeakHashMap<TextView, Boolean>()
 
     override fun start(context: Context) {
-        val resolver = GameProfileResolver { refreshAppearance() }
+        val resolver = GameProfileResolver(java.io.File(context.cacheDir, "MarkdownFix-games")) { refreshAppearance() }
         games = resolver
+        GameProfileSheet.pluginResources = resources
         val parser = MarkdownParser(settings, resolver)
         settingsTab =
             SettingsTab(MarkdownFixSettings::class.java, SettingsTab.Type.PAGE).withArgs(settings, this)
@@ -78,22 +83,21 @@ class MarkdownFix : Plugin() {
             )
             installEmbedParsing(parser)
             installAnsiRendering()
-            patcher.patch(
-                SimpleDraweeSpanTextView::class.java.getDeclaredMethod(
-                    "setDraweeSpanStringBuilder",
-                    DraweeSpanStringBuilder::class.java,
-                ),
-                PreHook { frame ->
-                    val view = frame.thisObject as SimpleDraweeSpanTextView
-                    val builder = frame.args[0] as? DraweeSpanStringBuilder
-                    if (builder == null) {
-                        textViews.remove(view)
-                    } else {
-                        resolver.update(builder)
-                        textViews[view] = true
-                    }
-                },
-            )
+            for (viewClass in listOf(SimpleDraweeSpanTextView::class.java, DiscordDraweeSpanTextView::class.java)) {
+                patcher.patch(
+                    viewClass.getDeclaredMethod("setDraweeSpanStringBuilder", DraweeSpanStringBuilder::class.java),
+                    PreHook { frame ->
+                        val view = frame.thisObject as TextView
+                        val builder = frame.args[0] as? DraweeSpanStringBuilder
+                        if (builder == null) {
+                            textViews.remove(view)
+                        } else {
+                            resolver.update(builder)
+                            textViews[view] = true
+                        }
+                    },
+                )
+            }
         } catch (error: Throwable) {
             stop(context)
             throw error
@@ -172,16 +176,32 @@ class MarkdownFix : Plugin() {
     internal fun refreshAppearance() {
         // Rebinding spans clears TextView's measurement cache and keeps the current spoiler state.
         for (view in textViews.keys.toList()) {
-            val builder = view.j ?: continue
-            games?.update(builder)
-            view.setDraweeSpanStringBuilder(builder)
+            when (view) {
+                is SimpleDraweeSpanTextView -> {
+                    val builder = view.j ?: continue
+                    games?.update(builder)
+                    view.setDraweeSpanStringBuilder(builder)
+                }
+
+                is DiscordDraweeSpanTextView -> {
+                    // A plain setText() detaches the builder, so a null field means the view moved on.
+                    val builder = discordBuilder.get(view) as? DraweeSpanStringBuilder ?: continue
+                    games?.update(builder)
+                    view.setDraweeSpanStringBuilder(builder)
+                }
+            }
         }
+    }
+
+    private val discordBuilder = DiscordDraweeSpanTextView::class.java.getDeclaredField("mDraweeStringBuilder").apply {
+        isAccessible = true
     }
 
     override fun stop(context: Context) {
         patcher.unpatchAll()
         games?.stop()
         games = null
+        GameProfileSheet.pluginResources = null
         textViews.clear()
     }
 }

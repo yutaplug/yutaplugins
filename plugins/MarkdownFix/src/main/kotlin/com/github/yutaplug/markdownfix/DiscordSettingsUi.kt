@@ -5,8 +5,8 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.view.ContextThemeWrapper
-import android.view.inputmethod.InputMethodManager
 import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
@@ -24,21 +24,19 @@ internal object DiscordSettingsUi {
         setTextColor(color(context, "colorTextNormal"))
     }
 
-    fun title(context: Context, value: String) =
-        TextView(context, null, 0, R.i.UiKit_TextView_H1_Bold).apply {
-            text = value
-            setTextColor(color(context, "colorHeaderPrimary"))
-            setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 16))
-        }
+    fun title(context: Context, value: String) = TextView(context, null, 0, R.i.UiKit_TextView_H1_Bold).apply {
+        text = value
+        setTextColor(color(context, "colorHeaderPrimary"))
+        setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 16))
+    }
 
-    fun header(context: Context, value: String) =
-        TextView(context, null, 0, R.i.UiKit_Settings_Item_Header).apply {
-            text = value
-            setTextColor(color(context, "colorHeaderSecondary"))
-            setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 8))
-            isAllCaps = true
-            background = null
-        }
+    fun header(context: Context, value: String) = TextView(context, null, 0, R.i.UiKit_Settings_Item_Header).apply {
+        text = value
+        setTextColor(color(context, "colorHeaderSecondary"))
+        setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 8))
+        isAllCaps = true
+        background = null
+    }
 
     fun input(context: Context) = TextInputEditText(styled(context, R.i.UiKit_TextInputLayout_EditText)).apply {
         isFocusable = true

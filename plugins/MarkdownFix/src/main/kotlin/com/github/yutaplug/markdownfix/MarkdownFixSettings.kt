@@ -8,9 +8,9 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
 import com.aliucord.fragments.SettingsPage
-import com.aliucord.Utils
 import com.discord.views.CheckedSetting
 import java.util.Locale
 
@@ -90,35 +90,38 @@ class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin:
             setPadding(0, dp(16), 0, dp(8))
         }
         content.addView(value)
-        content.addView(android.widget.SeekBar(requireContext(), null, 0, com.lytefast.flexinput.R.i.UiKit_SeekBar).apply {
-            max = 290
-            progress = kotlin.math.round((selected - 0.1f) * 100).toInt().coerceIn(0, max)
-            contentDescription = "${size.title} scale"
-            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (!fromUser) return
-                    selected = (progress + 10) / 100f
-                    value.text = "${format(selected)}×"
-                }
+        content.addView(
+            android.widget.SeekBar(requireContext(), null, 0, com.lytefast.flexinput.R.i.UiKit_SeekBar).apply {
+                max = 290
+                progress = kotlin.math.round((selected - 0.1f) * 100).toInt().coerceIn(0, max)
+                contentDescription = "${size.title} scale"
+                setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(bar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
+                        if (!fromUser) return
+                        selected = (progress + 10) / 100f
+                        value.text = "${format(selected)}×"
+                    }
 
-                override fun onStartTrackingTouch(bar: android.widget.SeekBar?) {}
+                    override fun onStartTrackingTouch(bar: android.widget.SeekBar?) {}
 
-                override fun onStopTrackingTouch(bar: android.widget.SeekBar?) {}
-            })
-        }, LinearLayout.LayoutParams(-1, dp(48)))
-        activeDialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                    override fun onStopTrackingTouch(bar: android.widget.SeekBar?) {}
+                })
+            },
+            LinearLayout.LayoutParams(-1, dp(48)),
+        )
+        activeDialog = androidx.appcompat.app.AlertDialog
+            .Builder(requireContext())
             .setCustomTitle(DiscordSettingsUi.title(requireContext(), size.title))
             .setView(content)
             .setNegativeButton("Cancel", null)
             .setNeutralButton("Reset") { _, _ ->
                 settings.setString(size.key, size.default.toString())
                 changed()
-            }
-            .setPositiveButton("Save") { _, _ ->
+            }.setPositiveButton("Save") { _, _ ->
                 settings.setString(size.key, selected.toString())
                 changed()
-            }
-            .create().also {
+            }.create()
+            .also {
                 DiscordSettingsUi.styleDialog(it, requireContext())
                 it.show()
             }

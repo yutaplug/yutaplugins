@@ -5,9 +5,9 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.text.Editable
 import android.text.TextWatcher
-import android.view.inputmethod.EditorInfo
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import androidx.appcompat.app.AlertDialog

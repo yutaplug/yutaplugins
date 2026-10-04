@@ -1,8 +1,16 @@
-version = "1.0.13"
+version = "1.0.14"
 description = "Backports Discord's newer Markdown formatting to chat messages."
+
+android {
+    namespace = "com.github.yutaplug.markdownfix"
+}
+
 aliucord {
     changelog.set(
         """
+        # 1.0.14
+        * Improve game mentions and make them clickable
+        * Support viewing slash command mentions
         # 1.0.13
         * Redesign
         # 1.0.12
