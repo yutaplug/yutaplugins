@@ -47,32 +47,14 @@ internal object MarkdownEditDialog {
                 LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(12) },
             )
         }
-        val input = DiscordSettingsUi.input(context).apply {
-            setSingleLine(true)
+        val layout = DiscordSettingsUi.field(context, label, inputType).apply { helperText = hint }
+        val input = layout.editText!!.apply {
             setSelectAllOnFocus(true)
-            this.inputType = inputType
             imeOptions = EditorInfo.IME_ACTION_DONE
             setText(value)
-            this.hint = hint
-            textSize = 16f
-            background = null
-            minimumHeight = dp(48)
-            setPadding(0, dp(8), 0, dp(8))
-            setTextColor(color("colorTextNormal", Color.WHITE))
-            setHintTextColor(muted)
-            contentDescription = label
         }
-        field.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
+        field.addView(layout, LinearLayout.LayoutParams(0, -2, 1f))
         content.addView(field, LinearLayout.LayoutParams(-1, -2))
-        content.addView(DiscordSettingsUi.divider(context), LinearLayout.LayoutParams(-1, dp(1)))
-        val error = DiscordSettingsUi.text(context).apply {
-            textSize = 12f
-            setTextColor(color("colorTextDanger", Color.rgb(237, 66, 69)))
-            visibility = View.GONE
-            setPadding(0, dp(4), 0, 0)
-            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        }
-        content.addView(error)
 
         fun preview() {
             MarkdownAppearance.normalizeColor(input.text.toString())?.let { swatch.setColor(Color.parseColor(it)) }
@@ -91,8 +73,7 @@ internal object MarkdownEditDialog {
             val current = input.text.toString().trim()
             val problem = validate(current)
             if (problem != null) {
-                error.text = problem
-                error.visibility = View.VISIBLE
+                layout.error = problem
                 input.requestFocus()
                 return false
             }
@@ -110,7 +91,6 @@ internal object MarkdownEditDialog {
             override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) {}
 
             override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) {
-                error.visibility = View.GONE
                 picker?.setColor(input.text.toString())
                 if (colorPicker) preview()
             }

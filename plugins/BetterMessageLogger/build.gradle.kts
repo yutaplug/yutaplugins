@@ -1,9 +1,11 @@
-version = "1.0.23"
+version = "1.0.24"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.24
+        * Small redesign and add toggle to keep media after restart
         # 1.0.23
         * Pop-up redesign
         # 1.0.22

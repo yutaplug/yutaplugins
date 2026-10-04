@@ -47,17 +47,6 @@ internal class LoggerUi(val context: Context) {
         isFocusableInTouchMode = true
     }
 
-    fun input(placeholder: String) = DiscordSettingsUi.input(context).apply {
-        hint = placeholder
-        setTextColor(primary)
-        setHintTextColor(muted)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-        setSingleLine(true)
-        setPadding(0, dp(10), 0, dp(10))
-        minimumHeight = dp(48)
-        background = null
-    }
-
     fun scroll(content: View, fraction: Float = 0.35f): ScrollView = object : ScrollView(context) {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             val maximum = (resources.displayMetrics.heightPixels * fraction).toInt()

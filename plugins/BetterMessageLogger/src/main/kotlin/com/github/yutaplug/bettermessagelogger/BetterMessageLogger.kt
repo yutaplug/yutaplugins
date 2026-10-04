@@ -356,6 +356,8 @@ class BetterMessageLogger : Plugin() {
     private fun display(record: MessageRecord): Message {
         val store = media
         if (store == null || !store.hasMedia(record.id)) return record.toMessage()
+        // Messages restored from the database only show saved media while keeping it is enabled.
+        if (record.message == null && !keepMedia()) return record.toMessage()
         // Localize a private copy; the live message may still be shared with Discord's stores.
         return store.localize(if (record.message == null) record.toMessage() else record.toDetachedMessage())
     }
@@ -397,7 +399,7 @@ class BetterMessageLogger : Plugin() {
                         }
                         state.put(combined)
                         // Retries media of messages saved before their attachments could be stored.
-                        media?.saveAsync(combined, true)
+                        if (keepMedia()) media?.saveAsync(combined, true)
                         changed = true
                     }
                 }
@@ -439,8 +441,10 @@ class BetterMessageLogger : Plugin() {
         if (!record.logged) return
         if (databaseEnabled) database?.saveAsync(record)
         // Without the database, media is kept for this session only.
-        media?.saveAsync(record, databaseEnabled)
+        media?.saveAsync(record, databaseEnabled && keepMedia())
     }
+
+    private fun keepMedia() = settings.getBool(KEEP_MEDIA, true)
 
     /** Runs after queued database pruning, removing media of messages that are no longer saved. */
     private fun sweepMedia(db: MessageLoggerDatabase) {
@@ -535,6 +539,13 @@ class BetterMessageLogger : Plugin() {
             }
         }
         decorations.refresh(removeHistory = true)
+        bumpRevision()
+    }
+
+    internal fun setKeepMedia(enabled: Boolean) {
+        settings.setBool(KEEP_MEDIA, enabled)
+        // Turning it on moves this session's media into permanent storage.
+        if (enabled) synchronized(lock) { state.records.values.forEach(::persist) }
         bumpRevision()
     }
 
@@ -666,6 +677,7 @@ class BetterMessageLogger : Plugin() {
         internal const val TXT_NAME = "BetterMessageLogger.txt"
         internal const val MEDIA_DIR = "BetterMessageLoggerMedia"
         internal const val PREFETCH_MEDIA = "prefetchMedia"
+        internal const val KEEP_MEDIA = "keepMedia"
         private const val PREFETCH_LOADED_AGE = 24L * 60 * 60 * 1000
 
         private fun snowflakeTime(id: Long) = (id shr 22) + 1420070400000L

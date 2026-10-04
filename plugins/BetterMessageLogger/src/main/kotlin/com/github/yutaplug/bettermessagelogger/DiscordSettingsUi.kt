@@ -1,19 +1,18 @@
 package com.github.yutaplug.bettermessagelogger
 
 import android.content.Context
-import android.view.ContextThemeWrapper
-import android.view.inputmethod.InputMethodManager
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.LayoutInflater
 import android.view.View
 import android.widget.TextView
 import com.aliucord.Utils
 import com.discord.utilities.color.ColorCompat
-import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import com.lytefast.flexinput.R
 
 /** Use compiled Discord 126.21 styles so resource-name normalization cannot drop styling. */
 internal object DiscordSettingsUi {
-    private fun styled(context: Context, style: Int) = ContextThemeWrapper(context, style)
-
     fun text(context: Context) = TextView(context, null, 0, R.i.UiKit_TextView).apply {
         setTextColor(color(context, "colorTextNormal"))
     }
@@ -27,18 +26,28 @@ internal object DiscordSettingsUi {
             background = null
         }
 
-    fun input(context: Context) = TextInputEditText(styled(context, R.i.UiKit_TextInputLayout_EditText)).apply {
-        isFocusable = true
-        isFocusableInTouchMode = true
-        showSoftInputOnFocus = true
-        background = null
-        setOnClickListener {
-            requestFocus()
-            post {
-                (context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
-                    ?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-            }
+    /**
+     * Discord's dialog text field: the `view_input_modal_text_no_suggestions` layout used by
+     * WidgetNoticeDialog's input modals. Editing clears a shown error.
+     */
+    fun field(context: Context, hint: String, inputType: Int): TextInputLayout {
+        val layout = LayoutInflater
+            .from(context)
+            .inflate(Utils.getResId("view_input_modal_text_no_suggestions", "layout"), null) as TextInputLayout
+        layout.hint = hint
+        layout.editText?.apply {
+            this.inputType = inputType
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) {}
+
+                override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) {
+                    if (layout.error != null) layout.error = null
+                }
+
+                override fun afterTextChanged(text: Editable?) {}
+            })
         }
+        return layout
     }
 
     fun color(context: Context, name: String): Int = ColorCompat.getThemedColor(context, Utils.getResId(name, "attr"))

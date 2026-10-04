@@ -1,4 +1,4 @@
-version = "1.0.16"
+version = "1.0.17"
 description = "Backports Discord's newer Markdown formatting to chat messages."
 
 android {
@@ -8,6 +8,8 @@ android {
 aliucord {
     changelog.set(
         """
+        # 1.0.17
+        * Another small redesign
         # 1.0.16
         * Pop-up redesign
         # 1.0.15

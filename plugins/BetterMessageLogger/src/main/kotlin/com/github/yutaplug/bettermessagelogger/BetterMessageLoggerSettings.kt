@@ -6,6 +6,7 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.aliucord.api.SettingsAPI
@@ -39,6 +40,13 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
             updateStorage()
         }
         storageCaption = ui.caption("").also(storage::addView)
+        toggle(
+            storage,
+            Keys.KEEP_MEDIA,
+            "Keep deleted media",
+            "Show deleted images and videos after restarting the app.",
+            true,
+        ) { BetterMessageLogger.instance?.setKeepMedia(it) }
         toggle(
             storage,
             Keys.PREFETCH_MEDIA,
@@ -163,12 +171,15 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         content.addView(ui.scroll(list, 0.4f), LinearLayout.LayoutParams(-1, -2))
         val inputRow = LinearLayout(requireContext()).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(ui.dp(16), 0, ui.dp(8), 0)
+            setPadding(ui.dp(8), 0, ui.dp(8), 0)
         }
-        val input = ui.input(if (key == IdLists.IGNORED_USERS) "Add a user ID" else "Add an ID").apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-        inputRow.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
+        val field = DiscordSettingsUi.field(
+            requireContext(),
+            if (key == IdLists.IGNORED_USERS) "User ID" else "ID",
+            InputType.TYPE_CLASS_NUMBER,
+        )
+        val input = field.editText!!
+        inputRow.addView(field, LinearLayout.LayoutParams(0, -2, 1f))
 
         fun updateList() {
             val ids = IdLists.read(settings, key)
@@ -202,19 +213,22 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         fun add() {
             val id = input.text.toString().trim().toLongOrNull()?.takeIf { it > 0 }
             when {
-                id == null -> input.error = "Enter a numeric ID"
-                IdLists.contains(settings, key, id) -> input.error = "Already added"
+                id == null -> field.error = "Enter a numeric ID"
+                IdLists.contains(settings, key, id) -> field.error = "Already added"
                 else -> {
                     IdLists.set(settings, key, id, true)
-                    input.error = null
                     input.text?.clear()
                     filtersChanged()
                     updateList()
                 }
             }
         }
+        input.imeOptions = EditorInfo.IME_ACTION_DONE
+        input.setOnEditorActionListener { _, action, _ ->
+            if (action == EditorInfo.IME_ACTION_DONE) add()
+            action == EditorInfo.IME_ACTION_DONE
+        }
         inputRow.addView(ui.iconButton("ic_add_24dp", "Add", ui.brand) { add() })
-        ui.divider(content)
         content.addView(inputRow, LinearLayout.LayoutParams(-1, -2))
         updateList()
         showDialog(DiscordDialog(requireContext(), title).content(content).positive("Done"), input = true)
@@ -254,14 +268,17 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
             ui.card().apply { addView(picker, LinearLayout.LayoutParams(-1, ui.dp(160))) },
             LinearLayout.LayoutParams(-1, -2),
         )
-        val input = ui.input("#RRGGBB or #AARRGGBB").apply {
+        val field = DiscordSettingsUi.field(
+            requireContext(),
+            "Hex color",
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+        ).apply { helperText = "#RRGGBB, or #AARRGGBB to set opacity" }
+        val input = field.editText!!.apply {
             setText(colorValue(key))
             setSelectAllOnFocus(true)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-            contentDescription = "Hex color"
         }
-        content.addView(input, LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(8) })
-        content.addView(ui.text("Use 8 digits to set opacity.", 12f, ui.muted))
+        content.addView(field, LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(8) })
         var updating = false
         picker.onColorChanged = { color ->
             updating = true
@@ -276,10 +293,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
 
             override fun afterTextChanged(s: Editable?) {
                 if (updating) return
-                parseColor(s.toString())?.let {
-                    input.error = null
-                    picker.color = it
-                }
+                parseColor(s.toString())?.let { picker.color = it }
             }
         })
         showDialog(
@@ -289,7 +303,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
                 .positive("Save") {
                     val color = parseColor(input.text.toString())
                     if (color == null) {
-                        input.error = "Use #RRGGBB or #AARRGGBB"
+                        field.error = "Use #RRGGBB or #AARRGGBB"
                         false
                     } else {
                         settings.setString(key, hex(color))
