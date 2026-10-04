@@ -1,4 +1,4 @@
-version = "1.0.14"
+version = "1.0.15"
 description = "Backports Discord's newer Markdown formatting to chat messages."
 
 android {
@@ -8,6 +8,8 @@ android {
 aliucord {
     changelog.set(
         """
+        # 1.0.15
+        * Another redesign
         # 1.0.14
         * Improve game mentions and make them clickable
         * Support viewing slash command mentions

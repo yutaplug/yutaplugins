@@ -27,7 +27,7 @@ internal object DiscordSettingsUi {
     fun title(context: Context, value: String) = TextView(context, null, 0, R.i.UiKit_TextView_H1_Bold).apply {
         text = value
         setTextColor(color(context, "colorHeaderPrimary"))
-        setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 16))
+        setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 8))
     }
 
     fun header(context: Context, value: String) = TextView(context, null, 0, R.i.UiKit_Settings_Item_Header).apply {

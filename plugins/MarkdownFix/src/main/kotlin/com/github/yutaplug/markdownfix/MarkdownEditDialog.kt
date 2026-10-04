@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.text.Editable
 import android.text.TextWatcher
+import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
@@ -12,12 +13,11 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import androidx.appcompat.app.AlertDialog
 
-/** A themed editor shared by the scale and bullet-color settings. */
+/** A themed single-value editor, with an optional color preview and picker. */
 internal object MarkdownEditDialog {
     fun show(
         context: Context,
         title: String,
-        description: String,
         label: String,
         value: String,
         hint: String,
@@ -25,33 +25,31 @@ internal object MarkdownEditDialog {
         colorPicker: Boolean = false,
         validate: (String) -> String?,
         save: (String) -> Unit,
-        reset: () -> Unit,
+        defaultValue: String,
     ): AlertDialog {
         fun dp(value: Int) = MarkdownAppearance.dp(context, value)
 
         fun color(attribute: String, fallback: Int) = MarkdownAppearance.themedColor(context, attribute, fallback)
 
-        fun shape(fill: Int, radius: Int = 4) = GradientDrawable().apply {
-            setColor(fill)
-            cornerRadius = dp(radius).toFloat()
-        }
-
-        fun text(value: String, size: Float, tint: Int) = DiscordSettingsUi.text(context).apply {
-            text = value
-            textSize = size
-            setTextColor(tint)
-        }
-
-        val primary = color("colorHeaderPrimary", Color.WHITE)
         val muted = color("colorTextMuted", Color.LTGRAY)
-        val danger = color("colorTextDanger", Color.rgb(237, 66, 69))
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(16))
+            setPadding(dp(16), 0, dp(16), dp(8))
         }
-        content.addView(text(description, 14f, muted).apply { setPadding(0, dp(8), 0, dp(20)) })
-        content.addView(text(label, 13f, primary).apply { setPadding(0, 0, 0, dp(8)) })
-
+        val field = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+        val swatch = GradientDrawable().apply {
+            cornerRadius = dp(4).toFloat()
+            setStroke(dp(1), muted)
+        }
+        if (colorPicker) {
+            field.addView(
+                View(context).apply {
+                    background = swatch
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(12) },
+            )
+        }
         val input = DiscordSettingsUi.input(context).apply {
             setSingleLine(true)
             setSelectAllOnFocus(true)
@@ -59,20 +57,29 @@ internal object MarkdownEditDialog {
             imeOptions = EditorInfo.IME_ACTION_DONE
             setText(value)
             this.hint = hint
-            textSize = 17f
+            textSize = 16f
             background = null
+            minimumHeight = dp(48)
             setPadding(0, dp(8), 0, dp(8))
             setTextColor(color("colorTextNormal", Color.WHITE))
             setHintTextColor(muted)
             contentDescription = label
         }
-        content.addView(input, LinearLayout.LayoutParams(-1, -2))
-        val error = text("", 13f, danger).apply {
+        field.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
+        content.addView(field, LinearLayout.LayoutParams(-1, -2))
+        content.addView(DiscordSettingsUi.divider(context), LinearLayout.LayoutParams(-1, dp(1)))
+        val error = DiscordSettingsUi.text(context).apply {
+            textSize = 12f
+            setTextColor(color("colorTextDanger", Color.rgb(237, 66, 69)))
             visibility = View.GONE
-            setPadding(0, dp(6), 0, 0)
+            setPadding(0, dp(4), 0, 0)
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         content.addView(error)
+
+        fun preview() {
+            MarkdownAppearance.normalizeColor(input.text.toString())?.let { swatch.setColor(Color.parseColor(it)) }
+        }
         val picker = if (colorPicker) {
             BulletColorPicker(context) { selected -> input.setText(selected) }.also {
                 it.setColor(value)
@@ -81,6 +88,7 @@ internal object MarkdownEditDialog {
         } else {
             null
         }
+        preview()
 
         val scroll = object : ScrollView(context) {
             override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -94,8 +102,6 @@ internal object MarkdownEditDialog {
             }
         }.apply {
             isFillViewport = false
-            background = shape(color("colorBackgroundPrimary", Color.rgb(54, 57, 63)), 4)
-            clipToOutline = true
             addView(content)
         }
         val dialog = AlertDialog
@@ -103,7 +109,7 @@ internal object MarkdownEditDialog {
             .setCustomTitle(DiscordSettingsUi.title(context, title))
             .setView(scroll)
             .setNegativeButton("Cancel", null)
-            .setNeutralButton("Reset") { _, _ -> reset() }
+            .setNeutralButton("Default", null)
             .setPositiveButton("Save", null)
             .create()
 
@@ -126,6 +132,7 @@ internal object MarkdownEditDialog {
             override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) {
                 error.visibility = View.GONE
                 picker?.setColor(input.text.toString())
+                if (colorPicker) preview()
             }
 
             override fun afterTextChanged(text: Editable?) {}
@@ -142,13 +149,14 @@ internal object MarkdownEditDialog {
         // Configure the final bounds before the window is attached to avoid a second visible layout.
         DiscordSettingsUi.styleDialog(dialog, context)
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { submit() }
+        // Fills in the default instead of saving it, so Cancel still keeps the current value.
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { input.setText(defaultValue) }
         dialog.window?.apply {
             setSoftInputMode(
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
                     WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN,
             )
         }
-        input.requestFocus()
         dialog.show()
         return dialog
     }

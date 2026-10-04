@@ -1,103 +1,80 @@
 package com.github.yutaplug.markdownfix
 
 import android.content.Context
-import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.View
+import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.SeekBar
-import android.widget.TextView
-import java.util.Locale
 
-/** HSV controls retain the hue while choosing grayscale colors. */
+/** A palette of preset colors; any other color can still be typed as hex. */
 internal class BulletColorPicker(context: Context, private val onColor: (String) -> Unit) : LinearLayout(context) {
-    private val hsv = floatArrayOf(0f, 0f, 1f)
-    private var opacityAlpha = 255
-    private var syncing = false
-    private val labels = mutableListOf<TextView>()
-    private val bars = mutableListOf<SeekBar>()
+    private val swatches = ArrayList<Pair<String, View>>()
+    private val ring = MarkdownAppearance.themedColor(context, "colorHeaderPrimary", Color.WHITE)
 
     init {
         orientation = VERTICAL
-        setPadding(0, MarkdownAppearance.dp(context, 16), 0, 0)
-        listOf("Hue", "Saturation", "Brightness", "Opacity").forEachIndexed { index, name ->
-            labels += DiscordSettingsUi.text(context).apply {
-                textSize = 13f
-                setTextColor(MarkdownAppearance.themedColor(context, "colorHeaderPrimary", Color.WHITE))
-                addView(this)
+        setPadding(0, dp(12), 0, 0)
+        var index = 0
+        var row: LinearLayout? = null
+        while (index < PRESETS.size) {
+            if (index % COLUMNS == 0) {
+                row = LinearLayout(context).also { addView(it, LayoutParams(-1, -2)) }
             }
-            bars += SeekBar(context, null, 0, com.lytefast.flexinput.R.i.UiKit_SeekBar).apply {
-                max = if (index == 0) 360 else 100
-                contentDescription = name
-                thumbTintList = ColorStateList.valueOf(
-                    MarkdownAppearance.themedColor(context, "colorBrand", Color.rgb(88, 101, 242)),
-                )
-                addView(this, LayoutParams(-1, MarkdownAppearance.dp(context, 40)))
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                        if (syncing || !fromUser) return
-                        when (index) {
-                            0 -> hsv[0] = progress.toFloat()
-                            1 -> hsv[1] = progress / 100f
-                            2 -> hsv[2] = progress / 100f
-                            3 -> opacityAlpha = (progress * 255f / 100).toInt()
-                        }
-                        refresh()
-                        val color = Color.HSVToColor(opacityAlpha, hsv)
-                        onColor(
-                            if (opacityAlpha ==
-                                255
-                            ) {
-                                String.format(Locale.US, "#%06X", color and 0xFFFFFF)
-                            } else {
-                                String.format(Locale.US, "#%08X", color)
-                            },
-                        )
-                    }
+            val color = PRESETS[index]
+            val swatch = View(context).apply {
+                contentDescription = color
+                isFocusable = true
+                setOnClickListener {
+                    select(color)
+                    onColor(color)
+                }
+            }
+            // Equal-width cells keep the grid aligned on any dialog width.
+            val cell = FrameLayout(context).apply {
+                addView(swatch, FrameLayout.LayoutParams(dp(36), dp(36), Gravity.CENTER))
+            }
+            row!!.addView(cell, LayoutParams(0, dp(48), 1f))
+            swatches.add(color to swatch)
+            index++
+        }
+        select(null)
+    }
 
-                    override fun onStartTrackingTouch(bar: SeekBar?) {}
+    fun setColor(value: String) = select(MarkdownAppearance.normalizeColor(value))
 
-                    override fun onStopTrackingTouch(bar: SeekBar?) {}
-                })
+    private fun select(selected: String?) {
+        for ((color, view) in swatches) {
+            view.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor(color))
+                if (color == selected) {
+                    setStroke(dp(3), ring)
+                } else {
+                    setStroke(dp(1), MarkdownAppearance.themedColor(context, "colorBackgroundModifierAccent", Color.GRAY))
+                }
             }
         }
-        refresh()
     }
 
-    fun setColor(value: String) {
-        val normalized = MarkdownAppearance.normalizeColor(value) ?: return
-        val color = Color.parseColor(normalized)
-        val next = FloatArray(3)
-        Color.colorToHSV(color, next)
-        if (next[1] > 0f && next[2] > 0f) hsv[0] = next[0]
-        if (next[2] > 0f) hsv[1] = next[1]
-        hsv[2] = next[2]
-        opacityAlpha = Color.alpha(color)
-        refresh()
-    }
+    private fun dp(value: Int) = MarkdownAppearance.dp(context, value)
 
-    private fun refresh() {
-        syncing = true
-        val values =
-            listOf(hsv[0].toInt(), (hsv[1] * 100).toInt(), (hsv[2] * 100).toInt(), (opacityAlpha * 100f / 255).toInt())
-        val names = listOf("Hue", "Saturation", "Brightness", "Opacity")
-        val gradients = listOf(
-            intArrayOf(Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA, Color.RED),
-            intArrayOf(
-                Color.HSVToColor(floatArrayOf(hsv[0], 0f, hsv[2])),
-                Color.HSVToColor(floatArrayOf(hsv[0], 1f, hsv[2])),
-            ),
-            intArrayOf(Color.BLACK, Color.HSVToColor(floatArrayOf(hsv[0], hsv[1], 1f))),
-            intArrayOf(Color.HSVToColor(0, hsv), Color.HSVToColor(hsv)),
+    companion object {
+        private const val COLUMNS = 6
+        private val PRESETS = listOf(
+            "#5865F2",
+            "#3BA55C",
+            "#FAA61A",
+            "#ED4245",
+            "#EB459E",
+            "#9B59B6",
+            "#00B0F4",
+            "#1ABC9C",
+            "#FEE75C",
+            "#E67E22",
+            "#FFFFFF",
+            "#99AAB5",
         )
-        bars.forEachIndexed { index, bar ->
-            bar.progress = values[index]
-            labels[index].text = "${names[index]} · ${values[index]}${if (index == 0) "°" else "%"}"
-            bar.progressDrawable = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, gradients[index]).apply {
-                cornerRadius = MarkdownAppearance.dp(context, 4).toFloat()
-                setSize(0, MarkdownAppearance.dp(context, 8))
-            }
-        }
-        syncing = false
     }
 }
