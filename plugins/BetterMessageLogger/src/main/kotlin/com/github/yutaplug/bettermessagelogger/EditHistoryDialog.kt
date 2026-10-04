@@ -64,8 +64,6 @@ internal object EditHistoryDialog {
             )
             index--
         }
-        val dialog = ui.dialog("Edit history", content).setPositiveButton("Close", null).create()
-        ui.style(dialog)
-        dialog.show()
+        DiscordDialog(context, "Edit history").content(content).positive("Close").show()
     }
 }

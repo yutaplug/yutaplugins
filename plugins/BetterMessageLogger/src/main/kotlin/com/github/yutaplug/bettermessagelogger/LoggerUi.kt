@@ -7,12 +7,10 @@ import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
-import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import com.aliucord.Utils
 import com.discord.utilities.color.ColorCompat
 import com.discord.utilities.drawable.DrawableCompat
@@ -43,8 +41,9 @@ internal class LoggerUi(val context: Context) {
 
     fun column() = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
 
+    /** Body content for [DiscordDialog], padded like the native notice body. */
     fun dialogContent(horizontal: Int = 16) = column().apply {
-        setPadding(dp(horizontal), 0, dp(horizontal), dp(8))
+        setPadding(dp(horizontal), dp(12), dp(horizontal), dp(12))
         isFocusableInTouchMode = true
     }
 
@@ -166,21 +165,6 @@ internal class LoggerUi(val context: Context) {
             selectable(this, borderless = true)
             setOnClickListener { click() }
         }
-
-    @Suppress("DEPRECATION") // ADJUST_RESIZE is needed on the Android 5+ versions this plugin supports.
-    fun style(dialog: AlertDialog) {
-        DiscordSettingsUi.styleDialog(dialog, context)
-        dialog.window?.setSoftInputMode(
-            WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
-        )
-        dialog.findViewById<TextView>(android.R.id.message)?.setTextColor(primary)
-    }
-
-    fun dialog(title: String, content: View) = AlertDialog
-        .Builder(context)
-        .setCustomTitle(DiscordSettingsUi.title(context, title))
-        .setView(content)
 
     private fun selectable(view: View, borderless: Boolean = false) {
         // A selectable background works on Android 5, unlike View.foreground.

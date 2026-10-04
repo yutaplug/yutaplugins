@@ -7,13 +7,10 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
-import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
-import android.widget.ScrollView
-import androidx.appcompat.app.AlertDialog
 
-/** A themed single-value editor, with an optional color preview and picker. */
+/** A single-value editor in Discord's notice dialog, with an optional color preview and palette. */
 internal object MarkdownEditDialog {
     fun show(
         context: Context,
@@ -26,7 +23,7 @@ internal object MarkdownEditDialog {
         validate: (String) -> String?,
         save: (String) -> Unit,
         defaultValue: String,
-    ): AlertDialog {
+    ): DiscordDialog {
         fun dp(value: Int) = MarkdownAppearance.dp(context, value)
 
         fun color(attribute: String, fallback: Int) = MarkdownAppearance.themedColor(context, attribute, fallback)
@@ -34,7 +31,7 @@ internal object MarkdownEditDialog {
         val muted = color("colorTextMuted", Color.LTGRAY)
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), 0, dp(16), dp(8))
+            setPadding(dp(16), dp(4), dp(16), dp(12))
         }
         val field = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
         val swatch = GradientDrawable().apply {
@@ -90,42 +87,25 @@ internal object MarkdownEditDialog {
         }
         preview()
 
-        val scroll = object : ScrollView(context) {
-            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-                val maximum = resources.displayMetrics.heightPixels * 3 / 5
-                val available = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED) {
-                    maximum
-                } else {
-                    minOf(maximum, MeasureSpec.getSize(heightMeasureSpec))
-                }
-                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(available, MeasureSpec.AT_MOST))
-            }
-        }.apply {
-            isFillViewport = false
-            addView(content)
-        }
-        val dialog = AlertDialog
-            .Builder(context)
-            .setCustomTitle(DiscordSettingsUi.title(context, title))
-            .setView(scroll)
-            .setNegativeButton("Cancel", null)
-            .setNeutralButton("Default", null)
-            .setPositiveButton("Save", null)
-            .create()
-
-        fun submit() {
+        fun submit(): Boolean {
             val current = input.text.toString().trim()
             val problem = validate(current)
             if (problem != null) {
                 error.text = problem
                 error.visibility = View.VISIBLE
                 input.requestFocus()
-                return
+                return false
             }
             save(current)
-            dialog.dismiss()
+            return true
         }
 
+        val dialog = DiscordDialog(context, title)
+            .content(content)
+            // Fills in the default instead of saving it, so Cancel still keeps the current value.
+            .neutral("Default") { input.setText(defaultValue) }
+            .negative("Cancel")
+            .positive("Save") { submit() }
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) {}
 
@@ -139,25 +119,12 @@ internal object MarkdownEditDialog {
         })
         input.setOnEditorActionListener { _, action, _ ->
             if (action == EditorInfo.IME_ACTION_DONE) {
-                submit()
+                if (submit()) dialog.dismiss()
                 true
             } else {
                 false
             }
         }
-        // Inflate AlertDialog's content before sizing: its onCreate installs the default window width.
-        // Configure the final bounds before the window is attached to avoid a second visible layout.
-        DiscordSettingsUi.styleDialog(dialog, context)
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { submit() }
-        // Fills in the default instead of saving it, so Cancel still keeps the current value.
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { input.setText(defaultValue) }
-        dialog.window?.apply {
-            setSoftInputMode(
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN,
-            )
-        }
-        dialog.show()
-        return dialog
+        return dialog.show(input = true)
     }
 }

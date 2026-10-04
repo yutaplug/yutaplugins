@@ -8,7 +8,6 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import com.aliucord.api.SettingsAPI
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.Utils
@@ -24,7 +23,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
     private var storageCaption: TextView? = null
     private var databaseToggle: CheckedSetting? = null
     private val values = HashMap<String, TextView>()
-    private var dialog: AlertDialog? = null
+    private var dialog: DiscordDialog? = null
 
     override fun onViewBound(view: View) {
         super.onViewBound(view)
@@ -147,20 +146,15 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
     }
 
     private fun confirmClear() {
-        val content = ui.dialogContent(20).apply {
-            addView(ui.text("Saved messages, edit history and media will be deleted. Exported TXT files are kept.", 15f, ui.normal))
-        }
         showDialog(
-            ui
-                .dialog("Clear saved logs?", content)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Clear") { _, _ ->
+            DiscordDialog(requireContext(), "Clear saved logs?", destructive = true)
+                .message("Saved messages, edit history and media will be deleted. Exported TXT files are kept.")
+                .negative("Cancel")
+                .positive("Clear") {
                     BetterMessageLogger.instance?.clearDatabase { if (storageCaption != null) updateStorage() }
-                }.create(),
-        ) {
-            dialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.backgroundTintList =
-                android.content.res.ColorStateList.valueOf(ui.danger)
-        }
+                    true
+                },
+        )
     }
 
     private fun idDialog(key: String, title: String) {
@@ -223,7 +217,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         ui.divider(content)
         content.addView(inputRow, LinearLayout.LayoutParams(-1, -2))
         updateList()
-        showDialog(ui.dialog(title, content).setPositiveButton("Done", null).create())
+        showDialog(DiscordDialog(requireContext(), title).content(content).positive("Done"), input = true)
     }
 
     private fun filtersChanged() {
@@ -254,7 +248,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
     }
 
     private fun colorDialog(key: String, title: String) {
-        val content = ui.dialogContent(20)
+        val content = ui.dialogContent()
         val picker = ColorPickerView(requireContext(), Color.parseColor(colorValue(key)))
         content.addView(
             ui.card().apply { addView(picker, LinearLayout.LayoutParams(-1, ui.dp(160))) },
@@ -288,24 +282,24 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
                 }
             }
         })
-        val dialog = ui
-            .dialog(title, ui.scroll(content, 0.6f))
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Save", null)
-            .create()
-        showDialog(dialog) {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val color = parseColor(input.text.toString())
-                if (color == null) {
-                    input.error = "Use #RRGGBB or #AARRGGBB"
-                } else {
-                    settings.setString(key, hex(color))
-                    updateColors()
-                    BetterMessageLogger.instance?.refreshAppearance()
-                    dialog.dismiss()
-                }
-            }
-        }
+        showDialog(
+            DiscordDialog(requireContext(), title)
+                .content(content)
+                .negative("Cancel")
+                .positive("Save") {
+                    val color = parseColor(input.text.toString())
+                    if (color == null) {
+                        input.error = "Use #RRGGBB or #AARRGGBB"
+                        false
+                    } else {
+                        settings.setString(key, hex(color))
+                        updateColors()
+                        BetterMessageLogger.instance?.refreshAppearance()
+                        true
+                    }
+                },
+            input = true,
+        )
     }
 
     private fun parseColor(raw: String?): Int? {
@@ -316,12 +310,10 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
 
     private fun hex(color: Int) = String.format(Locale.ROOT, "#%08X", color)
 
-    private fun showDialog(value: AlertDialog, configure: (() -> Unit)? = null) {
+    private fun showDialog(value: DiscordDialog, input: Boolean = false) {
         dialog?.dismiss()
         dialog = value
-        ui.style(value)
-        configure?.invoke()
-        value.show()
+        value.show(input)
     }
 
     override fun onResume() {

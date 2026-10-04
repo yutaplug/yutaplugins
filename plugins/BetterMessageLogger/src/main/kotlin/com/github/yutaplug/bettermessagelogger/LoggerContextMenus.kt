@@ -198,8 +198,6 @@ internal object LoggingFilterDialog {
                 },
             )
         }
-        val dialog = ui.dialog(title, ui.scroll(content, 0.6f)).setPositiveButton("Done", null).create()
-        ui.style(dialog)
-        dialog.show()
+        DiscordDialog(context, title).content(content).positive("Done").show()
     }
 }

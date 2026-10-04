@@ -1,9 +1,11 @@
-version = "1.0.22"
+version = "1.0.23"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.23
+        * Pop-up redesign
         # 1.0.22
         * Logged images and videos are saved and stay visible after restarting the app.
         * Media is pre-downloaded as messages arrive, so deleted attachments show even if you weren't in the channel (can be turned off).

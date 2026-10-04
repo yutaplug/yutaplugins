@@ -12,7 +12,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
 import com.aliucord.fragments.SettingsPage
@@ -22,7 +21,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin: MarkdownFix) : SettingsPage() {
-    private var activeDialog: AlertDialog? = null
+    private var activeDialog: DiscordDialog? = null
     private lateinit var customColor: CheckedSetting
     private lateinit var colorRow: LinearLayout
     private lateinit var colorValue: TextView
@@ -92,7 +91,7 @@ class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin:
         var selected = MarkdownAppearance.scale(settings, size)
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), 0, dp(16), dp(8))
+            setPadding(dp(16), dp(4), dp(16), dp(12))
         }
         // Preview at the chosen scale, relative to Discord's normal message text size.
         val preview = text(size.example.substringAfter(' '), BASE_TEXT_SIZE, "colorHeaderPrimary").apply {
@@ -143,21 +142,16 @@ class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin:
         content.addView(text("${size.example} · normal is 1.00×", 12f, "colorTextMuted"))
         select(selected)
 
-        val dialog = AlertDialog
-            .Builder(context)
-            .setCustomTitle(DiscordSettingsUi.title(context, size.title))
-            .setView(content)
-            .setNegativeButton("Cancel", null)
-            .setNeutralButton("Default", null)
-            .setPositiveButton("Save") { _, _ ->
+        activeDialog = DiscordDialog(context, size.title)
+            .content(content)
+            // Previews the default instead of saving it, so Cancel still keeps the current value.
+            .neutral("Default") { select(size.default) }
+            .negative("Cancel")
+            .positive("Save") {
                 settings.setString(size.key, selected.toString())
                 changed()
-            }.create()
-        DiscordSettingsUi.styleDialog(dialog, context)
-        // Previews the default instead of saving it, so Cancel still keeps the current value.
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { select(size.default) }
-        activeDialog = dialog
-        dialog.show()
+                true
+            }.show()
     }
 
     private fun showColorDialog() {
@@ -183,20 +177,13 @@ class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin:
 
     private fun confirmReset() {
         activeDialog?.dismiss()
-        val context = requireContext()
-        val dialog = AlertDialog
-            .Builder(context)
-            .setCustomTitle(DiscordSettingsUi.title(context, "Reset appearance?"))
-            .setView(
-                text("All text sizes and the bullet color return to their defaults.", 15f, "colorTextNormal").apply {
-                    setPadding(dp(16), 0, dp(16), dp(12))
-                },
-            ).setNegativeButton("Cancel", null)
-            .setPositiveButton("Reset") { _, _ -> reset() }
-            .create()
-        DiscordSettingsUi.styleDialog(dialog, context)
-        activeDialog = dialog
-        dialog.show()
+        activeDialog = DiscordDialog(requireContext(), "Reset appearance?", destructive = true)
+            .message("All text sizes and the bullet color return to their defaults.")
+            .negative("Cancel")
+            .positive("Reset") {
+                reset()
+                true
+            }.show()
     }
 
     /** A single-line row sized like Discord's settings rows, with a trailing value. */
