@@ -1,7 +1,6 @@
 package com.github.yutaplug.profileboard
 
 import android.content.Context
-import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
@@ -13,12 +12,12 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.core.content.res.ResourcesCompat
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
+import com.aliucord.utils.ReflectUtils
 import com.discord.app.AppBottomSheet
 import com.discord.utilities.images.MGImages
 import com.discord.widgets.user.usersheet.WidgetUserSheet
@@ -26,6 +25,7 @@ import com.discord.widgets.user.usersheet.WidgetUserSheetViewModel
 import com.facebook.drawee.view.SimpleDraweeView
 import com.google.android.flexbox.FlexboxLayout
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.tabs.TabLayout
 import java.lang.ref.WeakReference
 import java.util.IdentityHashMap
 
@@ -36,8 +36,6 @@ class ProfileBoard : Plugin() {
         const val CONTENT_MARKER = "ProfileBoard:content"
         const val WISHLIST_CONTENT_MARKER = "ProfileBoard:wishlist"
     }
-
-    private data class Tab(val frame: FrameLayout, val label: TextView, val indicator: View)
 
     private class Binding(
         val root: View,
@@ -50,13 +48,7 @@ class ProfileBoard : Plugin() {
         var actionsDividerVisibility: Int,
         val actions: View,
         val actionsElevation: Float,
-        val tabs: LinearLayout,
-        val mainTab: TextView,
-        val boardTab: TextView,
-        val wishlistTab: TextView,
-        val mainIndicator: View,
-        val boardIndicator: View,
-        val wishlistIndicator: View,
+        val tabs: TabLayout,
         val boardContent: LinearLayout,
         val wishlistContent: LinearLayout,
         val originals: List<View>,
@@ -65,6 +57,7 @@ class ProfileBoard : Plugin() {
         var generation = 0
         var selected = 0
         var data: BoardData? = null
+        var syncingTabs = false
         val visibilities = IdentityHashMap<View, Int>()
     }
 
@@ -74,6 +67,7 @@ class ProfileBoard : Plugin() {
 
     override fun start(context: Context) {
         repository = BoardRepository()
+        GameProfileSheet.pluginResources = resources
         patcher.patch(
             WidgetUserSheet::class.java,
             "configureUI",
@@ -116,8 +110,7 @@ class ProfileBoard : Plugin() {
                     binding.data = null
                     binding.selected = 0
                     binding.tabs.visibility = View.GONE
-                    (binding.boardTab.parent as? View)?.visibility = View.GONE
-                    (binding.wishlistTab.parent as? View)?.visibility = View.GONE
+                    setTabs(binding, hasBoard = false, hasWishlist = false)
                     renderStatus(binding, "Loading Board…")
                     select(binding, 0)
                     load(sheet, binding)
@@ -147,19 +140,10 @@ class ProfileBoard : Plugin() {
         val index = content.indexOfChild(actions)
         if (index < 0) return null
         val context = root.context
-        val tabs = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val tabs = nativeTabs(context).apply {
             tag = TAB_MARKER
-            setBackgroundColor(themeColor(context, "colorPrimaryTabs"))
             visibility = View.GONE
         }
-        val mainTab = tab(context, "Main")
-        val boardTab = tab(context, "Board")
-        val wishlistTab = tab(context, "Wishlist")
-        tabs.addView(mainTab.frame, LinearLayout.LayoutParams(0, dp(context, 48), 1f))
-        tabs.addView(boardTab.frame, LinearLayout.LayoutParams(0, dp(context, 48), 1f))
-        tabs.addView(wishlistTab.frame, LinearLayout.LayoutParams(0, dp(context, 48), 1f))
-        wishlistTab.frame.visibility = View.GONE
         content.addView(tabs, index + 1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val originals = ArrayList<View>()
         var originalIndex = index + 2
@@ -179,15 +163,21 @@ class ProfileBoard : Plugin() {
         content.addView(wishlistContent, index + 3, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val binding = Binding(root, content, header, header.elevation, editActions, editActions.elevation,
             actionsDivider, actionsDivider.visibility,
-            actions, actions.elevation, tabs, mainTab.label, boardTab.label, wishlistTab.label,
-            mainTab.indicator, boardTab.indicator, wishlistTab.indicator, boardContent, wishlistContent, originals)
+            actions, actions.elevation, tabs, boardContent, wishlistContent, originals)
         header.elevation = 0f
         editActions.elevation = 0f
         actionsDivider.visibility = View.GONE
         actions.elevation = 0f
-        mainTab.frame.setOnClickListener { select(binding, 0) }
-        boardTab.frame.setOnClickListener { select(binding, 1) }
-        wishlistTab.frame.setOnClickListener { select(binding, 2) }
+        tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+            override fun onTabSelected(tab: TabLayout.Tab) {
+                if (!binding.syncingTabs) select(binding, tab.tag as Int)
+            }
+
+            override fun onTabUnselected(tab: TabLayout.Tab) {}
+
+            override fun onTabReselected(tab: TabLayout.Tab) {}
+        })
+        setTabs(binding, hasBoard = false, hasWishlist = false)
         select(binding, 0)
         return binding
     }
@@ -255,10 +245,20 @@ class ProfileBoard : Plugin() {
     private fun updateTabs(binding: Binding, data: BoardData) {
         val hasBoard = data.widgets.isNotEmpty()
         val hasWishlist = data.wishlist?.let { it.failed || it.items.isNotEmpty() } == true
-        (binding.boardTab.parent as? View)?.visibility = if (hasBoard) View.VISIBLE else View.GONE
-        (binding.wishlistTab.parent as? View)?.visibility = if (hasWishlist) View.VISIBLE else View.GONE
         binding.tabs.visibility = if (hasBoard || hasWishlist) View.VISIBLE else View.GONE
         if ((binding.selected == 1 && !hasBoard) || (binding.selected == 2 && !hasWishlist)) binding.selected = 0
+        setTabs(binding, hasBoard, hasWishlist)
+    }
+
+    // TabLayout can't hide individual tabs, so rebuild the row with only the sections that have content.
+    private fun setTabs(binding: Binding, hasBoard: Boolean, hasWishlist: Boolean) {
+        val tabs = binding.tabs
+        binding.syncingTabs = true
+        tabs.removeAllTabs()
+        tabs.addTab(tabs.newTab().setText("Main").setTag(0), false)
+        if (hasBoard) tabs.addTab(tabs.newTab().setText("Board").setTag(1), false)
+        if (hasWishlist) tabs.addTab(tabs.newTab().setText("Wishlist").setTag(2), false)
+        binding.syncingTabs = false
     }
 
     private fun select(binding: Binding, section: Int) {
@@ -280,14 +280,18 @@ class ProfileBoard : Plugin() {
             binding.boardContent.visibility = View.GONE
             binding.wishlistContent.visibility = View.GONE
         }
-        val context = binding.root.context
-        val labels = arrayOf(binding.mainTab, binding.boardTab, binding.wishlistTab)
-        val indicators = arrayOf(binding.mainIndicator, binding.boardIndicator, binding.wishlistIndicator)
+        val tabs = binding.tabs
         var index = 0
-        while (index < labels.size) {
-            labels[index].setTextColor(themeColor(context, if (index == section) "colorHeaderPrimary" else "colorHeaderSecondary"))
-            labels[index].isSelected = index == section
-            indicators[index].visibility = if (index == section) View.VISIBLE else View.INVISIBLE
+        while (index < tabs.tabCount) {
+            val tab = tabs.getTabAt(index)
+            if (tab?.tag == section) {
+                if (!tab.isSelected) {
+                    binding.syncingTabs = true
+                    tab.select()
+                    binding.syncingTabs = false
+                }
+                break
+            }
             index++
         }
     }
@@ -523,7 +527,7 @@ class ProfileBoard : Plugin() {
 
     private fun detailedGame(context: Context, game: BoardGame, info: GameInfo?): View {
         val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-        row.addView(cover(context, info), LinearLayout.LayoutParams(dp(context, 96), dp(context, 128)))
+        row.addView(cover(context, game, info), LinearLayout.LayoutParams(dp(context, 96), dp(context, 128)))
         val details = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(context, 12), 0, 0, 0)
@@ -596,7 +600,7 @@ class ProfileBoard : Plugin() {
             var columns = 0
             while (columns < 3 && index < games.size) {
                 val game = games[index]
-                row.addView(cover(context, infos[game.id]), LinearLayout.LayoutParams(0, height, 1f).apply {
+                row.addView(cover(context, game, infos[game.id]),LinearLayout.LayoutParams(0, height, 1f).apply {
                     marginEnd = dp(context, 8)
                 })
                 index++
@@ -612,8 +616,14 @@ class ProfileBoard : Plugin() {
         }
     }
 
-    private fun cover(context: Context, info: GameInfo?): View {
-        val frame = FrameLayout(context)
+    private fun cover(context: Context, game: BoardGame, info: GameInfo?): View {
+        val frame = FrameLayout(context).apply {
+            setOnClickListener { GameProfileSheet.open(it, game.id, info?.name) }
+            val ripple = TypedValue()
+            if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)) {
+                foreground = context.getDrawable(ripple.resourceId)
+            }
+        }
         val image = SimpleDraweeView(context).apply {
             contentDescription = info?.name ?: UNKNOWN_GAME_NAME
             MGImages.setRoundingParams(this, dp(context, 8).toFloat(), false, null, null, null)
@@ -628,36 +638,19 @@ class ProfileBoard : Plugin() {
         return frame
     }
 
-    private fun tab(context: Context, title: String): Tab {
-        val frame = FrameLayout(context).apply {
-            isClickable = true
-            isFocusable = true
-            contentDescription = title
-            val ripple = TypedValue()
-            if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)) {
-                setBackgroundResource(ripple.resourceId)
-            }
-        }
-        val label = styledText(context, "App_TabLayout_Text").apply {
-            text = title
-            gravity = Gravity.CENTER
-            isAllCaps = false
-            val fontValue = TypedValue()
-            val fontAttr = Utils.getResId("font_primary_bold", "attr")
-            val fontId = if (fontAttr != 0 && context.theme.resolveAttribute(fontAttr, fontValue, true)) {
-                fontValue.resourceId
-            } else {
-                Utils.getResId("whitney_bold", "font")
-            }
-            val boldFont = if (fontId != 0) runCatching { ResourcesCompat.getFont(context, fontId) }.getOrNull() else null
-            if (boldFont != null) typeface = boldFont else setTypeface(typeface, Typeface.BOLD)
-        }
-        frame.addView(label, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        val indicator = View(context).apply {
-            setBackgroundColor(themeColor(context, "colorHeaderPrimary"))
-        }
-        frame.addView(indicator, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(context, 2), Gravity.BOTTOM))
-        return Tab(frame, label, indicator)
+    /**
+     * Discord's own TabLayout, configured like 126.21's toolbar tabs (widget_friends_add, widget_thread_browser):
+     * App_TabLayout_Text, tabSelectedTextColor/tabTextColor, fixed mode, fill gravity and no max tab width.
+     */
+    private fun nativeTabs(context: Context) = TabLayout(context).apply {
+        setBackgroundColor(themeColor(context, "colorPrimaryTabs"))
+        tabTextAppearance = Utils.getResId("App_TabLayout_Text", "style")
+        tabMode = TabLayout.MODE_FIXED
+        tabGravity = TabLayout.GRAVITY_FILL
+        runCatching { ReflectUtils.setField(this, "requestedTabMaxWidth", 0) }
+        val selected = themeColor(context, "tabSelectedTextColor")
+        setTabTextColors(themeColor(context, "tabTextColor"), selected)
+        setSelectedTabIndicatorColor(selected)
     }
 
     private fun styledText(context: Context, style: String): TextView =
@@ -697,6 +690,7 @@ class ProfileBoard : Plugin() {
         patcher.unpatchAll()
         repository?.close()
         repository = null
+        GameProfileSheet.pluginResources = null
         main.removeCallbacksAndMessages(null)
         for (binding in bindings.values.toList()) remove(binding)
         bindings.clear()
