@@ -45,14 +45,14 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
             Keys.KEEP_MEDIA,
             "Keep deleted media",
             "Show deleted images and videos after restarting the app.",
-            true,
+            false,
         ) { BetterMessageLogger.instance?.setKeepMedia(it) }
         toggle(
             storage,
             Keys.PREFETCH_MEDIA,
             "Pre-download media",
             "Save images and videos as they arrive so deleted media still shows. Uses extra data.",
-            true,
+            false,
         ) {}
         ui.row(storage, "Export to TXT", null, "ic_file_download_white_24dp") {
             BetterMessageLogger.instance?.exportDatabaseToText()

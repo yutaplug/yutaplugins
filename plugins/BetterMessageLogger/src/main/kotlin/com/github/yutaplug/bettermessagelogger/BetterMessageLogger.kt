@@ -432,7 +432,7 @@ class BetterMessageLogger : Plugin() {
     }
 
     private fun prefetch(message: Message) {
-        if (!settings.getBool(PREFETCH_MEDIA, true)) return
+        if (!settings.getBool(PREFETCH_MEDIA, false)) return
         // Records exist only for real messages that pass the logging filters.
         if (record(message.id) != null) media?.prefetchAsync(message)
     }
@@ -444,7 +444,7 @@ class BetterMessageLogger : Plugin() {
         media?.saveAsync(record, databaseEnabled && keepMedia())
     }
 
-    private fun keepMedia() = settings.getBool(KEEP_MEDIA, true)
+    private fun keepMedia() = settings.getBool(KEEP_MEDIA, false)
 
     /** Runs after queued database pruning, removing media of messages that are no longer saved. */
     private fun sweepMedia(db: MessageLoggerDatabase) {

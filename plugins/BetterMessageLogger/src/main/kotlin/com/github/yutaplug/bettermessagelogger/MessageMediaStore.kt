@@ -2,7 +2,9 @@ package com.github.yutaplug.bettermessagelogger
 
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.media.MediaScannerConnection
 import android.net.Uri
+import com.aliucord.Utils
 import com.discord.api.message.attachment.MessageAttachment
 import com.discord.api.message.attachment.MessageAttachmentType
 import com.discord.models.message.Message
@@ -45,6 +47,15 @@ internal class MessageMediaStore(
         // Pending media of messages that were not deleted while the app ran is no longer useful.
         enqueue(prefetchExecutor, "clear pending media") { pending.deleteRecursively() }
         enqueue(executor, "clear session media") { synchronized(moveLock) { session.deleteRecursively() } }
+        // Existing installs already have the folder; hide it from the gallery right away.
+        // Decided before any download can create the marker, so a fast prefetch can't skip the migration.
+        val migrate = root.isDirectory && !File(root, NO_MEDIA).exists()
+        if (migrate) {
+            enqueue(executor, "hide media from gallery") {
+                hideFromGallery()
+                removeFromGallery()
+            }
+        }
     }
 
     /** Downloads media of a live message into the pending cache, in case it gets deleted later. */
@@ -169,7 +180,9 @@ internal class MessageMediaStore(
         val protected = synchronized(attempted) { HashSet(attempted.keys) }
         synchronized(moveLock) {
             root.listFiles()?.forEach { directory ->
-                if (directory.name == PENDING_DIR || directory.name == SESSION_DIR) return@forEach
+                if (directory.name == PENDING_DIR || directory.name == SESSION_DIR || directory.name == NO_MEDIA) {
+                    return@forEach
+                }
                 val id = directory.name.toLongOrNull()
                 if (id == null || (id !in ids && id !in protected)) directory.deleteRecursively()
             }
@@ -190,6 +203,7 @@ internal class MessageMediaStore(
     private fun promote(source: File, target: File) = synchronized(moveLock) {
         val files = source.listFiles() ?: return@synchronized
         if (!target.isDirectory && !target.mkdirs()) return@synchronized
+        hideFromGallery()
         var downloading = false
         for (file in files) {
             if (file.name.endsWith(PART)) {
@@ -233,6 +247,34 @@ internal class MessageMediaStore(
         return "$index.$extension"
     }
 
+    /**
+     * Keeps the media scanner from indexing logged attachments, which otherwise show up in the gallery
+     * and Discord's attachment picker. Covers every subfolder of [root], and is recreated after a clear.
+     */
+    private fun hideFromGallery() {
+        val marker = File(root, NO_MEDIA)
+        if (marker.exists()) return
+        try {
+            marker.createNewFile()
+        } catch (error: Exception) {
+            reportError("create $NO_MEDIA", error)
+        }
+    }
+
+    /**
+     * One-time migration for media saved before [NO_MEDIA] existed: those files are already indexed.
+     * Rescanning a file that now sits under a .nomedia folder makes the media scanner drop it.
+     */
+    private fun removeFromGallery() {
+        if (!File(root, NO_MEDIA).exists()) return
+        val paths = root.walkTopDown()
+            .filter { it.isFile && it.name != NO_MEDIA && !it.name.endsWith(PART) }
+            .map { it.absolutePath }
+            .toList()
+        if (paths.isEmpty()) return
+        MediaScannerConnection.scanFile(Utils.appContext, paths.toTypedArray(), null, null)
+    }
+
     private fun thumbnail(file: File) = File(file.parentFile, file.nameWithoutExtension + ".thumb.jpg")
 
     private fun save(attachment: MessageAttachment, target: File, limit: Long) {
@@ -245,6 +287,7 @@ internal class MessageMediaStore(
         if (attachment.d() > limit) return
         val directory = requireNotNull(target.parentFile)
         check(directory.isDirectory || directory.mkdirs()) { "Could not create media folder" }
+        hideFromGallery()
         val sources = listOfNotNull(attachment.f(), attachment.c()).distinct()
         var failure: Exception? = null
         for (source in sources) {
@@ -328,6 +371,7 @@ internal class MessageMediaStore(
         private const val PENDING_DIR = ".pending"
         private const val SESSION_DIR = ".session"
         private const val PART = ".part"
+        private const val NO_MEDIA = ".nomedia"
         private const val MAX_BYTES = 100L * 1024 * 1024
         private const val MAX_PREFETCH_BYTES = 25L * 1024 * 1024
         private const val MAX_PENDING_BYTES = 256L * 1024 * 1024
