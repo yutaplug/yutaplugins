@@ -1,8 +1,11 @@
-version = "1.0.3"
+version = "1.0.4"
 description = "Allow users to set a custom avatar frame. Shares API with Vencord."
 aliucord {
     changelog.set(
         """
+        # 1.0.4
+        * Fix uploading custom decorations doing nothing after picking an image
+        * Popups now use Discord's themed dialogs
         # 1.0.3
         * Fixes
         # 1.0.2

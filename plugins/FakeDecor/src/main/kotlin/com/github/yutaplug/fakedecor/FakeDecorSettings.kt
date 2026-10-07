@@ -1,26 +1,19 @@
 package com.github.yutaplug.fakedecor
 
-import android.app.Activity
-import android.content.Intent
-import android.net.Uri
 import android.util.TypedValue
-import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
-import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
+import com.aliucord.fragments.ConfirmDialog
+import com.aliucord.fragments.SelectDialog
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.utils.DimenUtils
 import com.aliucord.views.TextInput
 import com.discord.utilities.color.ColorCompat
 import com.discord.views.CheckedSetting
-import com.facebook.drawee.drawable.`ScalingUtils$ScaleType`
-import com.facebook.drawee.view.SimpleDraweeView
 import com.lytefast.flexinput.R
 
 class FakeDecorSettings(
@@ -29,7 +22,6 @@ class FakeDecorSettings(
 ) : SettingsPage() {
     private var assetInput: EditText? = null
     private var authorizationStatus: TextView? = null
-    private var presetDialog: AlertDialog? = null
     private var boundSettingsView: View? = null
 
     // Aliucord's FragmentProxy owns Fragment attachment; track the view supplied to this page instead.
@@ -109,13 +101,7 @@ class FakeDecorSettings(
             if (!plugin.isAuthorized()) {
                 Utils.showToast("Authorize Decor before uploading")
             } else {
-                startActivityForResult(
-                    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "image/*"
-                    },
-                    PICK_DECORATION,
-                )
+                DecorationPickerFragment.open(requireActivity())
             }
         }
 
@@ -135,15 +121,8 @@ class FakeDecorSettings(
         }
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == PICK_DECORATION && resultCode == Activity.RESULT_OK) {
-            data?.data?.let { plugin.uploadDecoration(requireContext().applicationContext, it) }
-        }
-    }
-
     fun showPresets(presets: List<*>) {
-        val items = mutableListOf<DecorPreset>()
+        val items = mutableListOf<PresetsDialog.Preset>()
         for (raw in presets) {
             val preset = raw as? Map<*, *> ?: continue
             val decorations = preset["decorations"] as? List<*> ?: continue
@@ -151,28 +130,20 @@ class FakeDecorSettings(
                 val decoration = item as? Map<*, *> ?: continue
                 val asset = FakeDecor.decorationAsset(decoration).takeIf { it.isNotEmpty() } ?: continue
                 items +=
-                    DecorPreset(asset, decoration["alt"]?.toString() ?: asset, preset["name"]?.toString().orEmpty())
+                    PresetsDialog.Preset(asset, decoration["alt"]?.toString() ?: asset, preset["name"]?.toString().orEmpty())
             }
         }
         if (items.isEmpty()) {
             Utils.showToast("No Decor presets found")
             return
         }
-        presetDialog?.dismiss()
-        presetDialog = AlertDialog
-            .Builder(requireContext())
-            .setCustomTitle(
-                TextView(requireContext(), null, 0, R.i.UiKit_TextView_H1_Bold).apply {
-                    text = "Decor presets"
-                    setTextColor(ColorCompat.getThemedColor(context, R.b.colorHeaderPrimary))
-                    val padding = DimenUtils.dpToPx(16)
-                    setPadding(padding, padding, padding, padding)
-                },
-            ).setAdapter(PresetAdapter(items)) { _, which ->
-                assetInput?.setText(items[which].asset)
+        PresetsDialog().apply {
+            this.presets = items
+            onPicked = { preset ->
+                assetInput?.setText(preset.asset)
                 assetInput?.let { it.setSelection(it.length()) }
-            }.setNegativeButton("Cancel", null)
-            .show()
+            }
+        }.show(Utils.appActivity.supportFragmentManager, "FakeDecorPresets")
     }
 
     fun showOwnDecorations(decorations: List<*>) {
@@ -190,40 +161,45 @@ class FakeDecorSettings(
                 (it["alt"] ?: asset) +
                 (if (it["reviewed"] == false) " (pending review)" else "")
         }
-        var checked = valid.indexOfFirst { FakeDecor.decorationAsset(it) == selected }.coerceAtLeast(0)
-        val dialog = AlertDialog
-            .Builder(requireContext())
-            .setTitle("My Decor decorations")
-            .setSingleChoiceItems(labels.toTypedArray(), checked) { _, which -> checked = which }
-            .setNegativeButton("Cancel", null)
-            .setNeutralButton("Delete", null)
-            .setPositiveButton("Use", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                if (valid[checked]["reviewed"] == false) {
-                    Utils.showToast("This decoration is still pending review")
+        // Aliucord's dialogs are built from Discord's themed dialogs, unlike a plain AlertDialog.
+        SelectDialog().apply {
+            title = "My Decor decorations"
+            items = labels.toTypedArray()
+            onResultListener = { which -> showDecorationActions(valid[which], labels[which]) }
+        }.show(Utils.appActivity.supportFragmentManager, "FakeDecorOwn")
+    }
+
+    private fun showDecorationActions(decoration: Map<*, *>, label: String) {
+        SelectDialog().apply {
+            title = label
+            items = arrayOf("Use", "Delete")
+            onResultListener = { which ->
+                if (which == 0) {
+                    if (decoration["reviewed"] == false) {
+                        Utils.showToast("This decoration is still pending review")
+                    } else {
+                        plugin.setSelectedAsset(FakeDecor.decorationAsset(decoration))
+                        assetInput?.setText(plugin.getSelectedAsset())
+                        Utils.showToast("Decoration applied")
+                    }
                 } else {
-                    plugin.setSelectedAsset(FakeDecor.decorationAsset(valid[checked]))
-                    assetInput?.setText(plugin.getSelectedAsset())
-                    dialog.dismiss()
-                    Utils.showToast("Decoration applied")
+                    confirmDelete(decoration["hash"]?.toString())
                 }
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                val hash = valid[checked]["hash"]?.toString() ?: return@setOnClickListener
-                AlertDialog
-                    .Builder(requireContext())
-                    .setTitle("Delete decoration?")
-                    .setMessage("This removes the decoration from your Decor account.")
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Delete") { _, _ ->
-                        plugin.deleteDecoration(hash)
-                        dialog.dismiss()
-                    }.show()
-            }
-        }
-        dialog.show()
+        }.show(Utils.appActivity.supportFragmentManager, "FakeDecorOwnActions")
+    }
+
+    private fun confirmDelete(hash: String?) {
+        if (hash == null) return
+        val dialog = ConfirmDialog()
+        dialog
+            .setTitle("Delete decoration?")
+            .setDescription("This removes the decoration from your Decor account.")
+            .setIsDangerous(true)
+            .setOnOkListener {
+                plugin.deleteDecoration(hash)
+                dialog.dismiss()
+            }.show(Utils.appActivity.supportFragmentManager, "FakeDecorDelete")
     }
 
     private fun section(title: String) {
@@ -274,59 +250,6 @@ class FakeDecorSettings(
         add(row)
     }
 
-    private data class DecorPreset(
-        val asset: String,
-        val title: String,
-        val collection: String,
-    )
-
-    private inner class PresetAdapter(private val items: List<DecorPreset>) : BaseAdapter() {
-        override fun getCount() = items.size
-
-        override fun getItem(position: Int) = items[position]
-
-        override fun getItemId(position: Int) = position.toLong()
-
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val row = convertView as? LinearLayout ?: LinearLayout(parent.context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(DimenUtils.dpToPx(16), DimenUtils.dpToPx(8), DimenUtils.dpToPx(16), DimenUtils.dpToPx(8))
-                val image = SimpleDraweeView(context).apply {
-                    hierarchy.n(`ScalingUtils$ScaleType`.e)
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                    setBackgroundColor(ColorCompat.getThemedColor(context, R.b.colorBackgroundSecondary))
-                }
-                addView(image, LinearLayout.LayoutParams(DimenUtils.dpToPx(72), DimenUtils.dpToPx(72)))
-                val labels = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-                val title = TextView(context, null, 0, R.i.UiKit_Settings_Item_Label).apply {
-                    background = null
-                    setPadding(0, 0, 0, 0)
-                }
-                val collection = TextView(context, null, 0, R.i.UiKit_Settings_Item_SubText).apply {
-                    background = null
-                    setPadding(0, DimenUtils.dpToPx(2), 0, 0)
-                }
-                labels.addView(title, LinearLayout.LayoutParams(-1, -2))
-                labels.addView(collection, LinearLayout.LayoutParams(-1, -2))
-                addView(labels, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = DimenUtils.dpToPx(12) })
-                tag = PresetRow(image, title, collection)
-            }
-            val holder = row.tag as PresetRow
-            val item = getItem(position)
-            holder.title.text = item.title
-            holder.collection.text = item.collection
-            holder.image.setImageURI(Uri.parse(FakeDecor.assetUrl(item.asset, false)))
-            return row
-        }
-    }
-
-    private data class PresetRow(
-        val image: SimpleDraweeView,
-        val title: TextView,
-        val collection: TextView,
-    )
-
     private fun divider() {
         add(View(requireContext(), null, 0, R.i.UiKit_Settings_Divider), DimenUtils.dpToPx(1))
     }
@@ -337,14 +260,8 @@ class FakeDecorSettings(
 
     override fun onDestroyView() {
         boundSettingsView = null
-        presetDialog?.dismiss()
-        presetDialog = null
         assetInput = null
         authorizationStatus = null
         super.onDestroyView()
-    }
-
-    companion object {
-        private const val PICK_DECORATION = 4831
     }
 }

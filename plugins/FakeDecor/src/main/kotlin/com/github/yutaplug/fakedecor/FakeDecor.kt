@@ -83,6 +83,7 @@ class FakeDecor : Plugin() {
     @Volatile private var running = false
 
     init {
+        instance = this
         settingsTab = SettingsTab(FakeDecorSettings::class.java, SettingsTab.Type.PAGE).withArgs(settings, this)
     }
 
@@ -878,6 +879,9 @@ class FakeDecor : Plugin() {
     private data class CachedDecoration(val asset: String?, val fetchedAt: Long = System.currentTimeMillis())
 
     companion object {
+        // Lets the picker fragment reach the plugin after the settings page that opened it is gone.
+        @Volatile var instance: FakeDecor? = null
+
         private const val API_URL = "https://decor.fieryflames.dev/api"
         private const val CDN_URL = "https://ugc.decor.fieryflames.dev"
         private const val FETCH_COOLDOWN = 4L * 60 * 60 * 1000
