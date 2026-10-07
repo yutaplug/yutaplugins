@@ -35,7 +35,10 @@ class FontPickerFragment : Fragment() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_CODE) return
         val uri = data?.data
-        if (resultCode == Activity.RESULT_OK && uri != null) FallbackFont.instance?.onFontPicked(uri)
+        val slot = arguments?.getString(ARG_SLOT)?.let { name -> FontSlot.values().firstOrNull { it.name == name } }
+        if (resultCode == Activity.RESULT_OK && uri != null && slot != null) {
+            FallbackFont.instance?.onFontPicked(slot, uri)
+        }
         removeSelf()
     }
 
@@ -48,11 +51,13 @@ class FontPickerFragment : Fragment() {
     companion object {
         private const val REQUEST_CODE = 4833
         private const val TAG = "FallbackFont.FontPicker"
+        private const val ARG_SLOT = "slot"
 
-        fun open(activity: FragmentActivity) {
+        fun open(activity: FragmentActivity, slot: FontSlot) {
             val manager = activity.supportFragmentManager
             if (manager.findFragmentByTag(TAG) != null) return
-            manager.beginTransaction().add(FontPickerFragment(), TAG).commitAllowingStateLoss()
+            val fragment = FontPickerFragment().apply { arguments = Bundle().apply { putString(ARG_SLOT, slot.name) } }
+            manager.beginTransaction().add(fragment, TAG).commitAllowingStateLoss()
         }
     }
 }

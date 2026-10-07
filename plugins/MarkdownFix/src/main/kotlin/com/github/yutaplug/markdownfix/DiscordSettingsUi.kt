@@ -4,7 +4,6 @@ import android.content.Context
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
-import android.view.View
 import android.widget.TextView
 import com.aliucord.Utils
 import com.discord.utilities.color.ColorCompat
@@ -16,15 +15,6 @@ internal object DiscordSettingsUi {
     fun text(context: Context) = TextView(context, null, 0, R.i.UiKit_TextView).apply {
         setTextColor(color(context, "colorTextNormal"))
     }
-
-    fun header(context: Context, value: String) =
-        TextView(context, null, 0, R.i.UiKit_Settings_Item_Header).apply {
-            text = value
-            setTextColor(color(context, "colorHeaderSecondary"))
-            setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 8))
-            isAllCaps = true
-            background = null
-        }
 
     /**
      * Discord's dialog text field: the `view_input_modal_text_no_suggestions` layout used by
@@ -51,11 +41,6 @@ internal object DiscordSettingsUi {
     }
 
     fun color(context: Context, name: String): Int = ColorCompat.getThemedColor(context, Utils.getResId(name, "attr"))
-
-    fun divider(context: Context) = View(context).apply {
-        setBackgroundColor(color(context, "colorBackgroundModifierAccent"))
-        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-    }
 
     fun dp(context: Context, value: Int) = (value * context.resources.displayMetrics.density + 0.5f).toInt()
 }

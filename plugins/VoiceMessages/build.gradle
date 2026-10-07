@@ -1,9 +1,12 @@
-version = "1.1.14"
+version = "1.1.15"
 description = "Send Voice Messages"
 
 aliucord {
     changelog.set(
         """
+        # 1.1.15
+        * Fix a possible crash when detecting the format of audio files
+        * Use Discord's native settings rows, headers and dividers
         # 1.1.14
         * Another redesign
         * Added cooldown when hold to record is enabled to avoid accidental taps

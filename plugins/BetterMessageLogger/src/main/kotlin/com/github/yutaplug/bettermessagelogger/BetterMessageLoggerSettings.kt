@@ -10,6 +10,7 @@ import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.aliucord.api.SettingsAPI
+import com.aliucord.fragments.ConfirmDialog
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.Utils
 import com.discord.views.CheckedSetting
@@ -39,7 +40,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
             BetterMessageLogger.instance?.setDatabaseEnabled(it)
             updateStorage()
         }
-        storageCaption = ui.caption("").also(storage::addView)
+        storageCaption = ui.note("").also(storage::addView)
         toggle(
             storage,
             Keys.KEEP_MEDIA,
@@ -98,10 +99,10 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         listRow(filters, IdLists.BLOCKED_DMS, "Blocked DMs")
         listRow(filters, IdLists.ALLOWED_DMS, "Allowed DMs")
         filters.addView(
-            ui.caption(
+            ui.note(
                 "Long-press a server, channel or DM to add it. Non-empty allow lists limit logging to their " +
                     "entries; block lists take priority.",
-            ).apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), 0) },
+            ),
         )
         updateColors()
         updateStorage()
@@ -154,15 +155,16 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
     }
 
     private fun confirmClear() {
-        showDialog(
-            DiscordDialog(requireContext(), "Clear saved logs?", destructive = true)
-                .message("Saved messages, edit history and media will be deleted. Exported TXT files are kept.")
-                .negative("Cancel")
-                .positive("Clear") {
-                    BetterMessageLogger.instance?.clearDatabase { if (storageCaption != null) updateStorage() }
-                    true
-                },
-        )
+        dialog?.dismiss()
+        val confirm = ConfirmDialog()
+        confirm
+            .setTitle("Clear saved logs?")
+            .setDescription("Saved messages, edit history and media will be deleted. Exported TXT files are kept.")
+            .setIsDangerous(true)
+            .setOnOkListener {
+                BetterMessageLogger.instance?.clearDatabase { if (storageCaption != null) updateStorage() }
+                confirm.dismiss()
+            }.show(Utils.appActivity.supportFragmentManager, "BetterMessageLoggerClear")
     }
 
     private fun idDialog(key: String, title: String) {

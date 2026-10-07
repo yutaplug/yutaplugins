@@ -984,8 +984,11 @@ class VoiceMessages : Plugin() {
         fun matches(
             offset: Int,
             value: String,
-        ) = count >= offset + value.length &&
-            value.indices.all { header[offset + it].toInt() == value[it].code }
+        ): Boolean {
+            if (count < offset + value.length) return false
+            for (i in 0 until value.length) if (header[offset + i].toInt() != value[i].code) return false
+            return true
+        }
         val format =
             when {
                 matches(0, "OggS") -> {

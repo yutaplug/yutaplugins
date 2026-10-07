@@ -15,6 +15,7 @@ import com.aliucord.Utils
 import com.discord.utilities.color.ColorCompat
 import com.discord.utilities.drawable.DrawableCompat
 import com.discord.views.CheckedSetting
+import com.lytefast.flexinput.R
 
 /** Shared, theme-aware spacing and surfaces for settings, filters and history. */
 internal class LoggerUi(val context: Context) {
@@ -72,15 +73,29 @@ internal class LoggerUi(val context: Context) {
 
     /** Discord's full-width settings divider. */
     fun divider(parent: LinearLayout) {
-        parent.addView(DiscordSettingsUi.divider(context), LinearLayout.LayoutParams(-1, dp(1)))
+        parent.addView(View(context, null, 0, R.i.UiKit_Settings_Divider), LinearLayout.LayoutParams(-1, dp(1)))
     }
 
     fun header(parent: LinearLayout, title: String) {
-        parent.addView(DiscordSettingsUi.header(context, title))
+        parent.addView(
+            TextView(context, null, 0, R.i.UiKit_Settings_Item_Header).apply {
+                text = title
+                background = null
+                setPaddingRelative(paddingStart, paddingTop, paddingEnd, 0)
+            },
+        )
     }
 
+    /** Small muted text for dialogs. */
     fun caption(value: CharSequence) = text(value, 12f, muted).apply {
         setPadding(dp(16), dp(2), dp(16), dp(8))
+    }
+
+    /** Discord's settings sub-text, for descriptions on the settings page. */
+    fun note(value: CharSequence) = TextView(context, null, 0, R.i.UiKit_Settings_Item_SubText).apply {
+        text = value
+        background = null
+        setPaddingRelative(paddingStart, dp(4), paddingEnd, dp(8))
     }
 
     fun switch(title: String, subtitle: String?, checked: Boolean, changed: (Boolean) -> Unit): CheckedSetting =
@@ -90,50 +105,39 @@ internal class LoggerUi(val context: Context) {
         }
 
     /**
-     * A single-line settings row: icon, title and an optional trailing value, sized like Discord's
-     * icon rows. Returns the value view so callers can update it.
+     * A settings row built like Discord's own: a `UiKit_Settings_Item_Icon` label with an optional
+     * icon, and an optional `UiKit_Settings_Item_Compound_Right` value, as in Account settings.
+     * Returns the value view so callers can update it.
      */
     fun row(
         parent: LinearLayout,
         title: String,
         value: CharSequence? = null,
         iconName: String? = null,
-        color: Int = normal,
+        color: Int? = null,
         click: () -> Unit,
     ): TextView {
         val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(48)
-            setPadding(dp(16), dp(4), dp(16), dp(4))
             isFocusable = true
             selectable(this)
             setOnClickListener { click() }
         }
-        iconName?.let { name ->
-            val res = Utils.getResId(name, "drawable")
+        val label = TextView(context, null, 0, R.i.UiKit_Settings_Item_Icon).apply {
+            text = title
+            background = null
+            if (color != null) setTextColor(color)
+            val res = iconName?.let { Utils.getResId(it, "drawable") } ?: 0
             if (res != 0) {
-                row.addView(
-                    ImageView(context).apply {
-                        setImageDrawable(DrawableCompat.getDrawable(context, res, if (color == normal) icon else color))
-                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                    },
-                    LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(24) },
-                )
+                val drawable = DrawableCompat.getDrawable(context, res, color ?: icon)
+                setCompoundDrawablesRelativeWithIntrinsicBounds(drawable, null, null, null)
             }
         }
-        row.addView(
-            text(title, 16f, color).apply {
-                setSingleLine(true)
-                ellipsize = TextUtils.TruncateAt.END
-            },
-            LinearLayout.LayoutParams(0, -2, 1f),
-        )
-        val trailing = text(value ?: "", 14f, muted).apply {
-            setSingleLine(true)
-            ellipsize = TextUtils.TruncateAt.END
-            gravity = Gravity.END
-            maxWidth = dp(160)
-            setPadding(dp(12), 0, 0, 0)
+        row.addView(label, LinearLayout.LayoutParams(0, -2, 1f))
+        // Wrap the value so a swatch drawable stays next to its text instead of at the start of the free space.
+        val trailing = TextView(context, null, 0, R.i.UiKit_Settings_Item_Compound_Right).apply {
+            text = value ?: ""
             visibility = if (value == null) View.GONE else View.VISIBLE
         }
         row.addView(trailing, LinearLayout.LayoutParams(-2, -2))

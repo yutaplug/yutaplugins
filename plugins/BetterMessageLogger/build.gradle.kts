@@ -1,9 +1,12 @@
-version = "1.0.25"
+version = "1.0.26"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.26
+        * Use Aliucord's themed confirmation dialog when clearing saved logs
+        * Use Discord's native settings rows, headers and dividers
         # 1.0.25
         * Make media options disabled by default
         * Add .nomedia to the media folder

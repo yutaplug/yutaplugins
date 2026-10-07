@@ -65,12 +65,21 @@ internal class GifEncoder(
             green[key] += (pixel ushr 8) and 255
             blue[key] += pixel and 255
         }
-        val colours = counts.indices.filter { counts[it] > 0 }.toIntArray()
+        var used = 0
+        for (i in 0 until counts.size) if (counts[i] > 0) used++
+        val colours = IntArray(used)
+        used = 0
+        for (i in 0 until counts.size) if (counts[i] > 0) colours[used++] = i
         val boxes = ArrayList<ColourBox>()
         boxes.add(ColourBox(colours, counts))
         while (boxes.size < 256) {
-            val splitIndex = boxes.indices.filter { boxes[it].colours.size > 1 }.maxByOrNull { boxes[it].priority }
-                ?: break
+            var splitIndex = -1
+            for (i in 0 until boxes.size) {
+                if (boxes[i].colours.size > 1 && (splitIndex < 0 || boxes[i].priority > boxes[splitIndex].priority)) {
+                    splitIndex = i
+                }
+            }
+            if (splitIndex < 0) break
             val box = boxes.removeAt(splitIndex)
             val buckets = IntArray(32)
             box.colours.forEach { buckets[component(it, box.channel)]++ }

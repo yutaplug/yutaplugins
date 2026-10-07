@@ -79,16 +79,48 @@ class TranslateMessages : Plugin() {
             refreshChat()
         }
 
+    /** One of [SERVICE_GOOGLE], [SERVICE_DEEPL] or [SERVICE_LIBRE]. */
+    var serviceId: String
+        // Before the service picker existed, a filled-in API URL meant LibreTranslate.
+        get() = settings.getString(KEY_SERVICE, null) ?: if (apiUrl.isNotEmpty()) SERVICE_LIBRE else SERVICE_GOOGLE
+        set(value) {
+            settings.setString(KEY_SERVICE, value)
+            serviceChanged()
+        }
+
     var apiUrl: String
         get() = settings.getString(KEY_API_URL, "").trim()
         set(value) {
             settings.setString(KEY_API_URL, value.trim())
-            translations.clear()
+            serviceChanged()
         }
 
     var apiKey: String
         get() = settings.getString(KEY_API_KEY, "").trim()
-        set(value) = settings.setString(KEY_API_KEY, value.trim())
+        set(value) {
+            settings.setString(KEY_API_KEY, value.trim())
+            failed.clear()
+        }
+
+    var deeplKey: String
+        get() = settings.getString(KEY_DEEPL_KEY, "").trim()
+        set(value) {
+            settings.setString(KEY_DEEPL_KEY, value.trim())
+            failed.clear()
+        }
+
+    private val service: Translator.Service
+        get() = when (serviceId) {
+            SERVICE_DEEPL -> Translator.Service.DeepL(deeplKey)
+            SERVICE_LIBRE -> Translator.Service.Libre(apiUrl, apiKey)
+            else -> Translator.Service.Google
+        }
+
+    private fun serviceChanged() {
+        translations.clear()
+        failed.clear()
+        refreshChat()
+    }
 
     override fun start(context: Context) {
         executor = Executors.newFixedThreadPool(2)
@@ -135,12 +167,13 @@ class TranslateMessages : Plugin() {
                 DraweeSpanStringBuilder::class.java,
             ),
             PreHook { call ->
-                if (rendering.get() == null) return@PreHook
+                val translation = rendering.get() ?: return@PreHook
                 val builder = call.args[0] as DraweeSpanStringBuilder
                 val view = call.thisObject as View
                 // Styled like Discord's "(edited)" tag.
                 val start = builder.length
-                builder.append(" (translated)")
+                val source = translation.source?.let { "${Languages.displayCode(it)} → " }.orEmpty()
+                builder.append(" (translated $source${Languages.displayCode(translation.target)})")
                 builder.setSpan(RelativeSizeSpan(0.75f), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 builder.setSpan(
                     ForegroundColorSpan(ColorCompat.getThemedColor(view.context, R.b.colorTextMuted)),
@@ -221,11 +254,10 @@ class TranslateMessages : Plugin() {
         val pool = executor ?: return
         if (!pending.add(messageId)) return
         val target = targetLanguage
-        val url = apiUrl
-        val key = apiKey
+        val service = service
         pool.execute {
             try {
-                val result = Translator.translate(content, target, url, key)
+                val result = Translator.translate(content, target, service)
                 val alreadyTarget = Languages.same(result.sourceLanguage, target) || result.text == content
                 translations[messageId] = Translation(content, target, result.text, result.sourceLanguage, show && !alreadyTarget)
                 Utils.mainThread.post {
@@ -238,7 +270,12 @@ class TranslateMessages : Plugin() {
             } catch (e: Throwable) {
                 logger.error("Failed to translate message $messageId", e)
                 if (!manual) failed += messageId
-                if (manual) Utils.mainThread.post { Utils.showToast("Translation failed") }
+                if (manual) {
+                    val reason = (e as? Translator.TranslationException)?.message
+                    Utils.mainThread.post {
+                        Utils.showToast(if (reason != null) "Translation failed: $reason" else "Translation failed")
+                    }
+                }
             } finally {
                 pending.remove(messageId)
             }
@@ -263,6 +300,12 @@ class TranslateMessages : Plugin() {
         private const val KEY_LANGUAGE = "targetLanguage"
         private const val KEY_AUTO = "autoTranslate"
         private const val KEY_AUTO_OWN = "autoTranslateOwn"
+        private const val KEY_SERVICE = "service"
+        private const val KEY_DEEPL_KEY = "deeplKey"
+
+        const val SERVICE_GOOGLE = "google"
+        const val SERVICE_DEEPL = "deepl"
+        const val SERVICE_LIBRE = "libre"
         private const val KEY_API_URL = "apiUrl"
         private const val KEY_API_KEY = "apiKey"
     }

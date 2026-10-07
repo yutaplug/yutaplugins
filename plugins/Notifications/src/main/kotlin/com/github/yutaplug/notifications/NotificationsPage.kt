@@ -2,7 +2,6 @@ package com.github.yutaplug.notifications
 
 import android.os.Handler
 import android.os.Looper
-import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -10,7 +9,6 @@ import android.widget.TextView
 import com.aliucord.Utils
 import com.discord.app.AppFragment
 import com.discord.stores.StoreStream
-import com.discord.utilities.color.ColorCompat
 import com.discord.views.CheckedSetting
 import com.lytefast.flexinput.R
 import rx.Subscription
@@ -171,20 +169,15 @@ internal class NotificationsPage(
     private fun heading(body: LinearLayout, title: String, first: Boolean = false) {
         if (!first) {
             body.addView(
-                View(requireContext()).apply {
-                    setBackgroundColor(color("colorBackgroundModifierAccent"))
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                },
+                View(requireContext(), null, 0, R.i.UiKit_Settings_Divider),
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)),
             )
         }
         body.addView(
             TextView(requireContext(), null, 0, R.i.UiKit_Settings_Item_Header).apply {
                 text = title
-                setTextColor(color("colorHeaderSecondary"))
-                setPadding(dp(16), dp(16), dp(16), dp(8))
-                isAllCaps = true
                 background = null
+                setPaddingRelative(paddingStart, paddingTop, paddingEnd, 0)
             },
         )
     }
@@ -208,16 +201,15 @@ internal class NotificationsPage(
         }
     }
 
-    private fun caption(value: String): TextView = TextView(requireContext(), null, 0, R.i.UiKit_TextView).apply {
+    /** Discord's settings sub-text. */
+    private fun caption(value: String): TextView = TextView(requireContext(), null, 0, R.i.UiKit_Settings_Item_SubText).apply {
         text = value
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        setTextColor(color("colorTextMuted"))
-        setPadding(dp(16), dp(4), dp(16), dp(8))
+        background = null
+        setPaddingRelative(paddingStart, dp(4), paddingEnd, dp(8))
         layoutParams =
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
-    private fun color(attribute: String) = ColorCompat.getThemedColor(requireContext(), Utils.getResId(attribute, "attr"))
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 

@@ -18,34 +18,137 @@ import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.MessageEntry
 import java.lang.ref.WeakReference
+import java.util.Collections
 import java.util.WeakHashMap
 
-/** Makes outgoing messages appear immediately without chat-list animations. */
+/** Makes outgoing messages appear immediately, optionally without grey text or chat animations. */
 @AliucordPlugin
 class InstantMessages : Plugin() {
-    private class DeferredData(var data: WidgetChatListAdapter.Data, val callback: Runnable)
+    private class Deferred(var data: WidgetChatListAdapter.Data, val callback: Runnable)
 
-    private val deferredData = WeakHashMap<WidgetChatListAdapter, DeferredData>()
-    private val itemAnimators = WeakHashMap<RecyclerView, RecyclerView.ItemAnimator?>()
-    private val textAlphas = WeakHashMap<SimpleDraweeSpanTextView, Float>()
-    private var applyingDeferredAdapter: WidgetChatListAdapter? = null
+    private val deferred = WeakHashMap<WidgetChatListAdapter, Deferred>()
+    private var applyingDeferred: WidgetChatListAdapter? = null
+
+    /** Discord's original animator for every chat recycler whose animator we removed. */
+    private val animators = WeakHashMap<RecyclerView, RecyclerView.ItemAnimator?>()
+
+    /** Pending-message text views whose grey alpha we removed. */
+    private val brightenedViews: MutableSet<SimpleDraweeSpanTextView> =
+        Collections.newSetFromMap(WeakHashMap())
+
+    val greyPending get() = settings.getBool(GREY_PENDING, false)
+    val removeAnimations get() = settings.getBool(REMOVE_ANIMATIONS, true)
+
+    init {
+        settingsTab = SettingsTab(InstantMessagesSettings::class.java, SettingsTab.Type.BOTTOM_SHEET)
+            .withArgs(this)
+    }
 
     override fun start(context: Context) {
-        // These classes do not exist before Android 11.
+        patchChatList()
+        patchAdapter()
+        patchPendingText()
+        // WindowInsetsAnimation does not exist before Android 11.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) patchKeyboardAnimation()
+    }
 
-        val disableAnimations = Hook { frame ->
-            val chatList = frame.thisObject as WidgetChatList
-            val adapter = WidgetChatList.`access$getAdapter$p`(chatList)
-            if (adapter != null) {
-                disableItemAnimations(adapter.recycler)
-                // onResume saves the current animator, which we may already have disabled.
-                // Preserve Discord's default so subsequent enable calls still work after stop.
-                ReflectUtils.setField(chatList, "defaultItemAnimator", itemAnimators[adapter.recycler])
-            }
+    override fun stop(context: Context) {
+        for ((adapter, entry) in deferred.entries.toList()) {
+            adapter.recycler.removeCallbacks(entry.callback)
+            applyDeferred(adapter)
         }
-        patcher.patch(WidgetChatList::class.java, "onViewBoundOrOnResume", hook = disableAnimations)
-        patcher.patch(WidgetChatList::class.java, "enableItemAnimations", hook = disableAnimations)
+        deferred.clear()
+        applyingDeferred = null
+        patcher.unpatchAll()
+        restoreAnimations()
+        restoreGrey()
+    }
+
+    // region Settings
+
+    fun setGreyPending(enabled: Boolean) {
+        settings.setBool(GREY_PENDING, enabled)
+        if (enabled) restoreGrey()
+    }
+
+    fun setRemoveAnimations(enabled: Boolean) {
+        settings.setBool(REMOVE_ANIMATIONS, enabled)
+        // When enabled, the next chat update removes the animator.
+        if (!enabled) restoreAnimations()
+    }
+
+    // endregion
+
+    // region Animations
+
+    private fun patchChatList() {
+        val hook = Hook { frame ->
+            if (!removeAnimations) return@Hook
+            val chatList = frame.thisObject as WidgetChatList
+            val adapter = WidgetChatList.`access$getAdapter$p`(chatList) ?: return@Hook
+            val recycler = adapter.recycler
+            disableAnimations(recycler)
+            // onViewBoundOrOnResume stores the recycler's current animator, which may already be
+            // null. Keep Discord's original so enableItemAnimations still works after we restore.
+            animators[recycler]?.let { ReflectUtils.setField(chatList, "defaultItemAnimator", it) }
+        }
+        patcher.patch(WidgetChatList::class.java, "onViewBoundOrOnResume", hook = hook)
+        patcher.patch(WidgetChatList::class.java, "enableItemAnimations", hook = hook)
+    }
+
+    private fun patchKeyboardAnimation() {
+        // Returning the bounds without starting the callback makes the chat jump with the keyboard.
+        patcher.patch(
+            SmoothKeyboardReactionHelper.Callback::class.java,
+            "onStart",
+            arrayOf(WindowInsetsAnimation::class.java, WindowInsetsAnimation.Bounds::class.java),
+            PreHook { frame -> if (removeAnimations) frame.result = frame.args[1] },
+        )
+    }
+
+    private fun disableAnimations(recycler: RecyclerView) {
+        val current = recycler.itemAnimator ?: return
+        if (animators[recycler] == null) animators[recycler] = current
+        recycler.itemAnimator = null
+    }
+
+    private fun restoreAnimations() {
+        for ((recycler, animator) in animators) {
+            if (recycler.itemAnimator == null) recycler.itemAnimator = animator
+        }
+        animators.clear()
+    }
+
+    // endregion
+
+    // region Pending text
+
+    private fun patchPendingText() {
+        patcher.patch(
+            WidgetChatListAdapterItemMessage::class.java,
+            "processMessageText",
+            arrayOf(SimpleDraweeSpanTextView::class.java, MessageEntry::class.java),
+            Hook { frame ->
+                val view = frame.args[0] as SimpleDraweeSpanTextView
+                // Discord sets the alpha on every bind, including when a row is recycled.
+                brightenedViews.remove(view)
+                if (greyPending || !isPending((frame.args[1] as MessageEntry).message)) return@Hook
+                view.alpha = 1f
+                brightenedViews.add(view)
+            },
+        )
+    }
+
+    private fun restoreGrey() {
+        for (view in brightenedViews) view.alpha = PENDING_ALPHA
+        brightenedViews.clear()
+    }
+
+    // endregion
+
+    // region Chat updates
+
+    private fun patchAdapter() {
         patcher.patch(
             WidgetChatListAdapter::class.java,
             "setData",
@@ -53,158 +156,110 @@ class InstantMessages : Plugin() {
             PreHook { frame ->
                 val adapter = frame.thisObject as WidgetChatListAdapter
                 val data = frame.args[0] as WidgetChatListAdapter.Data
-                disableItemAnimations(adapter.recycler)
-                if (applyingDeferredAdapter !== adapter && deferTransientUpdate(adapter, data)) {
+                if (removeAnimations) disableAnimations(adapter.recycler)
+                if (applyingDeferred !== adapter && defer(adapter, data)) {
                     frame.result = null
                 } else {
-                    keepNewOutgoingMessageAtBottom(adapter, data)
-                }
-            },
-        )
-        patcher.patch(
-            WidgetChatListAdapterItemMessage::class.java,
-            "processMessageText",
-            arrayOf(SimpleDraweeSpanTextView::class.java, MessageEntry::class.java),
-            Hook { frame ->
-                val view = frame.args[0] as SimpleDraweeSpanTextView
-                val message = (frame.args[1] as MessageEntry).message
-                // Discord resets alpha during binding, including when a row is recycled.
-                textAlphas.remove(view)
-                if (isPending(message)) {
-                    textAlphas[view] = view.alpha
-                    view.alpha = 1f
+                    scrollToNewOutgoing(adapter, data)
                 }
             },
         )
     }
 
-    private fun patchKeyboardAnimation() {
-        patcher.patch(
-            SmoothKeyboardReactionHelper.Callback::class.java,
-            "onStart",
-            arrayOf(WindowInsetsAnimation::class.java, WindowInsetsAnimation.Bounds::class.java),
-            PreHook { frame -> frame.result = frame.args[1] },
-        )
-    }
-
-    private fun disableItemAnimations(recycler: RecyclerView) {
-        if (!itemAnimators.containsKey(recycler) || recycler.itemAnimator != null) {
-            itemAnimators[recycler] = recycler.itemAnimator
-        }
-        recycler.itemAnimator = null
-    }
-
-    private fun keepNewOutgoingMessageAtBottom(
-        adapter: WidgetChatListAdapter,
-        data: WidgetChatListAdapter.Data,
-    ) {
-        val current = adapter.data
-        // Initial binding and channel switches should preserve Discord's chosen position.
-        if (current.channelId != data.channelId) return
-        val messages = messages(data.list)
-        val previous = messages(current.list)
-        val previousIds = previous.mapTo(HashSet()) { it.id }
-        val previousNonces = previous.mapNotNullTo(HashSet()) { it.nonce }
-        val newest = messages.firstOrNull() ?: return
-        val newPending = messages.any {
-            isPending(it) && it.author?.id == data.userId &&
-                it.id !in previousIds && (it.nonce == null || it.nonce !in previousNonces)
-        }
-        val newAcknowledged = !newest.isLocal && newest.author?.id == data.userId &&
-            newest.id !in previousIds && (newest.nonce == null || newest.nonce !in previousNonces) &&
-            previous.firstOrNull()?.let { newest.id > it.id } == true
-        if (!newPending && !newAcknowledged) return
-        val layoutManager = adapter.layoutManager ?: return
-        adapter.recycler.stopScroll()
-        layoutManager.scrollToPositionWithOffset(0, 0)
-    }
-
-    private fun deferTransientUpdate(
-        adapter: WidgetChatListAdapter,
-        incoming: WidgetChatListAdapter.Data,
-    ): Boolean {
+    /**
+     * While a message is acknowledged Discord briefly shows both the pending and the sent copy,
+     * or neither. Hold such updates back so the message never flickers or jumps.
+     */
+    private fun defer(adapter: WidgetChatListAdapter, incoming: WidgetChatListAdapter.Data): Boolean {
         val current = adapter.data
         if (current.channelId != incoming.channelId || current.userId != incoming.userId) {
-            cancelDeferredData(adapter)
+            cancelDeferred(adapter)
             return false
         }
         val incomingMessages = messages(incoming.list)
-        val currentPending = messages(current.list).filter { isPending(it) }
+        val currentPending = messages(current.list).filter(::isPending)
         val transient = incomingMessages.any { pending ->
             isPending(pending) && incomingMessages.any { !it.isLocal && sameMessage(it, pending) }
         } || currentPending.any { pending -> incomingMessages.none { sameMessage(it, pending) } }
-        // Never hide a newly sent message behind an older acknowledgement transition.
+        // Never hide a newly sent message behind an older acknowledgement.
         val newPending = incomingMessages.any { pending ->
             isPending(pending) && currentPending.none { sameMessage(it, pending) }
         }
         if (!transient || newPending) {
-            cancelDeferredData(adapter)
+            cancelDeferred(adapter)
             return false
         }
 
-        val existing = deferredData[adapter]
-        if (existing != null) {
-            // Update the payload without extending the original deadline.
-            existing.data = incoming
+        deferred[adapter]?.let {
+            // Replace the payload without extending the original deadline.
+            it.data = incoming
             return true
         }
         val reference = WeakReference(adapter)
-        val callback = Runnable { reference.get()?.let(::applyDeferredData) }
-        deferredData[adapter] = DeferredData(incoming, callback)
-        if (!adapter.recycler.postDelayed(callback, TRANSIENT_DATA_DELAY_MS)) {
-            deferredData.remove(adapter)
+        val callback = Runnable { reference.get()?.let(::applyDeferred) }
+        deferred[adapter] = Deferred(incoming, callback)
+        if (!adapter.recycler.postDelayed(callback, DEFER_MS)) {
+            deferred.remove(adapter)
             return false
         }
         return true
     }
 
-    private fun applyDeferredData(adapter: WidgetChatListAdapter) {
-        val deferred = deferredData.remove(adapter) ?: return
-        if (adapter.data.channelId != deferred.data.channelId || adapter.data.userId != deferred.data.userId) return
-        applyingDeferredAdapter = adapter
+    private fun applyDeferred(adapter: WidgetChatListAdapter) {
+        val entry = deferred.remove(adapter) ?: return
+        val data = entry.data
+        if (adapter.data.channelId != data.channelId || adapter.data.userId != data.userId) return
+        applyingDeferred = adapter
         try {
-            adapter.setData(deferred.data)
+            adapter.setData(data)
         } finally {
-            applyingDeferredAdapter = null
+            applyingDeferred = null
         }
     }
 
-    private fun cancelDeferredData(adapter: WidgetChatListAdapter) {
-        val deferred = deferredData.remove(adapter) ?: return
-        adapter.recycler.removeCallbacks(deferred.callback)
+    private fun cancelDeferred(adapter: WidgetChatListAdapter) {
+        val entry = deferred.remove(adapter) ?: return
+        adapter.recycler.removeCallbacks(entry.callback)
     }
+
+    private fun scrollToNewOutgoing(adapter: WidgetChatListAdapter, data: WidgetChatListAdapter.Data) {
+        val current = adapter.data
+        // Initial binds and channel switches keep Discord's chosen position.
+        if (current.channelId != data.channelId) return
+        val messages = messages(data.list)
+        val previous = messages(current.list)
+        val previousIds = previous.mapTo(HashSet()) { it.id }
+        val previousNonces = previous.mapNotNullTo(HashSet()) { it.nonce }
+        fun isNewOwn(message: Message) = message.author?.id == data.userId &&
+            message.id !in previousIds && (message.nonce == null || message.nonce !in previousNonces)
+
+        val newest = messages.firstOrNull() ?: return
+        val newPending = messages.any { isPending(it) && isNewOwn(it) }
+        val newSent = !newest.isLocal && isNewOwn(newest) &&
+            previous.firstOrNull()?.let { newest.id > it.id } == true
+        if (!newPending && !newSent) return
+        val layoutManager = adapter.layoutManager ?: return
+        adapter.recycler.stopScroll()
+        layoutManager.scrollToPositionWithOffset(0, 0)
+    }
+
+    // endregion
 
     private fun messages(entries: List<ChatListEntry>): List<Message> =
         entries.mapNotNull { (it as? MessageEntry)?.message }
 
-    private fun isPending(message: Message): Boolean = message.type == PENDING_MESSAGE_TYPE
+    private fun isPending(message: Message) = message.type == PENDING_TYPE
 
-    // Nonces are Discord's acknowledgement identity. Text and timestamps are ambiguous,
-    // especially for repeated messages, attachments, and stickers.
-    private fun sameMessage(candidate: Message, target: Message): Boolean =
+    // Nonces identify acknowledgements; text and timestamps are ambiguous for repeated messages.
+    private fun sameMessage(candidate: Message, target: Message) =
         candidate.channelId == target.channelId &&
             (candidate.id == target.id || (target.nonce != null && target.nonce == candidate.nonce))
 
-    override fun stop(context: Context) {
-        for ((adapter, deferred) in deferredData.entries.map { it.key to it.value }) {
-            adapter.recycler.removeCallbacks(deferred.callback)
-            applyDeferredData(adapter)
-        }
-        deferredData.clear()
-        applyingDeferredAdapter = null
-        patcher.unpatchAll()
-        for ((recycler, animator) in itemAnimators) {
-            if (recycler.itemAnimator == null) recycler.itemAnimator = animator
-        }
-        itemAnimators.clear()
-        for ((view, alpha) in textAlphas) {
-            if (view.alpha == 1f) view.alpha = alpha
-        }
-        textAlphas.clear()
-    }
-
-    private companion object {
-        const val PENDING_MESSAGE_TYPE = -1
-        const val TRANSIENT_DATA_DELAY_MS = 500L
+    companion object {
+        const val GREY_PENDING = "greyPending"
+        const val REMOVE_ANIMATIONS = "removeAnimations"
+        private const val PENDING_TYPE = -1
+        private const val PENDING_ALPHA = 0.5f
+        private const val DEFER_MS = 500L
     }
 }

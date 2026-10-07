@@ -1,8 +1,11 @@
-version = "1.0.6"
+version = "1.0.7"
 description = "Set a custom Rich Presence from Aliucord settings."
 aliucord {
     changelog.set(
         """
+        # 1.0.7
+        * Use Aliucord's themed dialogs for activity type and activity flags
+        * Rebuild settings with Discord's native rows, headers, dividers and text inputs
         # 1.0.6
         * Redesign
         # 1.0.5

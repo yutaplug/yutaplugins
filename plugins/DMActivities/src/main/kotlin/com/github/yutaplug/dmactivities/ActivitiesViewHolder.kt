@@ -181,7 +181,23 @@ class ActivitiesViewHolder(
                 else -> emoji.visibility = View.GONE
             }
 
-            if (activity != null) {
+            val voice = data.voice
+            if (voice != null) {
+                status.visibility = View.GONE
+                smallAvatar.visibility = View.VISIBLE
+                MGImages.setImage(smallAvatar, IconUtils.getForUser(data.user, true, dpToPx(24)))
+                if (voice.guildIcon != null) {
+                    clipRounded(image, circle = false)
+                    MGImages.setImage(image, voice.guildIcon)
+                } else {
+                    // DM calls and servers without an icon show the friend instead.
+                    clipRounded(image, circle = true)
+                    MGImages.setImage(image, IconUtils.getForUser(data.user, true, dpToPx(72)))
+                }
+                subtitle.text = voiceSubtitle(voice)
+                subtitle.visibility = View.VISIBLE
+                bindVoiceIcon(voice)
+            } else if (activity != null) {
                 status.visibility = View.GONE
                 smallAvatar.visibility = View.VISIBLE
                 MGImages.setImage(smallAvatar, IconUtils.getForUser(data.user, true, dpToPx(24)))
@@ -225,6 +241,24 @@ class ActivitiesViewHolder(
         fun unbind() {
             appSubscription?.unsubscribe()
             appSubscription = null
+        }
+
+        private fun voiceSubtitle(voice: DMActivities.VoiceInfo): String {
+            val guild = voice.guildName ?: return "In a call"
+            val channel = voice.channelName ?: return "In voice · $guild"
+            return "$channel · $guild"
+        }
+
+        private fun bindVoiceIcon(voice: DMActivities.VoiceInfo) {
+            val context = itemView.context
+            typeIcon.visibility = View.VISIBLE
+            if (voice.streaming) {
+                typeIcon.setImageResource(Utils.getResId("ic_call_indicator_streaming_16dp", "drawable"))
+                typeIcon.clearColorFilter()
+            } else {
+                typeIcon.setImageResource(Utils.getResId("ic_channel_voice", "drawable"))
+                typeIcon.setColorFilter(ColorCompat.getColor(context, Utils.getResId("status_green_600", "color")))
+            }
         }
 
         private fun subtitleFor(activity: Activity): String =

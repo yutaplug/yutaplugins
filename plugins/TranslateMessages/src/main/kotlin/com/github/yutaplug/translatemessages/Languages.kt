@@ -60,6 +60,12 @@ object Languages {
 
     fun name(code: String): String = all.firstOrNull { it.first == code }?.second ?: code
 
+    /** A language name followed by its code, e.g. "German (DE)". */
+    fun label(code: String): String = "${name(code)} (${displayCode(code)})"
+
+    /** Codes are shown in upper case, as services report them in different cases. */
+    fun displayCode(code: String): String = code.uppercase()
+
     /** The device language when it is supported, otherwise English. */
     fun deviceDefault(): String {
         val locale = Locale.getDefault()
@@ -73,6 +79,17 @@ object Languages {
         }
         return if (all.any { it.first == code }) code else "en"
     }
+
+    /** DeepL's target code for a language; DeepL needs regional variants for English, Portuguese and Chinese. */
+    fun deepLTarget(code: String): String =
+        when (code) {
+            "en" -> "EN-US"
+            "pt" -> "PT-BR"
+            "zh-CN" -> "ZH-HANS"
+            "zh-TW" -> "ZH-HANT"
+            "no" -> "NB"
+            else -> code.uppercase()
+        }
 
     /** Whether a detected source language is the same language as [target]. */
     fun same(source: String?, target: String): Boolean {

@@ -21,6 +21,7 @@ import com.aliucord.api.SettingsAPI
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.Utils
 import com.discord.views.CheckedSetting
+import com.lytefast.flexinput.R
 import java.util.Locale
 
 class VoiceSettings(private val settings: SettingsAPI) : SettingsPage() {
@@ -119,25 +120,27 @@ class VoiceSettings(private val settings: SettingsAPI) : SettingsPage() {
         }
     }
 
-    /** A single-line row with a color swatch and hex value at the end. */
+    /**
+     * A settings row built like Discord's Account settings: a `Compound_Left` label and a
+     * `Compound_Right` value showing the color swatch and hex code.
+     */
     private fun colorSetting(parent: LinearLayout, key: String, title: String, defaultColor: Int): View {
         val context = requireContext()
         val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(48)
-            setPadding(dp(16), dp(4), dp(16), dp(4))
             isFocusable = true
             selectable(this)
         }
         row.addView(
-            text(title, 16f, themeColor(context, "colorTextNormal", Color.WHITE)).apply { setSingleLine(true) },
+            TextView(context, null, 0, R.i.UiKit_Settings_Item_Compound_Left).apply { text = title },
             LinearLayout.LayoutParams(0, -2, 1f),
         )
-        val value = text("", 14f, muted()).apply {
-            setSingleLine(true)
+        // Wrap the value so its swatch stays next to the hex code instead of at the start of the free space.
+        val value = TextView(context, null, 0, R.i.UiKit_Settings_Item_Compound_Right).apply {
             compoundDrawablePadding = dp(8)
         }
-        row.addView(value)
+        row.addView(value, LinearLayout.LayoutParams(-2, -2))
 
         fun update() {
             val color = savedColor(key, defaultColor)
@@ -313,14 +316,6 @@ class VoiceSettings(private val settings: SettingsAPI) : SettingsPage() {
             view.background = ContextCompat.getDrawable(view.context, value.resourceId)
         }
     }
-
-    private fun text(value: String, size: Float, color: Int): TextView = DiscordSettingsUi.text(requireContext()).apply {
-        text = value
-        textSize = size
-        setTextColor(color)
-    }
-
-    private fun muted() = themeColor(requireContext(), "colorTextMuted", Color.LTGRAY)
 
     private fun savedColor(key: String, default: Int) =
         settings.getInt(key, default).let { if (Color.alpha(it) == 0) default else it }

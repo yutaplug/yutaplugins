@@ -81,7 +81,7 @@ class ServerDiscovery : Plugin() {
             setColor(backgroundColor)
         }
         val button = FrameLayout(context).apply {
-            background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), circle, null)
+            background = RippleDrawable(ColorStateList.valueOf(rippleColor(context)), circle, null)
         }
         discoveryRow.addView(button, FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER))
         button.addView(

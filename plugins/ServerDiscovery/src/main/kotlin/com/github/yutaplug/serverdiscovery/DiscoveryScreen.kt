@@ -71,7 +71,7 @@ internal class DiscoveryScreen(
     private val secondary = color("colorBackgroundSecondary", 0xFF2B2D31.toInt())
     private val normal = color("colorTextNormal", 0xFFF2F3F5.toInt())
     private val muted = color("colorTextMuted", 0xFFB5BAC1.toInt())
-    private val brand = 0xFF5865F2.toInt()
+    private val brand = color("color_brand", 0xFF5865F2.toInt())
     private val categories = mutableListOf(Category(null, "Home"))
     private var selectedCategory: Int? = null
     private var query = ""
@@ -520,7 +520,7 @@ internal class DiscoveryScreen(
             if (viewType == 0) return object : RecyclerView.ViewHolder(createHero()) {}
             val root = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                background = RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), rounded(secondary, 12), null)
+                background = RippleDrawable(ColorStateList.valueOf(rippleColor(context)), rounded(secondary, 12), null)
                 clipToOutline = true
                 layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                     setMargins(dp(16), 0, dp(16), dp(16))

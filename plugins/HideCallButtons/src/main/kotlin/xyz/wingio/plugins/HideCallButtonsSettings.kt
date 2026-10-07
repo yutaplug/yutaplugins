@@ -10,7 +10,6 @@ import com.discord.views.CheckedSetting
 class HideCallButtonsSettings(private val settings: SettingsAPI) : BottomSheet() {
     override fun onViewCreated(view: View, bundle: Bundle?) {
         super.onViewCreated(view, bundle)
-        linearLayout.setPadding(20, 20, 20, 20)
         addSetting(
             HideCallButtons.HIDE_DM_TOPBAR,
             "Hide DM top-bar call buttons",

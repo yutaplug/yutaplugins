@@ -1,7 +1,9 @@
-version = "1.0.6"
+version = "1.0.7"
 description = "Forward messages to your channel of your liking."
 aliucord {
     changelog.set("""
+        # 1.0.7
+        * Fix possible crashes when opening the message menu and sorting favorites
         # 1.0.6
         * Kotlin rewrite
         # 1.0.5

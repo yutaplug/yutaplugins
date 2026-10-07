@@ -1,16 +1,13 @@
 package com.github.yutaplug.recentprofilepictures
 
 import android.content.Context
-import android.graphics.Color
-import android.view.View
-import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import b.a.y.b0
 import b.a.y.c0
 import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
+import com.aliucord.fragments.ConfirmDialog
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.aliucord.utils.GsonUtils
@@ -26,7 +23,7 @@ class RecentProfilePictures : Plugin() {
     private val editorClass = WidgetEditUserOrGuildMemberProfile::class.java
     private val originalMenus = Collections.synchronizedMap(WeakHashMap<Any, List<c0>>())
     private val openSheets = Collections.newSetFromMap(WeakHashMap<b0, Boolean>())
-    private val openDialogs = Collections.newSetFromMap(WeakHashMap<AlertDialog, Boolean>())
+    private val openDialogs = Collections.newSetFromMap(WeakHashMap<ConfirmDialog, Boolean>())
 
     @Volatile private var running = false
 
@@ -208,19 +205,15 @@ class RecentProfilePictures : Plugin() {
     }
 
     private fun confirmRecentAvatar(editor: WidgetEditUserOrGuildMemberProfile, avatarId: String) {
-        val dialog = AlertDialog
-            .Builder(editor.requireContext())
+        val dialog = ConfirmDialog()
+        dialog
             .setTitle("Change profile picture?")
-            .setMessage("Your profile picture will be changed to the selected recent avatar.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Change") { _, _ -> selectRecentAvatar(editor, avatarId) }
-            .create()
-        dialog.setOnShowListener {
-            dialog.findViewById<TextView>(androidx.appcompat.R.id.alertTitle)?.setTextColor(Color.WHITE)
-            dialog.findViewById<TextView>(android.R.id.message)?.setTextColor(Color.WHITE)
-        }
+            .setDescription("Your profile picture will be changed to the selected recent avatar.")
+            .setOnOkListener {
+                dialog.dismiss()
+                selectRecentAvatar(editor, avatarId)
+            }.show(Utils.appActivity.supportFragmentManager, "RecentProfilePicturesConfirm")
         openDialogs.add(dialog)
-        dialog.show()
     }
 
     private fun selectRecentAvatar(editor: WidgetEditUserOrGuildMemberProfile, avatarId: String) {
@@ -257,7 +250,7 @@ class RecentProfilePictures : Plugin() {
         running = false
         openSheets.toList().forEach { it.dismissAllowingStateLoss() }
         openSheets.clear()
-        openDialogs.toList().forEach { it.dismiss() }
+        openDialogs.toList().forEach { if (it.isAdded) it.dismissAllowingStateLoss() }
         openDialogs.clear()
         synchronized(originalMenus) {
             for ((menu, options) in originalMenus) {

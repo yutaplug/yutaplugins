@@ -14,9 +14,11 @@ import android.widget.SeekBar
 import android.widget.TextView
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
+import com.aliucord.fragments.ConfirmDialog
 import com.aliucord.fragments.SettingsPage
 import com.discord.utilities.drawable.DrawableCompat
 import com.discord.views.CheckedSetting
+import com.lytefast.flexinput.R
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -63,8 +65,10 @@ class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin:
         divider()
         row("Reset appearance", "ic_refresh_white_a60_24dp", ::confirmReset)
         addView(
-            text("Changes apply to visible messages immediately.", 12f, "colorTextMuted").apply {
-                setPadding(dp(16), dp(4), dp(16), 0)
+            TextView(requireContext(), null, 0, R.i.UiKit_Settings_Item_SubText).apply {
+                text = "Changes apply to visible messages immediately."
+                background = null
+                setPaddingRelative(paddingStart, dp(4), paddingEnd, dp(8))
             },
         )
         updateUi()
@@ -177,22 +181,27 @@ class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin:
 
     private fun confirmReset() {
         activeDialog?.dismiss()
-        activeDialog = DiscordDialog(requireContext(), "Reset appearance?", destructive = true)
-            .message("All text sizes and the bullet color return to their defaults.")
-            .negative("Cancel")
-            .positive("Reset") {
+        activeDialog = null
+        val confirm = ConfirmDialog()
+        confirm
+            .setTitle("Reset appearance?")
+            .setDescription("All text sizes and the bullet color return to their defaults.")
+            .setIsDangerous(true)
+            .setOnOkListener {
                 reset()
-                true
-            }.show()
+                confirm.dismiss()
+            }.show(Utils.appActivity.supportFragmentManager, "MarkdownFixReset")
     }
 
-    /** A single-line row sized like Discord's settings rows, with a trailing value. */
+    /**
+     * A settings row built like Discord's own: a `UiKit_Settings_Item_Icon` label with an optional
+     * icon, and a `UiKit_Settings_Item_Compound_Right` value, as in Account settings.
+     */
     private fun row(title: String, icon: String? = null, action: () -> Unit): Pair<LinearLayout, TextView> {
         val context = requireContext()
         val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(48)
-            setPadding(dp(16), dp(4), dp(16), dp(4))
             isFocusable = true
             val attribute = TypedValue()
             if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, attribute, true) &&
@@ -202,38 +211,38 @@ class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin:
             }
             setOnClickListener { if (isEnabled) action() }
         }
-        icon?.let { Utils.getResId(it, "drawable") }?.takeIf { it != 0 }?.let { res ->
-            row.addView(
-                ImageView(context).apply {
-                    setImageDrawable(
-                        DrawableCompat.getDrawable(context, res, color("colorInteractiveNormal", Color.LTGRAY)),
-                    )
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                },
-                LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(24) },
-            )
-        }
         row.addView(
-            text(title, 16f, "colorTextNormal").apply { setSingleLine(true) },
+            TextView(context, null, 0, R.i.UiKit_Settings_Item_Icon).apply {
+                text = title
+                background = null
+                val res = icon?.let { Utils.getResId(it, "drawable") } ?: 0
+                if (res != 0) {
+                    val drawable = DrawableCompat.getDrawable(context, res, color("colorInteractiveNormal", Color.LTGRAY))
+                    setCompoundDrawablesRelativeWithIntrinsicBounds(drawable, null, null, null)
+                }
+            },
             LinearLayout.LayoutParams(0, -2, 1f),
         )
-        val value = text("", 14f, "colorTextMuted").apply {
-            setSingleLine(true)
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, 0, 0)
-        }
-        row.addView(value)
+        // Wrap the value so the bullet swatch stays next to its text instead of at the start of the free space.
+        val value = TextView(context, null, 0, R.i.UiKit_Settings_Item_Compound_Right)
+        row.addView(value, LinearLayout.LayoutParams(-2, -2))
         addView(row)
         return row to value
     }
 
     private fun header(title: String, first: Boolean = false) {
         if (!first) divider()
-        addView(DiscordSettingsUi.header(requireContext(), title))
+        addView(
+            TextView(requireContext(), null, 0, R.i.UiKit_Settings_Item_Header).apply {
+                text = title
+                background = null
+                setPaddingRelative(paddingStart, paddingTop, paddingEnd, 0)
+            },
+        )
     }
 
     private fun divider() {
-        linearLayout.addView(DiscordSettingsUi.divider(requireContext()), LinearLayout.LayoutParams(-1, dp(1)))
+        linearLayout.addView(View(requireContext(), null, 0, R.i.UiKit_Settings_Divider), LinearLayout.LayoutParams(-1, dp(1)))
     }
 
     private fun swatch(fill: Int) = GradientDrawable().apply {

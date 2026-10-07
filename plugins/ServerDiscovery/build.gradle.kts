@@ -1,9 +1,12 @@
-version = "1.0.2"
+version = "1.0.3"
 description = "Adds a Server Discovery button to the server list."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.3
+        * Make tap feedback visible on the light theme.
+        * Use the theme's brand color while server banners load.
         # 1.0.2
         * Fix search
         # 1.0.1

@@ -1,9 +1,13 @@
-version = "1.0.5"
+version = "1.0.6"
 description = "Backports community onboarding and Channels & Roles to Discord 126.21."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.6
+        * Use Aliucord's themed dialogs for dropdown questions, the discard prompt and save errors.
+        * Fix a possible crash when searching channels.
+
         # 1.0.5
         * Re-add button to check onboarding
         * Fix twemojis

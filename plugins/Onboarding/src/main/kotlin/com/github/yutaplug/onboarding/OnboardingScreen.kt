@@ -1,7 +1,6 @@
 package com.github.yutaplug.onboarding
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.app.Dialog
 import android.content.res.ColorStateList
 import android.graphics.drawable.ColorDrawable
@@ -34,6 +33,8 @@ import com.discord.views.SearchInputView
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.button.MaterialButton
 import com.aliucord.Utils
+import com.aliucord.fragments.ConfirmDialog
+import com.aliucord.fragments.SelectDialog
 import com.discord.stores.StoreStream
 import com.discord.models.domain.emoji.ModelEmojiCustom
 import com.discord.models.domain.emoji.ModelEmojiUnicode
@@ -408,29 +409,33 @@ internal class OnboardingScreen(
     }
 
     private fun showDropdownChoices(prompt: OnboardingPrompt) {
+        if (prompt.singleSelect) {
+            SelectDialog().apply {
+                title = prompt.title
+                items = prompt.options.map { option ->
+                    // SelectDialog rows are plain text, so only unicode emoji can be shown.
+                    val emoji = option.emojiName.takeIf { option.emojiId == null && it.hasVisibleText() }
+                    val label = option.title.takeIf(String::hasVisibleText) ?: "Answer"
+                    val text = if (emoji != null) "$emoji $label" else label
+                    if (option.id in selected) "$text ✓" else text
+                }.toTypedArray()
+                onResultListener = { which ->
+                    prompt.options.forEach { selected.remove(it.id) }
+                    selected += prompt.options[which].id
+                    render()
+                }
+            }.show(Utils.appActivity.supportFragmentManager, "OnboardingDropdown")
+            return
+        }
         val choices = BooleanArray(prompt.options.size) { prompt.options[it].id in selected }
         val list = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setPadding(dp(8), 0, dp(8), dp(8))
         }
-        var picker: AlertDialog? = null
         prompt.options.forEachIndexed { index, option ->
-            val setting = createSetting(
-                activity,
-                if (prompt.singleSelect) CheckedSetting.ViewType.RADIO else CheckedSetting.ViewType.CHECK,
-                option.title,
-                option.description,
-            )
+            val setting = createSetting(activity, CheckedSetting.ViewType.CHECK, option.title, option.description)
             setting.isChecked = choices[index]
-            setting.setOnCheckedListener { checked ->
-                if (prompt.singleSelect) {
-                    if (!checked) return@setOnCheckedListener
-                    prompt.options.forEach { selected.remove(it.id) }
-                    selected += option.id
-                    picker?.dismiss()
-                    render()
-                } else choices[index] = checked
-            }
+            setting.setOnCheckedListener { checked -> choices[index] = checked }
             val emoji = createEmojiView(option)
             if (emoji == null) {
                 list.addView(setting, LinearLayout.LayoutParams(-1, -2))
@@ -445,25 +450,24 @@ internal class OnboardingScreen(
                 list.addView(row, LinearLayout.LayoutParams(-1, -2))
             }
         }
-        val builder = AlertDialog.Builder(activity)
-            .setTitle(prompt.title)
-            .setView(ScrollView(activity).apply { addView(list) })
-            .setNegativeButton("Cancel", null)
-        if (!prompt.singleSelect) {
-            builder.setPositiveButton("Done") { _, _ ->
-                prompt.options.forEach { selected.remove(it.id) }
-                prompt.options.forEachIndexed { index, option ->
-                    if (choices[index]) selected += option.id
-                }
-                render()
+        lateinit var sheet: ChoicesSheet
+        // Closing the sheet without Done keeps the previous answers, like the old Cancel button.
+        val done = actionButton("Done", true) {
+            prompt.options.forEach { selected.remove(it.id) }
+            prompt.options.forEachIndexed { index, option ->
+                if (choices[index]) selected += option.id
             }
+            render()
+            sheet.dismiss()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(-1, dp(44)).apply { setMargins(dp(16), dp(8), dp(16), dp(16)) }
         }
-        picker = builder.create()
-        picker.show()
+        sheet = ChoicesSheet(prompt.title, listOf(list, done))
+        sheet.show(Utils.appActivity.supportFragmentManager, "OnboardingDropdown")
     }
 
     private fun renderBrowse(data: OnboardingConfig) {
-        if (searchQuery.isBlank()) {
+        if (!searchQuery.hasVisibleText()) {
             content.addView(createSetting(
                 activity,
                 CheckedSetting.ViewType.SWITCH,
@@ -493,7 +497,7 @@ internal class OnboardingScreen(
             val members = groups[categoryId].orEmpty().sortedWith(compareBy(BrowseChannel::position, BrowseChannel::name))
             val heading = categories[categoryId]?.name ?: "Other Channels"
             val visible = members.filter {
-                searchQuery.isBlank() || heading.contains(searchQuery, true) ||
+                !searchQuery.hasVisibleText() || heading.contains(searchQuery, true) ||
                     it.name.contains(searchQuery, true) || it.topic.contains(searchQuery, true)
             }
             if (visible.isEmpty()) return@forEach
@@ -531,7 +535,7 @@ internal class OnboardingScreen(
             content.addView(group, LinearLayout.LayoutParams(-1, -2))
         }
         if (visibleGroups == 0) {
-            label(if (searchQuery.isBlank()) "No channels available to browse." else "No channels match your search.",
+            label(if (!searchQuery.hasVisibleText()) "No channels available to browse." else "No channels match your search.",
                 14f, muted, top = 24)
         }
     }
@@ -717,11 +721,12 @@ internal class OnboardingScreen(
         }
         val state = "Discord reports onboarding enabled: ${data.enabled}" +
             if (data.belowRequirements) "\nServer is below onboarding requirements." else ""
-        AlertDialog.Builder(activity)
+        val error = ConfirmDialog()
+        error
             .setTitle("Could not save onboarding choices")
-            .setMessage("$details\n\n$state")
-            .setPositiveButton("OK", null)
-            .show()
+            .setDescription("$details\n\n$state")
+            .setOnOkListener { error.dismiss() }
+            .show(Utils.appActivity.supportFragmentManager, "OnboardingSaveError")
     }
 
     private fun renderError(error: Throwable) {
@@ -760,11 +765,15 @@ internal class OnboardingScreen(
 
     private fun closeWithConfirmation() {
         if (!initial && selected != saved && !saving) {
-            AlertDialog.Builder(activity)
+            val confirm = ConfirmDialog()
+            confirm
                 .setTitle("Discard your changes?")
-                .setNegativeButton("Keep editing", null)
-                .setPositiveButton("Discard") { _, _ -> dismiss() }
-                .show()
+                .setDescription("Your onboarding choices haven't been saved.")
+                .setIsDangerous(true)
+                .setOnOkListener {
+                    confirm.dismiss()
+                    dismiss()
+                }.show(Utils.appActivity.supportFragmentManager, "OnboardingDiscard")
         } else dismiss()
     }
 

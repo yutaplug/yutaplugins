@@ -1,9 +1,17 @@
-version = "1.0.2"
+version = "1.0.3"
 description = "Recreates Discord desktop's IRC-style compact chat layout."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.3
+        * Fix settings spacing to match Discord's.
+        * Fix extra space above and below replies, and show the replied message on one line like desktop.
+        * Align reactions, embeds, videos, stickers and bot components with the message text.
+        * Lay out system messages like desktop compact mode, with the time and icon on the same line.
+        * Show search results in Discord's regular layout, like desktop.
+        * Keep timestamps clear of the highlight bar on mentions and replies to you.
+        * Support MessageLatency's indicator before the author name.
         # 1.0.2
         * Make it more like desktop-style and fix spacing issues.
         # 1.0.1

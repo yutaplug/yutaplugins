@@ -113,7 +113,7 @@ class ForwardMessages : Plugin() {
                             TextViewCompat.getCompoundDrawableTintList(reply),
                         )
                     }
-                    val index = (0 until layout.childCount).firstOrNull { layout.getChildAt(it).id == replyId }
+                    val index = reply?.let { layout.indexOfChild(it) }?.takeIf { it >= 0 }
                     layout.addView(this, index?.plus(1) ?: minOf(5, layout.childCount))
                     forwardButtons.add(this)
                 }
@@ -459,7 +459,8 @@ class ForwardMessages : Plugin() {
             val id = getChannelId(value)
             if (id in favorites) favoriteItems[id] = value else remaining += value
         }
-        val indexes = remaining.indices.filter { getChannelId(remaining[it]) != 0L }
+        val indexes = ArrayList<Int>()
+        for (i in 0 until remaining.size) if (getChannelId(remaining[i]) != 0L) indexes += i
         val sorted = indexes.map { remaining[it] }.sortedBy { originalPositions[getChannelId(it)] ?: Int.MAX_VALUE }
         indexes.forEachIndexed { index, position -> remaining[position] = sorted[index] }
         var headerCount = 0

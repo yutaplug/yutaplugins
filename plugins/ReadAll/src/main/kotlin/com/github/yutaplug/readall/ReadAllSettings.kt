@@ -11,8 +11,6 @@ class ReadAllSettings(private val settings: SettingsAPI, private val plugin: Rea
     override fun onViewCreated(view: View, bundle: Bundle?) {
         super.onViewCreated(view, bundle)
         val context = requireContext()
-        val padding = (16 * context.resources.displayMetrics.density + 0.5f).toInt()
-        linearLayout.setPadding(padding, padding, padding, padding)
 
         addView(Utils.createCheckedSetting(
             context,

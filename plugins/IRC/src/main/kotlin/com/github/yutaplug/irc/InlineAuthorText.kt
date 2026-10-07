@@ -1,6 +1,7 @@
 package com.github.yutaplug.irc
 
 import android.graphics.Typeface
+import android.text.Annotation
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextPaint
@@ -27,11 +28,21 @@ internal object InlineAuthorText {
             text.removeSpan(previous.link)
             if (start >= 0 && end >= start) text.delete(start, end)
         }
-        text.insert(0, name + SEPARATOR)
+        // Other plugins (like MessageLatency) mark icons that belong before the author with an Annotation.
+        var start = 0
+        for (annotation in text.getSpans(0, text.length, Annotation::class.java)) {
+            if (annotation.key == LEADING_KEY && text.getSpanStart(annotation) == 0) {
+                start = maxOf(start, text.getSpanEnd(annotation))
+            }
+        }
+        text.insert(start, name + SEPARATOR)
         val author = AuthorSpan(name.length, typeface, textSize, color, link)
-        text.setSpan(author, 0, name.length + SEPARATOR.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        text.setSpan(link, 0, name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        text.setSpan(author, start, start + name.length + SEPARATOR.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        text.setSpan(link, start, start + name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
+
+    /** Annotation key for leading content that must stay before the inline author. */
+    const val LEADING_KEY = "ircLeading"
 
     fun find(text: CharSequence): AuthorSpan? =
         (text as? Spanned)?.getSpans(0, text.length, AuthorSpan::class.java)?.firstOrNull()

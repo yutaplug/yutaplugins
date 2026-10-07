@@ -9,15 +9,29 @@ import java.net.URLEncoder
 object Translator {
     class Result(val text: String, val sourceLanguage: String?)
 
+    /** A failure with a short reason worth showing to the user. */
+    class TranslationException(message: String) : Exception(message)
+
+    sealed class Service {
+        object Google : Service()
+
+        class DeepL(val key: String) : Service()
+
+        /** Any LibreTranslate-compatible endpoint; the key is optional. */
+        class Libre(val url: String, val key: String) : Service()
+    }
+
     // Discord tokens and code that translation services would mangle.
     private val protectedPattern = Regex(
         "```[\\s\\S]*?```|`[^`\\n]+`|<a?:\\w+:\\d+>|<(?:@[!&]?|#)\\d+>|<t:-?\\d+(?::[tTdDfFR])?>|https?://\\S+",
     )
 
-    /**
-     * @param apiUrl optional LibreTranslate-compatible endpoint. Google Translate is used when empty.
-     */
-    fun translate(text: String, target: String, apiUrl: String, apiKey: String): Result {
+    fun translate(text: String, target: String, service: Service): Result {
+        when (service) {
+            is Service.DeepL -> if (service.key.isEmpty()) throw TranslationException("add your DeepL API key in settings")
+            is Service.Libre -> if (service.url.isEmpty()) throw TranslationException("add an API URL in settings")
+            Service.Google -> {}
+        }
         var source: String? = null
         val out = StringBuilder()
         var last = 0
@@ -29,7 +43,7 @@ object Translator {
             // Services trim whitespace, so keep the segment's own leading and trailing whitespace.
             val start = segment.indexOfFirst { !Character.isWhitespace(it) }
             val end = segment.indexOfLast { !Character.isWhitespace(it) } + 1
-            val result = request(segment.substring(start, end), target, apiUrl, apiKey)
+            val result = request(segment.substring(start, end), target, service)
             if (source == null) source = result.sourceLanguage
             out.append(segment, 0, start).append(result.text).append(segment, end, segment.length)
         }
@@ -42,8 +56,49 @@ object Translator {
         return Result(out.toString(), source)
     }
 
-    private fun request(text: String, target: String, apiUrl: String, apiKey: String): Result =
-        if (apiUrl.isEmpty()) google(text, target) else libreTranslate(text, target, apiUrl, apiKey)
+    private fun request(text: String, target: String, service: Service): Result =
+        when (service) {
+            Service.Google -> google(text, target)
+            is Service.DeepL -> deepL(text, target, service.key)
+            is Service.Libre -> libreTranslate(text, target, service.url, service.key)
+        }
+
+    private fun deepL(text: String, target: String, key: String): Result {
+        // Free-plan keys end in ":fx" and use a separate host. Try the other host if the key is rejected,
+        // in case a plan uses a host its key suffix does not suggest.
+        val hosts = if (key.endsWith(":fx")) {
+            listOf("https://api-free.deepl.com", "https://api.deepl.com")
+        } else {
+            listOf("https://api.deepl.com", "https://api-free.deepl.com")
+        }
+        val payload = mapOf("text" to listOf(text), "target_lang" to Languages.deepLTarget(target))
+        var status = 0
+        for (host in hosts) {
+            Http.Request("$host/v2/translate", "POST")
+                .setHeader("Authorization", "DeepL-Auth-Key $key")
+                .executeWithJson(payload)
+                .use { response ->
+                    status = response.statusCode
+                    if (response.ok()) {
+                        val translation = JSONObject(response.text()).getJSONArray("translations").getJSONObject(0)
+                        return Result(
+                            translation.getString("text"),
+                            translation.optString("detected_source_language").takeIf { it.isNotEmpty() },
+                        )
+                    }
+                }
+            if (status != 403) break
+        }
+        throw TranslationException(
+            when (status) {
+                403 -> "DeepL rejected the API key"
+                456 -> "DeepL character limit reached"
+                429 -> "too many requests, try again later"
+                400 -> "DeepL doesn't support ${Languages.name(target)}"
+                else -> "DeepL error $status"
+            },
+        )
+    }
 
     private fun google(text: String, target: String): Result {
         val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&dt=t" +

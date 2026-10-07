@@ -34,6 +34,8 @@ import com.discord.widgets.chat.list.actions.WidgetChatListActions
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemReactions
+import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemSystemMessage
+import com.discord.widgets.search.results.WidgetSearchResults
 import com.discord.widgets.chat.list.adapter.WidgetChatListItem
 import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.MessageEntry
@@ -57,6 +59,8 @@ class IRC : Plugin() {
     private val messageTexts = WeakHashMap<SimpleDraweeSpanTextView, TextBinding>()
     private val chatGuidelines = WeakHashMap<Guideline, Boolean>()
     private val compactReactionViews = WeakHashMap<ReactionView, Boolean>()
+    private val fixedStarts = WeakHashMap<View, Boolean>()
+    private val systemRows = WeakHashMap<View, SystemRow>()
     private val adapterField by lazy {
         MGRecyclerViewHolder::class.java.getDeclaredField("adapter").apply { isAccessible = true }
     }
@@ -84,6 +88,10 @@ class IRC : Plugin() {
     private var guidelineId = 0
     private var reactionContainerId = 0
     private var quickAddReactionId = 0
+    private var systemTextId = 0
+    private var systemTimestampId = 0
+    private var systemIconId = 0
+    private var systemAutomodIconId = 0
     private var avatarDecorationId: Int? = null
     private var timestampWidthPx = 0
 
@@ -112,28 +120,137 @@ class IRC : Plugin() {
         guidelineId = Utils.getResId("uikit_chat_guideline", "id")
         reactionContainerId = Utils.getResId("chat_list_item_reactions", "id")
         quickAddReactionId = Utils.getResId("reaction_quick_add", "id")
+        systemTextId = Utils.getResId("system_text", "id")
+        systemTimestampId = Utils.getResId("system_timestamp", "id")
+        systemIconId = Utils.getResId("system_icon", "id")
+        systemAutomodIconId = Utils.getResId("system_icon_automod", "id")
         avatarDecorationId = findAvatarDecorationId()
         patchEmojiSize()
         patchInlineAuthors()
         patchProfileAction()
 
         val configureArgs = arrayOf(Int::class.javaPrimitiveType!!, ChatListEntry::class.java)
-        // Attachments and embeds use the same leading column as message text.
+        // Attachments, embeds, reactions and stickers use the same leading column as message text.
         patcher.patch(WidgetChatListItem::class.java, "onConfigure", configureArgs, Hook { frame ->
             val item = frame.thisObject as? WidgetChatListItem ?: return@Hook
-            if (item !is WidgetChatListAdapterItemMessage) updateGuideline(item.itemView)
+            if (item is WidgetChatListAdapterItemMessage || isSearch(item)) return@Hook
+            updateGuideline(item.itemView)
+            alignFixedStarts(item.itemView)
+        })
+        // Patched separately: the base hook runs before the subclass sets its readable timestamp.
+        patcher.patch(WidgetChatListAdapterItemSystemMessage::class.java, "onConfigure", configureArgs, Hook { frame ->
+            val item = frame.thisObject as? WidgetChatListAdapterItemSystemMessage ?: return@Hook
+            if (isSearch(item)) return@Hook
+            (item.itemView as? ConstraintLayout)?.let { configureSystem(it, frame.args[1] as? MessageEntry) }
         })
         patcher.patch(WidgetChatListAdapterItemMessage::class.java, "onConfigure", configureArgs, Hook { frame ->
             val item = frame.thisObject as? WidgetChatListAdapterItemMessage ?: return@Hook
+            if (isSearch(item)) return@Hook
             val entry = frame.args[1] as? MessageEntry ?: return@Hook
             configureMessage(item, entry)
         })
         patcher.patch(WidgetChatListAdapterItemReactions::class.java, "onConfigure", configureArgs, Hook { frame ->
             val item = frame.thisObject as? WidgetChatListAdapterItemReactions ?: return@Hook
+            if (isSearch(item)) return@Hook
             val container = item.itemView.findViewById<View>(reactionContainerId) as? ViewGroup ?: return@Hook
             compactReactions(container)
             container.post { if (container.parent != null) compactReactions(container) }
         })
+    }
+
+    /** Search results keep Discord's regular layout, as on desktop. */
+    private fun isSearch(holder: Any): Boolean {
+        val adapter = runCatching { adapterField.get(holder) }.getOrNull() as? WidgetChatListAdapter ?: return false
+        return adapter.eventHandler is WidgetSearchResults.SearchResultAdapterEventHandler
+    }
+
+    /**
+     * Embeds, reactions, stickers, bot components and AutoMod cards start at a fixed
+     * `uikit_guideline_chat` margin instead of the guideline, so move them to the text column.
+     */
+    private fun alignFixedStarts(root: View) {
+        val default = root.resources.getDimensionPixelSize(Utils.getResId("uikit_guideline_chat", "dimen"))
+        alignStart(root, default)
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) alignStart(root.getChildAt(i), default)
+        }
+    }
+
+    private fun alignStart(view: View, default: Int) {
+        val params = view.layoutParams as? ViewGroup.MarginLayoutParams ?: return
+        if (fixedStarts[view] == null && params.marginStart != default) return
+        fixedStarts[view] = true
+        val start = bodyStartDp(view.context)
+        if (params.marginStart != start) {
+            params.marginStart = start
+            view.layoutParams = params
+        }
+    }
+
+    /** Lays system messages out like desktop compact mode: `time  icon  text`. */
+    private fun configureSystem(root: ConstraintLayout, entry: MessageEntry?) {
+        val timestamp = root.findViewById<View>(systemTimestampId) as? TextView ?: return
+        val state = systemRows[root] ?: createSystemRow(root, timestamp)?.also { systemRows[root] = it } ?: return
+        root.setPadding(0, 0, root.paddingEnd, 0)
+        root.findViewById<View>(threadSpineId)?.visibility = View.GONE
+        entry?.let { setShortTimestamp(timestamp, it) }
+        updateSystemRow(state)
+    }
+
+    private fun createSystemRow(root: ConstraintLayout, timestamp: TextView): SystemRow? {
+        val text = root.findViewById<View>(systemTextId) as? TextView ?: return null
+        val column = text.parent as? LinearLayout ?: return null
+        val context = root.context
+        val row = createRow(context)
+        detach(timestamp)
+        timestamp.gravity = Gravity.TOP or Gravity.END
+        timestamp.setPadding(0, 0, dp(context, TIMESTAMP_END_PADDING_DP), 0)
+        (timestamp.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = 0
+        row.addView(timestamp, LinearLayout.LayoutParams(timestampColumnWidth(context), WRAP_CONTENT))
+        val lead = Space(context)
+        row.addView(lead, LinearLayout.LayoutParams(0, 0))
+        val icons = listOfNotNull(
+            root.findViewById<View>(systemIconId) as? ImageView,
+            root.findViewById<View>(systemAutomodIconId) as? ImageView,
+        )
+        for (icon in icons) {
+            detach(icon)
+            row.addView(icon, LinearLayout.LayoutParams(dp(context, SYSTEM_ICON_SIZE_DP), dp(context, SYSTEM_ICON_SIZE_DP)).apply {
+                leftMargin = dp(context, NAME_GAP_DP)
+            })
+        }
+        detach(column)
+        // Align the row on the message text so the timestamp shares its baseline.
+        column.baselineAlignedChildIndex = column.indexOfChild(text)
+        row.addView(column, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+            leftMargin = dp(context, SYSTEM_ICON_GAP_DP)
+            rightMargin = dp(context, BODY_GAP_DP)
+            bottomMargin = dp(context, BODY_BOTTOM_PADDING_DP)
+        })
+        root.addView(row, ConstraintLayout.LayoutParams(0, WRAP_CONTENT).apply {
+            startToStart = PARENT_ID
+            endToEnd = PARENT_ID
+            topToTop = PARENT_ID
+        })
+        return SystemRow(row, lead, icons, timestamp, text)
+    }
+
+    private fun updateSystemRow(state: SystemRow) {
+        val context = state.row.context
+        state.timestamp.layoutParams = state.timestamp.layoutParams.apply { width = timestampColumnWidth(context) }
+        // With avatars shown, the icon sits where the author name starts.
+        val leadWidth = if (showAvatars()) dp(context, AVATAR_GAP_DP + AVATAR_SIZE_DP) else 0
+        state.lead.layoutParams = state.lead.layoutParams.apply { width = leadWidth }
+        val iconSize = dp(context, SYSTEM_ICON_SIZE_DP)
+        val top = ((state.text.lineHeight - iconSize) / 2).coerceAtLeast(0)
+        for (icon in state.icons) {
+            (icon.layoutParams as? LinearLayout.LayoutParams)?.let {
+                if (it.topMargin != top) {
+                    it.topMargin = top
+                    icon.layoutParams = it
+                }
+            }
+        }
     }
 
     private fun patchEmojiSize() {
@@ -142,6 +259,7 @@ class IRC : Plugin() {
             "getMessagePreprocessor",
             arrayOf(Long::class.javaPrimitiveType!!, Message::class.java, StoreMessageState.State::class.java),
             Hook { frame ->
+                if (isSearch(frame.thisObject)) return@Hook
                 val preprocessor = frame.result as? MessagePreprocessor ?: return@Hook
                 jumboEmojiField.setBoolean(preprocessor, false)
             },
@@ -182,6 +300,10 @@ class IRC : Plugin() {
         val processArgs = arrayOf(SimpleDraweeSpanTextView::class.java, MessageEntry::class.java)
         patcher.patch(WidgetChatListAdapterItemMessage::class.java, "processMessageText", processArgs, PreHook { frame ->
             val text = frame.args[0] as SimpleDraweeSpanTextView
+            if (isSearch(frame.thisObject)) {
+                messageTexts.remove(text)
+                return@PreHook
+            }
             messageTexts[text] = TextBinding(
                 WeakReference(frame.thisObject as WidgetChatListAdapterItemMessage),
                 frame.args[1] as MessageEntry,
@@ -299,6 +421,8 @@ class IRC : Plugin() {
         val leading = root.findViewById<View>(replyLeadingId) as? LinearLayout ?: return
         leading.gravity = Gravity.CENTER_VERTICAL
         val content = root.findViewById<View>(replyContentId) as? TextView ?: return
+        // Desktop compact shows the replied message on one line.
+        content.maxLines = 1
         val text = content.text as? Spannable ?: return
         if (text.isEmpty()) return
         leading.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
@@ -357,7 +481,8 @@ class IRC : Plugin() {
         detach(messageText)
         prepareMessageText(messageText)
         val space = Space(root.context)
-        row.addView(space, LinearLayout.LayoutParams(bodyStartDp(root.context), WRAP_CONTENT))
+        // The row's start padding already covers the inset.
+        row.addView(space, LinearLayout.LayoutParams(bodyStartDp(root.context) - rowInset(root.context), WRAP_CONTENT))
         addBodyViews(root, row, messageText, 0)
         return attachRow(root, row, spine, space, null)
     }
@@ -422,7 +547,7 @@ class IRC : Plugin() {
             }
         } else {
             val params = state.leadingCell.layoutParams
-            val width = bodyStartDp(context)
+            val width = bodyStartDp(context) - rowInset(context)
             val height = if (showAvatars()) dp(context, AVATAR_SIZE_DP) else 0
             if (params.width != width || params.height != height) {
                 params.width = width
@@ -440,6 +565,8 @@ class IRC : Plugin() {
 
     internal fun refreshAvatarLayout() {
         for (guideline in chatGuidelines.keys) guideline.setGuidelineBegin(bodyStartDp(guideline.context))
+        for (view in fixedStarts.keys.toList()) alignStart(view, 0)
+        for (state in systemRows.values) updateSystemRow(state)
         for ((item, state) in rows) {
             val root = item.itemView as? ConstraintLayout ?: continue
             root.minimumHeight = 0
@@ -483,6 +610,11 @@ class IRC : Plugin() {
             params.bottomToTop = NO_CONSTRAINT
             params.marginStart = bodyStartDp(root.context) + dp(root.context, 8)
             params.marginEnd = dp(root.context, 8)
+            // Space the reply like a message row instead of Discord's 4dp margins and 18dp minimum height,
+            // so it sits as close to its neighbours as other lines, as on desktop.
+            params.topMargin = dp(root.context, ROW_VERTICAL_PADDING_DP)
+            params.bottomMargin = dp(root.context, BODY_BOTTOM_PADDING_DP)
+            reply!!.minimumHeight = 0
             root.updateViewLayout(reply, params)
         }
         val spineParams = ConstraintLayout.LayoutParams(
@@ -647,7 +779,7 @@ class IRC : Plugin() {
         clipChildren = false
         clipToPadding = false
         val padding = dp(context, ROW_VERTICAL_PADDING_DP)
-        setPadding(0, padding, 0, padding)
+        setPaddingRelative(rowInset(context), padding, 0, padding)
     }
 
     private fun bodyParams(context: Context, margin: Int) = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
@@ -676,11 +808,14 @@ class IRC : Plugin() {
         return timestampWidthPx
     }
 
-    private fun bodyStartDp(context: Context) = timestampColumnWidth(context) + dp(
+    private fun bodyStartDp(context: Context) = rowInset(context) + timestampColumnWidth(context) + dp(
         context, NAME_GAP_DP + if (showAvatars()) AVATAR_GAP_DP + AVATAR_SIZE_DP else 0,
     )
 
-    private fun spineStartDp(context: Context) = timestampColumnWidth(context) / 2
+    private fun spineStartDp(context: Context) = rowInset(context) + timestampColumnWidth(context) / 2
+
+    /** Keeps the timestamp clear of the 2dp highlight bar Discord draws on mentions and replies to you. */
+    private fun rowInset(context: Context) = dp(context, ROW_START_INSET_DP)
 
     private fun showAvatars() = settings.getBool(SHOW_AVATARS, false)
 
@@ -715,6 +850,8 @@ class IRC : Plugin() {
         rows.clear()
         messageTexts.clear()
         chatGuidelines.clear()
+        fixedStarts.clear()
+        systemRows.clear()
         patcher.unpatchAll()
     }
 
@@ -724,6 +861,14 @@ class IRC : Plugin() {
         val spine: MessageSpine,
         val leadingCell: View,
         val timestamp: TextView?,
+    )
+
+    private class SystemRow(
+        val row: LinearLayout,
+        val lead: Space,
+        val icons: List<ImageView>,
+        val timestamp: TextView,
+        val text: TextView,
     )
 
     private data class TextBinding(val item: WeakReference<WidgetChatListAdapterItemMessage>, val entry: MessageEntry)
@@ -736,10 +881,13 @@ class IRC : Plugin() {
         private const val AVATAR_GAP_DP = 6
         private const val AVATAR_SIZE_DP = 24
         private const val REPLY_ICON_SIZE_DP = 12
+        private const val SYSTEM_ICON_SIZE_DP = 16
+        private const val SYSTEM_ICON_GAP_DP = 4
         private const val NAME_GAP_DP = 3
         private const val BODY_GAP_DP = 4
         private const val BODY_BOTTOM_PADDING_DP = 2
         private const val ROW_VERTICAL_PADDING_DP = 1
+        private const val ROW_START_INSET_DP = 6
         private const val REACTION_HEIGHT_DP = 20
         private const val REACTION_HORIZONTAL_PADDING_DP = 4
         private const val REACTION_VERTICAL_MARGIN_DP = 2
