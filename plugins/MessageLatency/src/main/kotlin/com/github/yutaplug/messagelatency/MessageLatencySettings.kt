@@ -49,7 +49,8 @@ class MessageLatencySettings(private val plugin: MessageLatency) : SettingsPage(
         switch(
             MessageLatency.KEY_DETECT_KOTLIN,
             "Detect old Discord Android",
-            "Flag users on the old Kotlin-based Discord Android app, which Aliucord is built on.",
+            "Flag users on the old Kotlin-based Discord Android app. Aliucord 2.11 and newer send correct " +
+                "timestamps, so users on them can't be detected.",
             true,
         )
         switch(MessageLatency.KEY_SHOW_MILLIS, "Show milliseconds", "Include milliseconds in the delay.", false)

@@ -182,7 +182,8 @@ class MessageLatency : Plugin() {
         if (ignoreSelf && author.id == StoreStream.getUsers().me.id) return null
 
         var delta = timestampOf(message.id) - timestampOf(nonce)
-        // Old Discord Android clients send nonces about 17 days ahead of the real time.
+        // Old Discord Android clients send nonces about 17 days ahead of the real time. Aliucord 2.11+
+        // replaces NonceGenerator.computeNonce without the offset, so only older Aliucord and stock clients match.
         val kotlin = detectKotlin && -delta >= DISCORD_KT_DELAY - DAY_MS
         if (kotlin) delta += DISCORD_KT_DELAY
         val threshold = thresholdSeconds * 1000L
@@ -203,7 +204,7 @@ class MessageLatency : Plugin() {
                 "This message was sent with a delay of ${format(delta)}."
             }
         }
-        if (kotlin) lines += "User is suspected to be on an old Discord Android client."
+        if (kotlin) lines += "User is suspected to be on an old Discord Android client (or Aliucord before 2.11)."
         return Latency(icon, lines.joinToString("\n"))
     }
 
