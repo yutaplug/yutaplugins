@@ -12,9 +12,11 @@ import androidx.core.widget.NestedScrollView
 import androidx.core.widget.TextViewCompat
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
+import com.aliucord.api.CommandsAPI
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
+import com.discord.api.commands.ApplicationCommandType
 import com.discord.models.message.Message
 import com.discord.stores.StoreStream
 import com.discord.utilities.color.ColorCompat
@@ -187,6 +189,32 @@ class TranslateMessages : Plugin() {
             WidgetChatListActions::class.java.getDeclaredMethod("configureUI", WidgetChatListActions.Model::class.java),
             Hook { call -> configureMenu(call.thisObject as WidgetChatListActions, call.args[0] as WidgetChatListActions.Model) },
         )
+        registerCommand()
+    }
+
+    private fun registerCommand() {
+        val options = listOf(
+            Utils.createCommandOption(
+                ApplicationCommandType.STRING,
+                "language",
+                "Language to translate into",
+                required = true,
+                choices = Languages.all.map { (code, name) -> Utils.createCommandChoice(name, code) },
+            ),
+            Utils.createCommandOption(ApplicationCommandType.STRING, "message", "Message to translate", required = true),
+        )
+        commands.registerCommand("translate", "Translate a message and send it", options) { ctx ->
+            val target = ctx.getRequiredString("language")
+            val content = ctx.getRequiredString("message")
+            try {
+                val result = Translator.translate(content, target, service)
+                CommandsAPI.CommandResult(result.text, null, true)
+            } catch (e: Throwable) {
+                logger.error("Failed to translate outgoing message", e)
+                val reason = (e as? Translator.TranslationException)?.message
+                CommandsAPI.CommandResult(if (reason != null) "Translation failed: $reason" else "Translation failed", null, false)
+            }
+        }
     }
 
     override fun stop(context: Context) {
@@ -245,8 +273,7 @@ class TranslateMessages : Plugin() {
                 setTextColor(copy.textColors)
                 TextViewCompat.setCompoundDrawableTintList(this, TextViewCompat.getCompoundDrawableTintList(copy))
             }
-            val index = layout.indexOfChild(copy)
-            layout.addView(this, if (copy != null && index >= 0) index + 1 else layout.childCount)
+            layout.addView(this)
         }
     }
 
