@@ -1,4 +1,4 @@
-version = "1.0.18"
+version = "1.0.19"
 description = "Backports Discord's newer Markdown formatting to chat messages."
 
 android {
@@ -8,6 +8,8 @@ android {
 aliucord {
     changelog.set(
         """
+        # 1.0.19
+        * Add support for the short date/time timestamp formats (`<t:…:s>` and `<t:…:S>`)
         # 1.0.18
         * Use Aliucord's themed confirmation dialog when resetting appearance
         * Use Discord's native settings rows, headers and dividers

@@ -59,6 +59,7 @@ internal class MarkdownParser(private val settings: SettingsAPI, private val gam
         parser.addRule(GameProfileMentionRule(games))
         parser.addRule(SlashCommandMentionRule())
         parser.addRule(UnicodeEmojiRule(rules.createUnicodeEmojiRule()))
+        parser.addRule(ShortDateTimestampRule())
         parser.addRule(rules.createTimestampRule())
         if (blocks && depth < MAX_BLOCK_DEPTH) {
             parser.addRule(TextBlockRule(HEADER, depth, false))
