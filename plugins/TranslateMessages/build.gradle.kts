@@ -1,8 +1,11 @@
-version = "1.0.3"
+version = "1.1.0"
 description = "Translate messages from the message menu, or automatically, into the language you choose."
 
 aliucord {
     changelog.set("""
+        # 1.1.0
+        * Option to translate your own messages into a chosen language (English by default) right before they are sent.
+
         # 1.0.3
         * Fixed language names in a /translate message, like German, being changed into codes such as "de".
 

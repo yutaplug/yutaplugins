@@ -17,6 +17,7 @@ import com.lytefast.flexinput.R
 
 class TranslateMessagesSettings(private val plugin: TranslateMessages) : SettingsPage() {
     private var languageSubtitle: TextView? = null
+    private var outgoingSubtitle: TextView? = null
     private var serviceSubtitle: TextView? = null
     private var serviceOptions: LinearLayout? = null
 
@@ -26,7 +27,12 @@ class TranslateMessagesSettings(private val plugin: TranslateMessages) : Setting
         setActionBarSubtitle("Message translation")
 
         section("Translation")
-        languageSubtitle = action("Translate to", Languages.label(plugin.targetLanguage)) { pickLanguage() }
+        languageSubtitle = action("Translate to", Languages.label(plugin.targetLanguage)) {
+            pickLanguage("Translate to", plugin.targetLanguage) { code ->
+                plugin.targetLanguage = code
+                languageSubtitle?.text = Languages.label(code)
+            }
+        }
         add(
             Utils
                 .createCheckedSetting(
@@ -51,6 +57,27 @@ class TranslateMessagesSettings(private val plugin: TranslateMessages) : Setting
                     setOnCheckedListener { plugin.autoTranslateOwn = it }
                 },
         )
+
+        divider()
+        section("Outgoing messages")
+        add(
+            Utils
+                .createCheckedSetting(
+                    requireContext(),
+                    CheckedSetting.ViewType.SWITCH,
+                    "Translate my messages before sending",
+                    "Messages typed in the chat box are sent translated",
+                ).apply {
+                    isChecked = plugin.translateOutgoing
+                    setOnCheckedListener { plugin.translateOutgoing = it }
+                },
+        )
+        outgoingSubtitle = action("Send in", Languages.label(plugin.outgoingLanguage)) {
+            pickLanguage("Send in", plugin.outgoingLanguage) { code ->
+                plugin.outgoingLanguage = code
+                outgoingSubtitle?.text = Languages.label(code)
+            }
+        }
 
         divider()
         section("Translation service")
@@ -99,21 +126,16 @@ class TranslateMessagesSettings(private val plugin: TranslateMessages) : Setting
         }
     }
 
-    private fun pickLanguage() {
+    private fun pickLanguage(dialogTitle: String, current: String, onPick: (String) -> Unit) {
         val languages = Languages.all
-        val current = plugin.targetLanguage
         // Aliucord's SelectDialog is built from Discord's themed dialog, unlike a plain AlertDialog.
         SelectDialog().apply {
-            title = "Translate to"
+            title = dialogTitle
             items = languages.map { (code, _) ->
                 val label = Languages.label(code)
                 if (code == current) "$label ✓" else label
             }.toTypedArray()
-            onResultListener = { which ->
-                val code = languages[which].first
-                plugin.targetLanguage = code
-                languageSubtitle?.text = Languages.label(code)
-            }
+            onResultListener = { which -> onPick(languages[which].first) }
         }.show(Utils.appActivity.supportFragmentManager, "TranslateLanguage")
     }
 
@@ -202,6 +224,7 @@ class TranslateMessagesSettings(private val plugin: TranslateMessages) : Setting
 
     override fun onDestroyView() {
         languageSubtitle = null
+        outgoingSubtitle = null
         serviceSubtitle = null
         serviceOptions = null
         super.onDestroyView()
