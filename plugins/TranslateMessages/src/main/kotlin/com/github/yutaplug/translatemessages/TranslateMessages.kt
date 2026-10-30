@@ -16,11 +16,13 @@ import com.aliucord.api.CommandsAPI
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
+import com.aliucord.utils.ReflectUtils
 import com.discord.api.commands.ApplicationCommandType
 import com.discord.models.message.Message
 import com.discord.stores.StoreStream
 import com.discord.utilities.color.ColorCompat
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
+import com.discord.widgets.chat.MessageContent
 import com.discord.widgets.chat.input.autocomplete.ApplicationCommandChoiceAutocompletable
 import com.discord.widgets.chat.input.autocomplete.AutocompleteExtensionsKt
 import com.discord.widgets.chat.list.actions.WidgetChatListActions
@@ -30,6 +32,8 @@ import com.discord.widgets.chat.list.entries.MessageEntry
 import com.facebook.drawee.span.DraweeSpanStringBuilder
 import com.lytefast.flexinput.R
 import java.lang.ref.WeakReference
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -52,6 +56,9 @@ class TranslateMessages : Plugin() {
     private var executor: ExecutorService? = null
     private var adapterRef: WeakReference<WidgetChatListAdapter>? = null
     private val buttonId = View.generateViewId()
+
+    // Chat box sends being replayed with translated text, which must not be translated again.
+    private val resending: MutableSet<Any> = Collections.newSetFromMap(IdentityHashMap())
 
     // Set while Discord renders a message whose translation is shown.
     private val rendering = ThreadLocal<Translation?>()
@@ -82,6 +89,14 @@ class TranslateMessages : Plugin() {
             settings.setBool(KEY_AUTO_OWN, value)
             refreshChat()
         }
+
+    var translateOutgoing: Boolean
+        get() = settings.getBool(KEY_OUTGOING, false)
+        set(value) = settings.setBool(KEY_OUTGOING, value)
+
+    var outgoingLanguage: String
+        get() = settings.getString(KEY_OUTGOING_LANGUAGE, null) ?: "en"
+        set(value) = settings.setString(KEY_OUTGOING_LANGUAGE, value)
 
     /** One of [SERVICE_GOOGLE], [SERVICE_DEEPL] or [SERVICE_LIBRE]. */
     var serviceId: String
@@ -206,7 +221,60 @@ class TranslateMessages : Plugin() {
                 }
             },
         )
+        patchOutgoing()
         registerCommand()
+    }
+
+    /** Translates chat box messages before they are sent, then lets Discord send the translated text. */
+    private fun patchOutgoing() {
+        val chatBoxSend = Class.forName("com.discord.widgets.chat.input.ChatInputViewModel\$sendMessage\$sendMessage\$1")
+        val invoke = chatBoxSend.getDeclaredMethod("invoke", Long::class.javaPrimitiveType)
+        patcher.patch(
+            invoke,
+            PreHook { call ->
+                val send = call.thisObject
+                // Our own resend after translating.
+                if (resending.remove(send)) return@PreHook
+                if (!translateOutgoing) return@PreHook
+                val content = ReflectUtils.getField(send, "\$messageContent") as MessageContent
+                val text = content.textContent.orEmpty()
+                if (!shouldTranslate(text)) return@PreHook
+                val pool = executor ?: return@PreHook
+                val channel = call.args[0] as Long
+                val target = outgoingLanguage
+                val service = service
+                // Skip Discord's send for now; it runs again once the translation is ready.
+                call.result = null
+                pool.execute {
+                    val translated = try {
+                        Translator.translate(text, target, service).text
+                    } catch (e: Throwable) {
+                        logger.error("Failed to translate outgoing message", e)
+                        val reason = (e as? Translator.TranslationException)?.message
+                        Utils.mainThread.post {
+                            Utils.showToast(if (reason != null) "Translation failed: $reason" else "Translation failed")
+                            try {
+                                @Suppress("UNCHECKED_CAST")
+                                (ReflectUtils.getField(send, "\$onValidationResult") as Function1<Boolean, Unit>).invoke(false)
+                            } catch (e: Throwable) {
+                                logger.error("Send result callback failed", e)
+                            }
+                        }
+                        return@execute
+                    }
+                    Utils.mainThread.post {
+                        try {
+                            ReflectUtils.setField(content, "textContent", translated)
+                            resending.add(send)
+                            invoke.invoke(send, channel)
+                        } catch (e: Throwable) {
+                            resending.remove(send)
+                            logger.error("Failed to send translated message", e)
+                        }
+                    }
+                }
+            },
+        )
     }
 
     private fun registerCommand() {
@@ -346,6 +414,8 @@ class TranslateMessages : Plugin() {
         private const val KEY_AUTO_OWN = "autoTranslateOwn"
         private const val KEY_SERVICE = "service"
         private const val KEY_DEEPL_KEY = "deeplKey"
+        private const val KEY_OUTGOING = "translateOutgoing"
+        private const val KEY_OUTGOING_LANGUAGE = "outgoingLanguage"
 
         const val SERVICE_GOOGLE = "google"
         const val SERVICE_DEEPL = "deepl"
