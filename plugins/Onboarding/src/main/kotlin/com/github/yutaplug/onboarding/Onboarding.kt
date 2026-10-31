@@ -38,6 +38,8 @@ import com.discord.widgets.guilds.profile.WidgetGuildProfileSheetViewModel
 import androidx.cardview.widget.CardView
 import androidx.core.content.ContextCompat
 import com.discord.widgets.channels.list.items.ChannelListItemDirectory
+import com.discord.widgets.channels.list.items.ChannelListItemPrivate
+import com.discord.api.guild.GuildFeature
 import com.discord.widgets.channels.list.items.ChannelListItemGuildScheduledEvents
 import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel
 import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu
@@ -100,9 +102,16 @@ class Onboarding : Plugin() {
                 val items = frame.args[0] as? List<ChannelListItem> ?: return@PreHook
                 originalLists[adapter] = items
                 val guildId = adapter.selectedGuildId
-                if (guildId == 0L) return@PreHook
+                // The adapter keeps the last server's id while it shows the DM list, so check the items too.
+                if (
+                    guildId == 0L ||
+                    items.any { it is ChannelListItemPrivate } ||
+                    StoreStream.getGuildSelected().selectedGuildId != guildId
+                ) {
+                    return@PreHook
+                }
                 var result = if (isFiltered(guildId)) filterItems(guildId, items) else items
-                if (cached[guildId] != null) result = withChannelsRow(result)
+                channelsRowFor(guildId)?.let { result = withChannelsRow(result, it) }
                 if (result !== items) frame.args[0] = result
             },
         )
@@ -135,8 +144,19 @@ class Onboarding : Plugin() {
         patchJoinFlow()
     }
 
-    /** Puts Channels & Roles right under Events, or above the first channel when there is no Events row. */
-    private fun withChannelsRow(items: List<ChannelListItem>): List<ChannelListItem> {
+    /**
+     * Channels & Roles when the server has customization questions, Browse Channels for other
+     * community servers, and nothing until the onboarding setup has loaded.
+     */
+    private fun channelsRowFor(guildId: Long): ChannelsRolesItem? {
+        if (!cached.containsKey(guildId)) return null
+        if (cached[guildId]?.prompts?.isNotEmpty() == true) return ChannelsRolesItem(false)
+        val guild = StoreStream.getGuilds().getGuild(guildId) ?: return null
+        return if (guild.hasFeature(GuildFeature.COMMUNITY)) ChannelsRolesItem(true) else null
+    }
+
+    /** Puts the row and a divider right under Events, or above the first channel when there is no Events row. */
+    private fun withChannelsRow(items: List<ChannelListItem>, row: ChannelsRolesItem): List<ChannelListItem> {
         if (items.any { it is ChannelsRolesItem }) return items
         val events = items.indexOfFirst { it is ChannelListItemGuildScheduledEvents }
         val index = if (events >= 0) {
@@ -148,7 +168,10 @@ class Onboarding : Plugin() {
                     it is ChannelListItemThread || it is ChannelListItemDirectory
             }.takeIf { it >= 0 } ?: 0
         }
-        return ArrayList(items).apply { add(index, ChannelsRolesItem) }
+        return ArrayList(items).apply {
+            add(index, row)
+            add(index + 1, ChannelsRolesDivider)
+        }
     }
 
     private fun ensureContextMenuRow(menu: WidgetGuildContextMenu, guildId: Long) {

@@ -9,13 +9,25 @@ import com.discord.utilities.mg_recycler.MGRecyclerViewHolder
 import com.discord.widgets.channels.list.WidgetChannelsListAdapter
 import com.discord.widgets.channels.list.items.ChannelListItem
 
-/** Channel list entry shown under Events, like newer Discord's "Channels & Roles" row. */
-internal object ChannelsRolesItem : ChannelListItem {
-    const val TYPE = 0x0B0A
-
-    override fun getKey() = "onboarding_channels_and_roles"
+/**
+ * Channel list entry shown under Events, like newer Discord's "Channels & Roles" row.
+ * [browse] switches it to "Browse Channels" for servers without customization questions.
+ */
+internal class ChannelsRolesItem(val browse: Boolean) : ChannelListItem {
+    override fun getKey() = "onboarding_channels_and_roles_$browse"
 
     override fun getType() = TYPE
+
+    companion object {
+        const val TYPE = 0x0B0A
+    }
+}
+
+/** Uses Discord's own 1dp separator row (type 14) to divide the row from the channels. */
+internal object ChannelsRolesDivider : ChannelListItem {
+    override fun getKey() = "onboarding_channels_and_roles_divider"
+
+    override fun getType() = ChannelListItem.TYPE_STAGE_EVENTS_SEPARATOR
 }
 
 /** Reuses Discord's Events row layout so the icon, font and press highlight match. */
@@ -27,10 +39,11 @@ internal class ChannelsRolesHolder(
     override fun onConfigure(position: Int, data: ChannelListItem) {
         super.onConfigure(position, data)
         val context = itemView.context
+        val browse = (data as? ChannelsRolesItem)?.browse == true
         itemView.findViewById<ImageView>(Utils.getResId("channels_list_item_guild_scheduled_event_icon", "id"))
-            ?.setImageResource(Utils.getResId("ic_settings_24dp", "drawable"))
+            ?.setImageResource(Utils.getResId(if (browse) "ic_channels_24dp" else "ic_settings_24dp", "drawable"))
         itemView.findViewById<TextView>(Utils.getResId("channels_list_item_guild_scheduled_event_label", "id"))
-            ?.text = "Channels & Roles"
+            ?.text = if (browse) "Browse Channels" else "Channels & Roles"
         itemView.findViewById<View>(Utils.getResId("channels_list_item_guild_scheduled_event_count", "id"))
             ?.visibility = View.GONE
         val overlay = Utils.getResId("drawable_overlay_channels", "attr")

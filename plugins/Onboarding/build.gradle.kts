@@ -1,9 +1,14 @@
-version = "1.0.7"
+version = "1.0.8"
 description = "Backports community onboarding and Channels & Roles to Discord 126.21."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.8
+        * Show Browse Channels instead of Channels & Roles in community servers without customization questions.
+        * Add a divider below the Channels & Roles row.
+        * Fix the row showing in the DM list.
+
         # 1.0.7
         * Add Check Onboarding to the server long-press menu.
         * Add a Channels & Roles row under Events at the top of the channel list.
