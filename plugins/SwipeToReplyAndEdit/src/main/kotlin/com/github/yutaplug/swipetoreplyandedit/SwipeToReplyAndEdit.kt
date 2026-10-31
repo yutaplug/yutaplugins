@@ -11,7 +11,9 @@ import android.widget.EditText
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.RecyclerView
+import com.aliucord.Constants
 import com.aliucord.Logger
+import com.aliucord.PluginManager
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -34,6 +36,7 @@ import com.discord.widgets.chat.list.entries.EmbedEntry
 import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.widgets.chat.list.entries.ReactionsEntry
 import com.discord.widgets.chat.list.entries.StickerEntry
+import java.io.File
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 import kotlin.math.abs
@@ -58,6 +61,8 @@ class SwipeToReplyAndEdit : Plugin() {
     }
 
     override fun start(context: Context) {
+        uninstallConflictingPlugins()
+
         patcher.patch(
             WidgetChatList::class.java.getDeclaredMethod("onViewBound", View::class.java),
             Hook { param ->
@@ -108,6 +113,29 @@ class SwipeToReplyAndEdit : Plugin() {
         for (helper in helpers.values) helper.attachToRecyclerView(null)
         helpers.clear()
         currentRecycler = null
+    }
+
+    /** SwipeToReply and SwipeActions hook the same gesture, so remove them like Aliucord's Uninstall button does. */
+    private fun uninstallConflictingPlugins() {
+        val removed = mutableListOf<String>()
+        for (name in CONFLICTING_PLUGINS) {
+            val plugin = PluginManager.plugins[name] ?: continue
+            try {
+                if (PluginManager.isPluginEnabled(name)) runCatching { PluginManager.stopPlugin(name) }
+                PluginManager.unloadPlugin(name)
+                val file = File(Constants.PLUGINS_PATH, "${plugin.__filename ?: name}.zip")
+                if (file.exists() && !file.delete()) {
+                    log.warn("Couldn't delete ${file.absolutePath}")
+                    continue
+                }
+                removed.add(name)
+            } catch (e: Throwable) {
+                log.error("Failed to uninstall $name", e)
+            }
+        }
+        if (removed.isNotEmpty()) {
+            Utils.showToast("SwipeToReplyAndEdit replaces ${removed.joinToString(" and ")}, so it was uninstalled.", true)
+        }
     }
 
     private fun isOverSwipeableMessage(recycler: RecyclerView, event: MotionEvent): Boolean {
@@ -346,5 +374,6 @@ class SwipeToReplyAndEdit : Plugin() {
     private companion object {
         const val EDIT_OWN = "edit_own"
         const val HOLD_MS = 500L
+        val CONFLICTING_PLUGINS = arrayOf("SwipeToReply", "SwipeActions")
     }
 }
