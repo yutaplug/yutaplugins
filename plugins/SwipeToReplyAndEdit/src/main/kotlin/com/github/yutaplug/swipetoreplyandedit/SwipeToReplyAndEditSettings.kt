@@ -13,8 +13,8 @@ class SwipeToReplyAndEditSettings(private val plugin: SwipeToReplyAndEdit) : Bot
             Utils.createCheckedSetting(
                 requireContext(),
                 CheckedSetting.ViewType.SWITCH,
-                "Swipe to edit own messages",
-                "Swiping one of your own messages edits it instead of replying to it.",
+                "Instantly edit own messages",
+                "Swiping one of your own messages edits it right away. When off, swiping replies and holding the swipe for a moment edits.",
             ).apply {
                 isChecked = plugin.editOwn
                 setOnCheckedListener { plugin.editOwn = it }

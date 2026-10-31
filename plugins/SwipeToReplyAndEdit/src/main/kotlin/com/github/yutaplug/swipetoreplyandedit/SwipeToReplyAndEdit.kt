@@ -158,9 +158,9 @@ class SwipeToReplyAndEdit : Plugin() {
         return message.author?.id == me && message.isUserMessage
     }
 
-    private fun perform(message: Message) {
+    private fun perform(message: Message, edit: Boolean) {
         try {
-            if (editOwn && isOwnEditable(message)) {
+            if (edit) {
                 edit(message)
             } else {
                 reply(message)
@@ -215,6 +215,26 @@ class SwipeToReplyAndEdit : Plugin() {
 
         private var swipingMessage: Message? = null
         private var triggered = false
+
+        // Set once the swipe has been held past the threshold long enough to switch from reply to edit.
+        private var holdEdit = false
+        private var holdTarget: View? = null
+        private val holdRunnable = Runnable {
+            val message = swipingMessage
+            if (triggered && message != null && !editOwn && isOwnEditable(message)) {
+                holdEdit = true
+                holdTarget?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                currentRecycler?.get()?.invalidate()
+            }
+        }
+
+        private fun willEdit(message: Message?) =
+            message != null && isOwnEditable(message) && (editOwn || holdEdit)
+
+        private fun cancelHold() {
+            holdTarget?.removeCallbacks(holdRunnable)
+            holdTarget = null
+        }
         private val shifted = mutableSetOf<View>()
 
         private fun loadIcon(context: Context, name: String): Drawable? =
@@ -251,11 +271,14 @@ class SwipeToReplyAndEdit : Plugin() {
                 val recycler = currentRecycler?.get()
                 swipingMessage = recycler?.let { swipeableMessage(it, viewHolder) }
                 triggered = false
+                holdEdit = false
+                cancelHold()
             } else if (actionState == ItemTouchHelper.ACTION_STATE_IDLE) {
                 // Finger lifted.
                 val message = swipingMessage
                 swipingMessage = null
-                if (triggered && message != null) perform(message)
+                cancelHold()
+                if (triggered && message != null) perform(message, willEdit(message))
                 triggered = false
             }
         }
@@ -276,6 +299,15 @@ class SwipeToReplyAndEdit : Plugin() {
                 val nowTriggered = abs(dX) >= trigger
                 if (nowTriggered && !triggered) {
                     viewHolder.itemView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    if (!editOwn && isOwnEditable(swipingMessage!!)) {
+                        cancelHold()
+                        holdTarget = recyclerView
+                        recyclerView.postDelayed(holdRunnable, HOLD_MS)
+                    }
+                } else if (!nowTriggered && triggered) {
+                    // Pulled back below the threshold: start over as a reply.
+                    cancelHold()
+                    holdEdit = false
                 }
                 triggered = nowTriggered
             }
@@ -292,7 +324,7 @@ class SwipeToReplyAndEdit : Plugin() {
                 }
             }
 
-            val icon = (if (message != null && editOwn && isOwnEditable(message)) editIcon else replyIcon) ?: return
+            val icon = (if (willEdit(message)) editIcon else replyIcon) ?: return
             val progress = min(abs(shift) / trigger, 1f)
             if (progress <= 0f) return
             val item = viewHolder.itemView
@@ -313,5 +345,6 @@ class SwipeToReplyAndEdit : Plugin() {
 
     private companion object {
         const val EDIT_OWN = "edit_own"
+        const val HOLD_MS = 500L
     }
 }
