@@ -1,9 +1,13 @@
-version = "1.0.6"
+version = "1.0.7"
 description = "Backports community onboarding and Channels & Roles to Discord 126.21."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.7
+        * Add Check Onboarding to the server long-press menu.
+        * Add a Channels & Roles row under Events at the top of the channel list.
+
         # 1.0.6
         * Use Aliucord's themed dialogs for dropdown questions, the discard prompt and save errors.
         * Fix a possible crash when searching channels.

@@ -36,6 +36,11 @@ import com.discord.widgets.guilds.join.GuildJoinHelperKt
 import com.discord.widgets.guilds.profile.WidgetGuildProfileSheet
 import com.discord.widgets.guilds.profile.WidgetGuildProfileSheetViewModel
 import androidx.cardview.widget.CardView
+import androidx.core.content.ContextCompat
+import com.discord.widgets.channels.list.items.ChannelListItemDirectory
+import com.discord.widgets.channels.list.items.ChannelListItemGuildScheduledEvents
+import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel
+import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 import java.util.concurrent.Executors
@@ -95,12 +100,92 @@ class Onboarding : Plugin() {
                 val items = frame.args[0] as? List<ChannelListItem> ?: return@PreHook
                 originalLists[adapter] = items
                 val guildId = adapter.selectedGuildId
-                if (guildId != 0L && isFiltered(guildId)) {
-                    frame.args[0] = filterItems(guildId, items)
+                if (guildId == 0L) return@PreHook
+                var result = if (isFiltered(guildId)) filterItems(guildId, items) else items
+                if (cached[guildId] != null) result = withChannelsRow(result)
+                if (result !== items) frame.args[0] = result
+            },
+        )
+        patcher.patch(
+            WidgetChannelsListAdapter::class.java,
+            "onCreateViewHolder",
+            arrayOf(ViewGroup::class.java, Int::class.javaPrimitiveType!!),
+            PreHook { frame ->
+                if (frame.args[1] != ChannelsRolesItem.TYPE) return@PreHook
+                frame.result = ChannelsRolesHolder(
+                    Utils.getResId("widget_channels_list_item_guild_scheduled_events", "layout"),
+                    frame.thisObject as WidgetChannelsListAdapter,
+                ) { view, guildId -> openScreen(view.context, guildId, false) }
+            },
+        )
+        patcher.patch(
+            WidgetGuildContextMenu::class.java,
+            "configureValidUI",
+            arrayOf(GuildContextMenuViewModel.ViewState.Valid::class.java),
+            Hook { frame ->
+                syncAccount()
+                val state = frame.args[0] as GuildContextMenuViewModel.ViewState.Valid
+                try {
+                    ensureContextMenuRow(frame.thisObject as WidgetGuildContextMenu, state.guild.id)
+                } catch (error: Exception) {
+                    logger.error("Could not add Check Onboarding to the server menu", error)
                 }
             },
         )
         patchJoinFlow()
+    }
+
+    /** Puts Channels & Roles right under Events, or above the first channel when there is no Events row. */
+    private fun withChannelsRow(items: List<ChannelListItem>): List<ChannelListItem> {
+        if (items.any { it is ChannelsRolesItem }) return items
+        val events = items.indexOfFirst { it is ChannelListItemGuildScheduledEvents }
+        val index = if (events >= 0) {
+            events + 1
+        } else {
+            items.indexOfFirst {
+                it is ChannelListItemCategory || it is ChannelListItemTextChannel ||
+                    it is ChannelListItemVoiceChannel || it is ChannelListItemStageVoiceChannel ||
+                    it is ChannelListItemThread || it is ChannelListItemDirectory
+            }.takeIf { it >= 0 } ?: 0
+        }
+        return ArrayList(items).apply { add(index, ChannelsRolesItem) }
+    }
+
+    private fun ensureContextMenuRow(menu: WidgetGuildContextMenu, guildId: Long) {
+        val root = menu.view ?: return
+        val anchor = root.findViewById<View>(Utils.getResId("guild_context_menu_more_options", "id")) ?: return
+        val parent = anchor.parent as? ViewGroup ?: return
+        val row = parent.findViewWithTag<TextView>(MENU_TAG) ?: run {
+            val template = LayoutInflater.from(parent.context).inflate(
+                Utils.getResId("widget_guild_context_menu", "layout"), null, false,
+            )
+            val row = template.findViewById<TextView>(Utils.getResId("guild_context_menu_more_options", "id"))
+                ?: return
+            (row.parent as? ViewGroup)?.removeView(row)
+            row.id = View.generateViewId()
+            row.tag = MENU_TAG
+            row.text = "Check Onboarding"
+            row.visibility = View.VISIBLE
+            val icon = Utils.getResId("ic_check_circle_24dp", "drawable")
+            if (icon != 0) {
+                val drawable = ContextCompat.getDrawable(parent.context, icon)?.mutate()
+                drawable?.setTint(themeColor(parent.context, "colorInteractiveNormal", 0xffb9bbbe.toInt()))
+                row.setCompoundDrawablesRelativeWithIntrinsicBounds(drawable, null, null, null)
+            }
+            parent.addView(row, parent.indexOfChild(anchor))
+            buttons += WeakReference(row)
+            row
+        }
+        buttonGuilds[row] = guildId
+        row.setOnClickListener {
+            val id = buttonGuilds[row] ?: return@setOnClickListener
+            val activity = menu.activity ?: return@setOnClickListener
+            // Kotlin resolves WidgetGuildContextMenu.Companion to the nested class, not Java's static field.
+            (WidgetGuildContextMenu::class.java.getField("Companion").get(null) as WidgetGuildContextMenu.Companion)
+                .hide(activity, true)
+            Utils.showToast("Checking onboarding...")
+            checkOnboarding(activity, id, {}) { main.post { openScreen(activity, id, true) } }
+        }
     }
 
     private fun patchJoinFlow() {
@@ -157,7 +242,18 @@ class Onboarding : Plugin() {
             main.post { openScreen(activity, id, false) }
         }
         ensureSheetAction(container, guildId, fontSource, CHECK_TAG, "Check Onboarding", 1) { row, id ->
-            checkOnboarding(sheet, id, row)
+            val activity = sheet.activity
+            if (activity != null && running && row.isEnabled) {
+                row.isEnabled = false
+                row.text = "Checking onboarding..."
+                checkOnboarding(activity, id, {
+                    row.isEnabled = true
+                    row.text = "Check Onboarding"
+                }) {
+                    sheet.dismiss()
+                    main.post { openScreen(activity, id, true) }
+                }
+            }
         }
         val toggle = container.findViewWithTag<CheckedSetting>(SHOW_ALL_TAG) ?: run {
             val actions = LayoutInflater.from(container.context).inflate(
@@ -235,12 +331,9 @@ class Onboarding : Plugin() {
         buttonGuilds[row] = guildId
     }
 
-    private fun checkOnboarding(sheet: WidgetGuildProfileSheet, guildId: Long, row: TextView) {
-        if (!running || !row.isEnabled) return
-        val activity = sheet.activity ?: return
+    private fun checkOnboarding(activity: Activity, guildId: Long, onFinished: () -> Unit, onIncomplete: () -> Unit) {
+        if (!running) return
         val requestedUserId = runCatching { StoreStream.getUsers().me.id }.getOrNull()
-        row.isEnabled = false
-        row.text = "Checking onboarding..."
         val task = generation
         worker.execute {
             val result = runCatching {
@@ -261,8 +354,8 @@ class Onboarding : Plugin() {
                 ) {
                     return@post
                 }
-                row.isEnabled = true
-                row.text = "Check Onboarding"
+                onFinished()
+                if (activity.isFinishing || activity.isDestroyed) return@post
                 result
                     .onSuccess { (config, completed) ->
                         cached[guildId] = config
@@ -281,10 +374,7 @@ class Onboarding : Plugin() {
                                 Utils.showToast("Onboarding is already complete")
                             }
 
-                            else -> {
-                                sheet.dismiss()
-                                main.post { openScreen(activity, guildId, true) }
-                            }
+                            else -> onIncomplete()
                         }
                     }.onFailure { error ->
                         logger.error("Could not check onboarding for guild $guildId", error)
@@ -488,6 +578,7 @@ class Onboarding : Plugin() {
     private companion object {
         const val CHANNELS_TAG = "onboarding_channels_and_roles"
         const val CHECK_TAG = "onboarding_check"
+        const val MENU_TAG = "onboarding_check_menu"
         const val SHOW_ALL_TAG = "onboarding_show_all_channels"
         const val RETRY_DELAY_MS = 30_000L
         const val CACHE_DURATION_MS = 300_000L
