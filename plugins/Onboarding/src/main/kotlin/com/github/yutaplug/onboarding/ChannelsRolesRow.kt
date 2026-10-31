@@ -23,9 +23,9 @@ internal class ChannelsRolesItem(val browse: Boolean) : ChannelListItem {
     }
 }
 
-/** Uses Discord's own 1dp separator row (type 14) to divide the row from the channels. */
-internal object ChannelsRolesDivider : ChannelListItem {
-    override fun getKey() = "onboarding_channels_and_roles_divider"
+/** Uses Discord's own 1dp separator row (type 14) above and below the row, like the React Native app. */
+internal class ChannelsRolesDivider(private val position: String) : ChannelListItem {
+    override fun getKey() = "onboarding_channels_and_roles_divider_$position"
 
     override fun getType() = ChannelListItem.TYPE_STAGE_EVENTS_SEPARATOR
 }
@@ -41,7 +41,7 @@ internal class ChannelsRolesHolder(
         val context = itemView.context
         val browse = (data as? ChannelsRolesItem)?.browse == true
         itemView.findViewById<ImageView>(Utils.getResId("channels_list_item_guild_scheduled_event_icon", "id"))
-            ?.setImageResource(Utils.getResId(if (browse) "ic_channels_24dp" else "ic_settings_24dp", "drawable"))
+            ?.setImageResource(Utils.getResId("ic_channels_24dp", "drawable"))
         itemView.findViewById<TextView>(Utils.getResId("channels_list_item_guild_scheduled_event_label", "id"))
             ?.text = if (browse) "Browse Channels" else "Channels & Roles"
         itemView.findViewById<View>(Utils.getResId("channels_list_item_guild_scheduled_event_count", "id"))

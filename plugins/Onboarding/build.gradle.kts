@@ -1,9 +1,14 @@
-version = "1.0.8"
+version = "1.0.9"
 description = "Backports community onboarding and Channels & Roles to Discord 126.21."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.9
+        * Use the Browse Channels icon for Channels & Roles too.
+        * Add a divider above the Channels & Roles row.
+        * Add a setting to hide the Channels & Roles row from the channel list.
+
         # 1.0.8
         * Show Browse Channels instead of Channels & Roles in community servers without customization questions.
         * Add a divider below the Channels & Roles row.

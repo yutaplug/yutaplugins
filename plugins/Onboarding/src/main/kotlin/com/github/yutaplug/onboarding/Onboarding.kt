@@ -65,6 +65,18 @@ class Onboarding : Plugin() {
     private var running = false
     private var generation = 0
 
+    init {
+        settingsTab = SettingsTab(OnboardingSettings::class.java, SettingsTab.Type.PAGE).withArgs(this)
+    }
+
+    /** Whether the Channels & Roles / Browse Channels row is added to the server channel list. */
+    var showChannelsRow: Boolean
+        get() = settings.getBool("show_channels_row", true)
+        set(value) {
+            settings.setBool("show_channels_row", value)
+            if (running) refreshChannelLists()
+        }
+
     override fun start(context: Context) {
         if (worker.isShutdown) worker = Executors.newSingleThreadExecutor()
         running = true
@@ -111,7 +123,7 @@ class Onboarding : Plugin() {
                     return@PreHook
                 }
                 var result = if (isFiltered(guildId)) filterItems(guildId, items) else items
-                channelsRowFor(guildId)?.let { result = withChannelsRow(result, it) }
+                if (showChannelsRow) channelsRowFor(guildId)?.let { result = withChannelsRow(result, it) }
                 if (result !== items) frame.args[0] = result
             },
         )
@@ -155,7 +167,7 @@ class Onboarding : Plugin() {
         return if (guild.hasFeature(GuildFeature.COMMUNITY)) ChannelsRolesItem(true) else null
     }
 
-    /** Puts the row and a divider right under Events, or above the first channel when there is no Events row. */
+    /** Puts the row between two dividers under Events, or above the first channel when there is no Events row. */
     private fun withChannelsRow(items: List<ChannelListItem>, row: ChannelsRolesItem): List<ChannelListItem> {
         if (items.any { it is ChannelsRolesItem }) return items
         val events = items.indexOfFirst { it is ChannelListItemGuildScheduledEvents }
@@ -169,8 +181,9 @@ class Onboarding : Plugin() {
             }.takeIf { it >= 0 } ?: 0
         }
         return ArrayList(items).apply {
-            add(index, row)
-            add(index + 1, ChannelsRolesDivider)
+            add(index, ChannelsRolesDivider("top"))
+            add(index + 1, row)
+            add(index + 2, ChannelsRolesDivider("bottom"))
         }
     }
 
