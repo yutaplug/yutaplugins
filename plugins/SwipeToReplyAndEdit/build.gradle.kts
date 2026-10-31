@@ -1,9 +1,11 @@
-version = "1.0.2"
+version = "1.0.3"
 description = "Swipe a message from right to left to reply to it, or to edit your own messages."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.3
+        * Added a setting for how long you have to hold the swipe to edit your own message
         # 1.0.2
         * Automatically uninstalls SwipeToReply and SwipeActions, which conflict with this plugin
         # 1.0.1

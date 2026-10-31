@@ -56,6 +56,11 @@ class SwipeToReplyAndEdit : Plugin() {
         get() = settings.getBool(EDIT_OWN, false)
         set(value) = settings.setBool(EDIT_OWN, value)
 
+    /** How long the swipe has to be held past the threshold before it edits instead of replying, in ms. */
+    var holdMs: Int
+        get() = settings.getInt(HOLD_MS_KEY, DEFAULT_HOLD_MS).coerceAtLeast(0)
+        set(value) = settings.setInt(HOLD_MS_KEY, value)
+
     init {
         settingsTab = SettingsTab(SwipeToReplyAndEditSettings::class.java, SettingsTab.Type.BOTTOM_SHEET).withArgs(this)
     }
@@ -330,7 +335,7 @@ class SwipeToReplyAndEdit : Plugin() {
                     if (!editOwn && isOwnEditable(swipingMessage!!)) {
                         cancelHold()
                         holdTarget = recyclerView
-                        recyclerView.postDelayed(holdRunnable, HOLD_MS)
+                        recyclerView.postDelayed(holdRunnable, holdMs.toLong())
                     }
                 } else if (!nowTriggered && triggered) {
                     // Pulled back below the threshold: start over as a reply.
@@ -373,7 +378,8 @@ class SwipeToReplyAndEdit : Plugin() {
 
     private companion object {
         const val EDIT_OWN = "edit_own"
-        const val HOLD_MS = 500L
+        const val HOLD_MS_KEY = "hold_ms"
+        const val DEFAULT_HOLD_MS = 500
         val CONFLICTING_PLUGINS = arrayOf("SwipeToReply", "SwipeActions")
     }
 }
