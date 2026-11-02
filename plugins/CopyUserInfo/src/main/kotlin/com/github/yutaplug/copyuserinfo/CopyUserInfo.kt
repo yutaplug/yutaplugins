@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.util.TypedValue
 import android.view.View
+import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -17,6 +18,7 @@ import com.aliucord.wrappers.users.globalName
 import com.discord.stores.StoreStream
 import com.discord.utilities.io.NetworkUtils
 import com.discord.widgets.user.usersheet.WidgetUserSheet
+import com.discord.widgets.user.usersheet.WidgetUserSheetViewModel
 import b.a.a.d.a as UserActionsDialog
 import com.discord.api.guildmember.GuildMember as ApiGuildMember
 
@@ -52,6 +54,20 @@ class CopyUserInfo : Plugin() {
                 }
             },
         )
+
+        // Discord hides the three dots button on your own profile; show it so the copy actions are reachable.
+        patcher.patch(
+            WidgetUserSheet::class.java.getDeclaredMethod(
+                "configureUI",
+                WidgetUserSheetViewModel.ViewState::class.java,
+            ),
+            Hook { param ->
+                val state = param.args[0] as? WidgetUserSheetViewModel.ViewState.Loaded ?: return@Hook
+                if (!state.isMe || state.user.isSystemUser) return@Hook
+                val view = (param.thisObject as WidgetUserSheet).view ?: return@Hook
+                view.findViewById<View>(Utils.getResId("user_sheet_more_button", "id"))?.visibility = View.VISIBLE
+            },
+        )
     }
 
     private fun addRows(dialog: UserActionsDialog, root: View) {
@@ -61,6 +77,10 @@ class CopyUserInfo : Plugin() {
         val info = loadInfo(userId, findGuildId(dialog, userId)) ?: return
         val template = root.findViewById<TextView>(Utils.getResId("user_actions_dialog_block_item", "id")) ?: return
         val ctx = root.context
+
+        // Blocking yourself makes no sense. Discord sets the row's visibility later from its view model,
+        // so detach it from the layout instead of hiding it (it stays usable as the style template).
+        if (userId == StoreStream.getUsers().me.id) (template.parent as? ViewGroup)?.removeView(template)
 
         // With server info the menu can be taller than the screen, so keep the header pinned and scroll the rows.
         val rows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
