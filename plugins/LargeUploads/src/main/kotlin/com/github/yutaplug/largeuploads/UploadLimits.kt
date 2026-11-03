@@ -4,7 +4,7 @@ import com.discord.api.premium.PremiumTier
 import com.discord.models.user.User
 import com.discord.stores.StoreStream
 
-/** Discord's current per-file limits. Aliucord's UploadSize values are outdated (free accounts are 10 MiB). */
+/** Discord's current per-file limits, matching Aliucord's UploadSize core plugin. */
 internal object UploadLimits {
     const val MIB = 1024L * 1024L
 
@@ -16,14 +16,14 @@ internal object UploadLimits {
             PremiumTier.TIER_0 -> 50 // Nitro Basic
             PremiumTier.TIER_1 -> 50 // Nitro Classic
             PremiumTier.TIER_2 -> 500 // Nitro
-            else -> 10
+            else -> 20
         }
 
     private fun guildMiB(tier: Int): Int =
         when (tier) {
             2 -> 50
             3 -> 100
-            else -> 10
+            else -> 20
         }
 
     /** The largest file the current account can attach in [channelId], in bytes. */

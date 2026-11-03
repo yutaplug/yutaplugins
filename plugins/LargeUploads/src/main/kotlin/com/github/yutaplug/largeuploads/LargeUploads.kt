@@ -97,10 +97,13 @@ class LargeUploads : Plugin() {
                     if (size > maxHost) return@PreHook
                     oversized = true
                 }
-                if (!oversized) return@PreHook
+                // Without oversized files, still raise the app's outdated limit to the current one,
+                // so files under it are sent to Discord instead of being refused.
+                val max = if (oversized) Int.MAX_VALUE else (limit / UploadLimits.MIB).toInt()
+                if (max <= request.maxFileSizeMB) return@PreHook
                 call.args[2] = MessageManager.AttachmentsRequest(
                     request.currentFileSizeMB,
-                    Int.MAX_VALUE,
+                    max,
                     attachments,
                 )
             },
