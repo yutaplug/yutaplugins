@@ -34,6 +34,7 @@ import com.lytefast.flexinput.R
 import java.lang.ref.WeakReference
 import java.util.Collections
 import java.util.IdentityHashMap
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -402,6 +403,9 @@ class TranslateMessages : Plugin() {
         }
     }
 
+    /** [text] with only its letters and digits, lowercased, to ignore case, spacing and punctuation tweaks. */
+    private fun comparable(text: String) = text.filter { Character.isLetterOrDigit(it) }.toLowerCase(Locale.ROOT)
+
     private fun requestTranslation(messageId: Long, content: String, show: Boolean, manual: Boolean) {
         val pool = executor ?: return
         if (!pending.add(messageId)) return
@@ -410,8 +414,11 @@ class TranslateMessages : Plugin() {
         pool.execute {
             try {
                 val result = Translator.translate(content, target, service)
-                val alreadyTarget = Languages.same(result.sourceLanguage, target) || result.text == content
-                translations[messageId] = Translation(content, target, result.text, result.sourceLanguage, show && !alreadyTarget)
+                // Google sometimes misdetects the source (e.g. Traditional Chinese as "en") while still translating
+                // it, so only treat the message as already in the target language if the text came back unchanged.
+                val alreadyTarget = comparable(result.text) == comparable(content)
+                val source = result.sourceLanguage?.takeUnless { !alreadyTarget && Languages.same(it, target) }
+                translations[messageId] = Translation(content, target, result.text, source, show && !alreadyTarget)
                 Utils.mainThread.post {
                     if (alreadyTarget) {
                         if (manual) Utils.showToast("Message is already in ${Languages.name(target)}")

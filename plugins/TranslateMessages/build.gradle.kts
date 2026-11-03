@@ -1,8 +1,11 @@
-version = "1.1.1"
+version = "1.1.2"
 description = "Translate messages from the message menu, or automatically, into the language you choose."
 
 aliucord {
     changelog.set("""
+        # 1.1.2
+        * Fixed Google Translate saying some messages, like Traditional Chinese ones, were already in English instead of translating them.
+
         # 1.1.1
         * Copy Text now copies the original message when a translation is shown, and a new Copy Translated Text button copies the translation.
 
