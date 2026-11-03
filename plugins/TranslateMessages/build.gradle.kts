@@ -1,8 +1,11 @@
-version = "1.1.0"
+version = "1.1.1"
 description = "Translate messages from the message menu, or automatically, into the language you choose."
 
 aliucord {
     changelog.set("""
+        # 1.1.1
+        * Copy Text now copies the original message when a translation is shown, and a new Copy Translated Text button copies the translation.
+
         # 1.1.0
         * Option to translate your own messages into a chosen language (English by default) right before they are sent.
 

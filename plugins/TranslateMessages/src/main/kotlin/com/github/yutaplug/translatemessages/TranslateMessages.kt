@@ -56,6 +56,7 @@ class TranslateMessages : Plugin() {
     private var executor: ExecutorService? = null
     private var adapterRef: WeakReference<WidgetChatListAdapter>? = null
     private val buttonId = View.generateViewId()
+    private val copyButtonId = View.generateViewId()
 
     // Chat box sends being replayed with translated text, which must not be translated again.
     private val resending: MutableSet<Any> = Collections.newSetFromMap(IdentityHashMap())
@@ -318,14 +319,17 @@ class TranslateMessages : Plugin() {
         val message = model.message
         val content = message.content.orEmpty()
         val existing = layout.findViewById<TextView>(buttonId)
+        val existingCopy = layout.findViewById<TextView>(copyButtonId)
         if (!shouldTranslate(content)) {
             existing?.visibility = View.GONE
+            existingCopy?.visibility = View.GONE
             return
         }
         val button = existing ?: createButton(layout)
         button.visibility = View.VISIBLE
         val translation = translations[message.id]?.takeIf { it.original == content && it.target == targetLanguage }
         val showing = translation?.shown == true
+        configureCopy(actions, layout, existingCopy, content, translation?.takeIf { showing })
         button.text = if (showing) "Show original" else "Translate"
         button.setOnClickListener {
             actions.dismiss()
@@ -348,17 +352,53 @@ class TranslateMessages : Plugin() {
         }
     }
 
-    private fun createButton(layout: LinearLayout): TextView {
+    /**
+     * While a translation is shown, Discord's "Copy Text" would copy the translated text it rendered,
+     * so it is pointed back at the original and a "Copy Translated Text" row is added below it.
+     */
+    private fun configureCopy(
+        actions: WidgetChatListActions,
+        layout: LinearLayout,
+        existing: TextView?,
+        content: String,
+        translation: Translation?,
+    ) {
+        val copy = layout.findViewById<TextView>(Utils.getResId("dialog_chat_actions_copy", "id"))
+        if (translation == null || copy == null || copy.visibility != View.VISIBLE) {
+            existing?.visibility = View.GONE
+            return
+        }
+        copy.setOnClickListener {
+            copyText(content)
+            actions.dismiss()
+        }
+        val button = existing ?: createMenuItem(layout, copyButtonId, "ic_copy_24dp", layout.indexOfChild(copy) + 1)
+        button.visibility = View.VISIBLE
+        button.text = "Copy Translated Text"
+        button.setOnClickListener {
+            copyText(translation.text)
+            actions.dismiss()
+        }
+    }
+
+    private fun copyText(text: String) {
+        Utils.setClipboard(text, text)
+        Utils.showToast(Utils.appContext.getString(Utils.getResId("copied_text", "string")))
+    }
+
+    private fun createButton(layout: LinearLayout) = createMenuItem(layout, buttonId, "ic_locale_24dp", -1)
+
+    private fun createMenuItem(layout: LinearLayout, viewId: Int, iconName: String, index: Int): TextView {
         val copy = layout.findViewById<TextView>(Utils.getResId("dialog_chat_actions_copy", "id"))
         return TextView(layout.context, null, 0, R.i.UiKit_Settings_Item_Icon).apply {
-            id = buttonId
-            val icon = ContextCompat.getDrawable(context, Utils.getResId("ic_locale_24dp", "drawable"))?.mutate()
+            id = viewId
+            val icon = ContextCompat.getDrawable(context, Utils.getResId(iconName, "drawable"))?.mutate()
             setCompoundDrawablesRelativeWithIntrinsicBounds(icon, null, null, null)
             if (copy != null) {
                 setTextColor(copy.textColors)
                 TextViewCompat.setCompoundDrawableTintList(this, TextViewCompat.getCompoundDrawableTintList(copy))
             }
-            layout.addView(this)
+            layout.addView(this, index)
         }
     }
 
