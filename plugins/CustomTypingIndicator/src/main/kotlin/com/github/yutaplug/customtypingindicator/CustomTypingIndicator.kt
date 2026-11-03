@@ -46,10 +46,11 @@ class CustomTypingIndicator : Plugin() {
     }
 
     init {
-        settingsTab = SettingsTab(TypingIndicatorPage::class.java, SettingsTab.Type.PAGE)
+        settingsTab = SettingsTab(CustomTypingIndicatorSettings::class.java, SettingsTab.Type.PAGE).withArgs(this)
     }
 
     override fun start(context: Context) {
+        TypingNames.onAvatarLoaded = { bars.forEach { it.get()?.g?.invalidate() } }
         patchGateway()
         patchTypingBar()
         patchUserSettings()
@@ -99,17 +100,30 @@ class CustomTypingIndicator : Plugin() {
                 } catch (error: Throwable) {
                     logger.error("Failed to show custom typing indicator", error)
                 }
+                try {
+                    val ids = if (typing.typingUsers.isEmpty()) emptySet() else channelTypers()
+                    TypingNames.decorate(
+                        binding.g,
+                        ids,
+                        settings.getBool(KEY_SHOW_AVATARS, false),
+                        settings.getBool(KEY_CLICKABLE_PROFILES, false),
+                    )
+                } catch (error: Throwable) {
+                    logger.error("Failed to add avatars or profile links to the typing bar", error)
+                }
             },
         )
     }
 
-    /** Discord only shows a custom indicator when exactly one person is typing in the channel. */
-    private fun soleTyperStyle(): TypingStyle? {
+    /** The IDs of everyone typing in the selected channel. */
+    private fun channelTypers(): Set<Long> {
         @Suppress("UNCHECKED_CAST")
-        val snapshot = typingSnapshot.get(StoreStream.getUsersTyping()) as? Map<Long, Set<Long>> ?: return null
-        val userId = snapshot[StoreStream.getChannelsSelected().id]?.singleOrNull() ?: return null
-        return styles[userId]
+        val snapshot = typingSnapshot.get(StoreStream.getUsersTyping()) as? Map<Long, Set<Long>> ?: return emptySet()
+        return snapshot[StoreStream.getChannelsSelected().id].orEmpty()
     }
+
+    /** Discord only shows a custom indicator when exactly one person is typing in the channel. */
+    private fun soleTyperStyle(): TypingStyle? = channelTypers().singleOrNull()?.let { styles[it] }
 
     private fun patchUserSettings() {
         patcher.patch(WidgetSettings::class.java, "onViewBound", arrayOf(View::class.java), Hook { frame ->
@@ -159,8 +173,11 @@ class CustomTypingIndicator : Plugin() {
         styles.clear()
         rows.values.forEach { (it.parent as? ViewGroup)?.removeView(it) }
         rows.clear()
+        TypingNames.onAvatarLoaded = {}
+        TypingNames.clearCache()
         for (ref in bars) {
             val binding = ref.get() ?: continue
+            TypingNames.reset(binding.g)
             val emojis = binding.c.findViewWithTag<EmojiDots>(EMOJI_TAG) ?: continue
             emojis.stop()
             binding.c.removeView(emojis)
@@ -176,6 +193,8 @@ class CustomTypingIndicator : Plugin() {
     companion object {
         private const val ROW_TAG = "custom_typing_indicator_row"
         private const val EMOJI_TAG = "custom_typing_indicator_emojis"
+        const val KEY_SHOW_AVATARS = "showAvatars"
+        const val KEY_CLICKABLE_PROFILES = "clickableProfiles"
 
         /**
          * Swaps the typing dots for [style]'s emojis and its phrase. Shared by the chat's typing bar and the
