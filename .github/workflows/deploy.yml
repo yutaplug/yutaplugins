@@ -67,3 +67,19 @@ jobs:
           git add .
           git commit -m "Build $GITHUB_SHA" || exit 0   # do not error if nothing to commit
           git push
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+        id: push
+
+      # Aliucord fetches updater.json and plugin zips through jsDelivr, which caches them for hours.
+      # Purge the files this build changed so the updater sees the new versions right away.
+      - name: Purge jsDelivr cache
+        if: steps.push.outputs.pushed == 'true'
+        continue-on-error: true
+        run: |
+          cd $GITHUB_WORKSPACE/builds
+          for file in $(git diff --name-only HEAD~1 HEAD 2>/dev/null || git ls-files); do
+            url="https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@builds/$file"
+            echo "Purging $url"
+            curl -sS --retry 3 --max-time 30 "$url" || echo "Failed to purge $file"
+            echo
+          done
