@@ -10,13 +10,32 @@ internal object ThemeProto {
 
     fun dataVersion(settings: ByteArray): Long = scalar(message(settings, 1) ?: byteArrayOf(), 3)
 
-    fun patch(settings: ByteArray, theme: Int): ByteArray {
-        require(theme in 1..4)
-        val appearance = message(settings, 13) ?: byteArrayOf()
-        // A top-level section is replaced in full. Preserve unknown appearance
-        // fields, including Nitro presets, density and developer mode.
-        return bytes(13, replace(appearance, 1, varint(8) + varint(theme.toLong())))
+    /** appearance.client_theme_settings.background_gradient_preset_id, or null when unset. */
+    fun preset(settings: ByteArray): Int? {
+        val client = message(message(settings, 13) ?: return null, 3) ?: return null
+        val wrapper = message(client, 2) ?: return null
+        return scalar(wrapper, 1).toInt()
     }
+
+    fun patch(settings: ByteArray, theme: Int, preset: Int?): ByteArray {
+        require(theme in 1..4)
+        // A top-level section is replaced in full. Preserve unknown appearance
+        // fields, including density and developer mode.
+        var appearance = replace(message(settings, 13) ?: byteArrayOf(), 1, varint(8) + varint(theme.toLong()))
+        val client = message(appearance, 3)
+        // Like the official clients, a preset replaces any custom gradient
+        // (field 4), and choosing a standard theme clears both.
+        val stripped = remove(remove(client ?: byteArrayOf(), 2), 4)
+        val updated = if (preset != null) {
+            // UInt32Value omits its value field when it is zero (Mint Apple).
+            stripped + bytes(2, if (preset == 0) byteArrayOf() else varint(8) + varint(preset.toLong()))
+        } else stripped
+        appearance = if (updated.isEmpty()) remove(appearance, 3) else replace(appearance, 3, bytes(3, updated))
+        return bytes(13, appearance)
+    }
+
+    private fun remove(data: ByteArray, number: Int): ByteArray = replace(data, number, byteArrayOf())
+
     private fun message(data: ByteArray, number: Int): ByteArray? =
         fields(data).lastOrNull { it.number == number && it.wire == 2 }?.value
 

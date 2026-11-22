@@ -1,4 +1,4 @@
-version = "1.0.1"
+version = "1.0.2"
 description = "Backports Light, Ash, Dark and Onyx with account theme sync."
 aliucord {
     changelog.set(

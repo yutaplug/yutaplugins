@@ -1,5 +1,12 @@
 package com.github.yutaplug.newthemes
 
+/** The full selection: a standard theme, or a Nitro preset drawn on its base theme. */
+internal data class Appearance(val theme: ThemeChoice, val preset: GradientPreset? = null) {
+    companion object {
+        fun of(preset: GradientPreset) = Appearance(preset.theme, preset)
+    }
+}
+
 internal enum class ThemeChoice(val label: String, val wire: Int, val native: String) {
     LIGHT("Light", 2, "light"),
     ASH("Ash", 1, "ash"),

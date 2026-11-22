@@ -1,11 +1,13 @@
 package com.github.yutaplug.newthemes
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
 import com.aliucord.Http
 import com.aliucord.Utils
+import com.discord.api.premium.PremiumTier
 import com.discord.stores.StoreAuthentication
 import com.discord.stores.StoreStream
 import com.discord.utilities.rest.RestAPI
@@ -13,14 +15,19 @@ import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-/** Serializes reads/writes, rejects old accounts and protects pending choices. */
+/**
+ * Serializes reads/writes, rejects old accounts and protects pending choices.
+ * Nitro presets are synced only for Nitro accounts; without Nitro a preset is
+ * kept on this device and the account's theme is left alone until a standard
+ * theme is chosen again.
+ */
 internal class ThemeSync(
     private val context: Context,
-    private val apply: (ThemeChoice) -> Unit,
+    private val apply: (Appearance) -> Unit,
     private val log: (String, Throwable) -> Unit,
 ) {
     private class Session(val token: String) {
-        var pending: ThemeChoice? = null
+        var pending: Appearance? = null
         var revision = 0L
         var nextRequest = 0L
         var initialized = false
@@ -40,24 +47,22 @@ internal class ThemeSync(
         if (!closed) worker.execute { runSync() }
     }
 
-    fun choose(theme: ThemeChoice) {
+    fun choose(appearance: Appearance) {
         val userId = StoreStream.getUsers().me.id
         val auth = token()
-        val enabled = StoreStream.getUserSettingsSystem().isThemeSyncEnabled
+        val remote = StoreStream.getUserSettingsSystem().isThemeSyncEnabled &&
+            (appearance.preset == null || hasNitro())
         if (auth != null) synchronized(lock) {
             val current = session?.takeIf { it.token == auth } ?: Session(auth).also { session = it }
             current.initialized = true
             current.revision++
-            current.pending = if (enabled) theme else null
+            current.pending = if (remote) appearance else null
         }
         // SharedPreferences initialization and writes stay on the worker.
         worker.execute {
-            if (!closed && StoreStream.getUsers().me.id == userId) {
-                context.getSharedPreferences("NewThemes", Context.MODE_PRIVATE).edit()
-                    .putInt(userId.toString(), theme.wire).apply()
-            }
+            if (!closed && StoreStream.getUsers().me.id == userId) save(userId, appearance)
         }
-        if (!enabled) return
+        if (!remote) return
         if (auth == null) {
             Utils.showToast("Theme changed locally; account authentication is unavailable.", true)
             return
@@ -72,28 +77,49 @@ internal class ThemeSync(
         refresh()
     }
 
+    private fun prefs(): SharedPreferences = context.getSharedPreferences("NewThemes", Context.MODE_PRIVATE)
+
+    private fun save(userId: Long, appearance: Appearance) {
+        prefs().edit()
+            .putInt(userId.toString(), appearance.theme.wire)
+            .putInt("$userId.preset", appearance.preset?.id ?: -1)
+            .apply()
+    }
+
+    private fun saved(userId: Long): Appearance? {
+        val prefs = prefs()
+        if (!prefs.contains(userId.toString())) return null
+        val theme = ThemeChoice.fromWire(prefs.getInt(userId.toString(), 1)) ?: return null
+        val preset = GradientPreset.byId(prefs.getInt("$userId.preset", -1).takeIf { it >= 0 })
+        return if (preset != null) Appearance.of(preset) else Appearance(theme)
+    }
+
+    private fun hasNitro(): Boolean = StoreStream.getUsers().me.premiumTier == PremiumTier.TIER_2
+
+    /** Whether the device keeps its own choice instead of following the account. */
+    private fun localOnly(userId: Long): Boolean = !StoreStream.getUserSettingsSystem().isThemeSyncEnabled ||
+        (!hasNitro() && saved(userId)?.preset != null)
+
     private fun runSync() {
         if (closed) return
         val token = token() ?: return
+        val userId = StoreStream.getUsers().me.id
         val current = synchronized(lock) {
             session?.takeIf { it.token == token } ?: Session(token).also { session = it }
         }
         if (!current.initialized) {
             current.initialized = true
-            if (!StoreStream.getUserSettingsSystem().isThemeSyncEnabled) {
-                val userId = StoreStream.getUsers().me.id
+            if (localOnly(userId)) {
                 val revision = synchronized(lock) { current.revision }
-                val prefs = context.getSharedPreferences("NewThemes", Context.MODE_PRIVATE)
-                val saved = if (prefs.contains(userId.toString())) ThemeChoice.fromWire(prefs.getInt(userId.toString(), 1)) else null
+                val saved = saved(userId)
                 if (saved != null) main.post {
                     if (active(current) && StoreStream.getUsers().me.id == userId &&
-                        synchronized(lock) { current.revision == revision } &&
-                        !StoreStream.getUserSettingsSystem().isThemeSyncEnabled) apply(saved)
+                        synchronized(lock) { current.revision == revision }) apply(saved)
                 }
             }
         }
-        if (!StoreStream.getUserSettingsSystem().isThemeSyncEnabled) return
         val selection = synchronized(lock) {
+            if (current.pending == null && localOnly(userId)) return
             val delay = current.nextRequest - System.currentTimeMillis()
             if (delay > 0) {
                 if (current.pending != null) worker.schedule({ runSync() }, delay, TimeUnit.MILLISECONDS)
@@ -108,8 +134,9 @@ internal class ThemeSync(
                 var attempts = 0
                 while (true) {
                     if (!active(current) || !StoreStream.getUserSettingsSystem().isThemeSyncEnabled) return
+                    val patched = ThemeProto.patch(settings, desired.theme.wire, desired.preset?.id)
                     val payload = JSONObject()
-                        .put("settings", Base64.encodeToString(ThemeProto.patch(settings, desired.wire), Base64.NO_WRAP))
+                        .put("settings", Base64.encodeToString(patched, Base64.NO_WRAP))
                         .put("required_data_version", ThemeProto.dataVersion(settings))
                     val response = request(current, payload)
                     if (!response.optBoolean("out_of_date")) break
@@ -117,20 +144,23 @@ internal class ThemeSync(
                     settings = decode(response)
                 }
                 settings = decode(request(current))
-                check(ThemeProto.theme(settings) == desired.wire) { "Discord did not confirm the selected theme" }
+                check(ThemeProto.theme(settings) == desired.theme.wire && ThemeProto.preset(settings) == desired.preset?.id) {
+                    "Discord did not confirm the selected theme"
+                }
             }
-            val actual = ThemeChoice.fromWire(ThemeProto.theme(settings)) ?: return
+            val theme = ThemeChoice.fromWire(ThemeProto.theme(settings)) ?: return
+            // A lapsed subscription falls back to the preset's base theme.
+            val preset = if (hasNitro()) GradientPreset.byId(ThemeProto.preset(settings)) else null
+            val actual = if (preset != null) Appearance.of(preset) else Appearance(theme)
             main.post {
                 synchronized(lock) {
                     if (!active(current) || current.revision != selection.second ||
                         !StoreStream.getUserSettingsSystem().isThemeSyncEnabled) return@post
                     current.pending = null
                     apply(actual)
-                    val userId = StoreStream.getUsers().me.id
                     worker.execute {
                         if (active(current) && synchronized(lock) { current.revision == selection.second }) {
-                            context.getSharedPreferences("NewThemes", Context.MODE_PRIVATE).edit()
-                                .putInt(userId.toString(), actual.wire).apply()
+                            save(userId, actual)
                         }
                     }
                 }

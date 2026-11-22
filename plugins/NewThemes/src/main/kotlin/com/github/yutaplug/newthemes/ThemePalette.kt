@@ -4,7 +4,13 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.content.res.Resources
 import android.content.res.TypedArray
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Shader
+import android.view.View
+import android.view.ViewTreeObserver
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
@@ -21,35 +27,111 @@ import com.aliucord.patcher.PreHook
 import com.aliucord.Utils
 import de.robv.android.xposed.XposedBridge
 
-/** Changes only Discord's neutral dark palette, retaining accents and status colors. */
-internal class ThemePalette(private val choice: () -> ThemeChoice) {
+/**
+ * Changes only Discord's neutral palette, retaining accents and status colors.
+ * With a Nitro preset, neutral colors are tinted with the preset, and opaque
+ * neutral backgrounds draw their slice of one screen-sized gradient.
+ */
+internal class ThemePalette(private val choice: () -> Appearance) {
     private val originals = HashMap<Int, Int>()
+    private val lightOriginals = HashSet<Int>()
     private lateinit var resources: Resources
     private val ash = intArrayOf(0x4e5058, 0x404249, 0x35373c, 0x303238, 0x2b2d31, 0x232428, 0x1e1f22, 0x111214)
     private val dark = intArrayOf(0x3f3f46, 0x29292e, 0x1a1a1e, 0x17171b, 0x131316, 0x111114, 0x0e0e11, 0x08080a)
     private val onyx = intArrayOf(0x333338, 0x111113, 0x000000, 0x08080b, 0x08080b, 0x08080b, 0x08080b, 0x000000)
 
+    // Like the official clients, dark presets darken the gradient towards black
+    // instead of grey, so dark parts of a gradient stay black. Raised elements
+    // (buttons, inputs) keep a grey base so they still stand out there.
+    // Indexes follow primary_500, 560, 600, 630, 660, 700, 800, 900.
+    private val darkTones = arrayOf(
+        Tone(0xff3f3f46.toInt(), 0.35f),
+        Tone(0xff29292e.toInt(), 0.35f),
+        Tone(Color.BLACK, 0.40f),
+        Tone(Color.BLACK, 0.37f),
+        Tone(0xff0a0a0c.toInt(), 0.35f),
+        Tone(Color.BLACK, 0.28f),
+        Tone(Color.BLACK, 0.22f),
+        Tone(Color.BLACK, 0.15f),
+    )
+
+    // Tinted solid -> tone, for colors that were already mapped once.
+    private val solids = HashMap<Int, Tone>()
+    private var solidsPreset: GradientPreset? = null
+    private val pendingSurface = ThreadLocal<Tone?>()
+
+    val preset: GradientPreset? get() = choice().preset
+
+    /** The opaque color a surface of [tone] has at the preset's representative point. */
+    fun solid(preset: GradientPreset, tone: Tone): Int = GradientPreset.mix(tone.base, preset.mid, tone.share)
+
+    /** Overlay drawn above the gradient, so gradient + overlay averages to [solid]. */
+    fun overlay(tone: Tone): Int = ((((1f - tone.share) * 255f) + 0.5f).toInt() shl 24) or (tone.base and 0xffffff)
+
+    private fun lightTone(color: Int) = Tone(color, LIGHT_TINT)
+
+    @Synchronized
+    private fun solidsFor(preset: GradientPreset): HashMap<Int, Tone> {
+        if (solidsPreset !== preset) {
+            solids.clear()
+            val tones = if (preset.light) (lightOriginals + Color.WHITE).map { lightTone(it) } else darkTones.toList()
+            tones.forEach { solids.getOrPut(solid(preset, it)) { it } }
+            solidsPreset = preset
+        }
+        return solids
+    }
+
+    /** Tone of an opaque background color, when a preset should draw it as a gradient. */
+    fun surfaceTone(color: Int): Tone? {
+        val preset = preset ?: return null
+        if (Color.alpha(color) != 255) return null
+        if (preset.light) {
+            if (color == Color.WHITE || color in lightOriginals) return lightTone(color)
+        } else {
+            originals[color]?.let { return darkTones[it] }
+        }
+        return solidsFor(preset)[color]
+    }
+
+    fun mapped(color: Int): Int? {
+        val appearance = choice()
+        val preset = appearance.preset
+        val alpha = color and -0x1000000
+        if (preset != null) {
+            val opaque = color or Color.BLACK
+            if (preset.light) {
+                // White is also the light theme's text-on-accent color; it is
+                // only tinted where it is used as a background (surfaceTone).
+                return if (opaque in lightOriginals) alpha or (solid(preset, lightTone(opaque)) and 0xffffff) else null
+            }
+            val index = originals[opaque] ?: return null
+            return alpha or (solid(preset, darkTones[index]) and 0xffffff)
+        }
+        if (appearance.theme == ThemeChoice.LIGHT) return null
+        val index = originals[color or Color.BLACK] ?: return null
+        val palette = when (appearance.theme) {
+            ThemeChoice.DARK -> dark
+            ThemeChoice.ONYX -> onyx
+            else -> ash
+        }
+        return alpha or palette[index]
+    }
+
     fun start(context: Context, patcher: PatcherAPI) {
         resources = context.resources
-        val names = arrayOf("primary_500", "primary_560", "primary_600", "primary_630", "primary_660", "primary_700", "primary_800", "primary_900")
-        names.forEachIndexed { index, name ->
+        @Suppress("DEPRECATION")
+        fun color(name: String): Int? {
             val id = Utils.getResId(name, "color")
-            if (id != 0) {
-                @Suppress("DEPRECATION")
-                val color = if (Build.VERSION.SDK_INT >= 23) context.resources.getColor(id, null) else context.resources.getColor(id)
-                originals[color] = index
-            }
+            if (id == 0) return null
+            return if (Build.VERSION.SDK_INT >= 23) context.resources.getColor(id, null) else context.resources.getColor(id)
         }
-        fun mapped(color: Int): Int? {
-            if (choice() == ThemeChoice.LIGHT) return null
-            val index = originals[color or Color.BLACK] ?: return null
-            val palette = when (choice()) {
-                ThemeChoice.DARK -> dark
-                ThemeChoice.ONYX -> onyx
-                else -> ash
-            }
-            return (color and -0x1000000) or palette[index]
-        }
+        val names = arrayOf("primary_500", "primary_560", "primary_600", "primary_630", "primary_660", "primary_700", "primary_800", "primary_900")
+        names.forEachIndexed { index, name -> color(name)?.let { originals[it] = index } }
+        // Light theme backgrounds (white is handled separately, see mapped).
+        arrayOf(
+            "primary_100", "primary_200", "primary_light_100", "primary_light_130", "primary_light_160",
+            "primary_light_200", "primary_light_230",
+        ).forEach { name -> color(name)?.let { lightOriginals.add(it) } }
         val int = Int::class.javaPrimitiveType!!
         val getColor = if (Build.VERSION.SDK_INT >= 23) {
             Resources::class.java.getDeclaredMethod("getColor", int, Resources.Theme::class.java)
@@ -75,9 +157,27 @@ internal class ThemePalette(private val choice: () -> ThemeChoice) {
         val valueIndex = if (Build.VERSION.SDK_INT >= 24) 1 else 0
         patcher.patch(loadDrawable, PreHook {
             val value = it.args[valueIndex] as TypedValue
+            // Set on every call so nested loads cannot leak a stale surface.
+            pendingSurface.set(null)
             if (value.type in TypedValue.TYPE_FIRST_COLOR_INT..TypedValue.TYPE_LAST_COLOR_INT) {
+                pendingSurface.set(surfaceTone(value.data))
                 mapped(value.data)?.let { color -> value.data = color }
             }
+        })
+        patcher.patch(loadDrawable, Hook {
+            val tone = pendingSurface.get()
+            pendingSurface.set(null)
+            if (tone != null && preset != null && it.result?.javaClass == ColorDrawable::class.java) {
+                it.result = SurfaceDrawable(this, tone)
+            }
+        })
+        // Code-set backgrounds (ColorCompat themed colors, adapters, etc.).
+        patcher.patch(View::class.java.getDeclaredMethod("setBackgroundColor", int), PreHook {
+            val tone = surfaceTone(it.args[0] as Int) ?: return@PreHook
+            val view = it.thisObject as View
+            val current = view.background
+            if (current is SurfaceDrawable && current.tone == tone) current.reset() else view.background = SurfaceDrawable(this, tone)
+            it.result = null
         })
         // These callers may already have inlined the unpatched drawable loader.
         val typedArrayDrawable = if (Build.VERSION.SDK_INT >= 26) {
@@ -135,6 +235,7 @@ internal class ThemePalette(private val choice: () -> ThemeChoice) {
 
     /** Cached drawables otherwise retain the previous palette across recreation. */
     fun clearCaches() {
+        solidsPreset = null
         if (!::resources.isInitialized) return
         fun field(owner: Any, name: String): Any? {
             var type: Class<*>? = owner.javaClass
@@ -169,5 +270,134 @@ internal class ThemePalette(private val choice: () -> ThemeChoice) {
                 }
             }
         }
+    }
+
+
+    private companion object {
+        // Share of the preset gradient in light surfaces; the rest is the neutral.
+        const val LIGHT_TINT = 0.4f
+    }
+}
+
+/** A neutral background level: [share] of the preset gradient over [base]. */
+internal data class Tone(val base: Int, val share: Float)
+
+/**
+ * An opaque neutral background that paints its part of a screen-sized preset
+ * gradient, then the neutral as an overlay. Every surface uses the same screen
+ * gradient, so nested surfaces line up while keeping their relative shades.
+ * It stays a ColorDrawable (with the averaged solid color) for code that reads
+ * or changes the color; once the color is changed it draws that color plainly.
+ */
+internal class SurfaceDrawable(private val palette: ThemePalette, val tone: Tone) : ColorDrawable() {
+    private val gradient = Paint()
+    private val overlay = Paint()
+    private val location = IntArray(2)
+    private val probe = IntArray(2)
+    private val matrix = Matrix()
+    private var shader: Shader? = null
+    private var shaderPreset: GradientPreset? = null
+    private var shaderWidth = 0
+    private var shaderHeight = 0
+
+    // The color this drawable set itself; anything else came from outside.
+    private var expected = 0
+
+    // Moving a view (sliding panels, scrolling lists, transitions) reuses its
+    // last drawing, which would keep the gradient slice of the old position.
+    // Redraw whenever the view is about to be drawn somewhere else on screen.
+    private var tracked: View? = null
+    private val preDraw = ViewTreeObserver.OnPreDrawListener {
+        val view = tracked
+        if (view != null) {
+            if (owner() !== view) {
+                untrack()
+            } else {
+                view.getLocationOnScreen(probe)
+                if (probe[0] != location[0] || probe[1] != location[1]) invalidateSelf()
+            }
+        }
+        true
+    }
+    private val attach = object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(view: View) {
+            view.viewTreeObserver.addOnPreDrawListener(preDraw)
+        }
+
+        override fun onViewDetachedFromWindow(view: View) {
+            view.viewTreeObserver.removeOnPreDrawListener(preDraw)
+        }
+    }
+
+    init {
+        reset()
+    }
+
+    fun reset() {
+        val preset = palette.preset
+        expected = if (preset != null) palette.solid(preset, tone) else tone.base or Color.BLACK
+        color = expected
+    }
+
+    private fun owner(): View? {
+        var callback: Any? = callback
+        var depth = 0
+        while (callback != null && depth++ < 8) {
+            if (callback is View) return callback
+            callback = (callback as? Drawable)?.callback
+        }
+        return null
+    }
+
+    private fun track(view: View) {
+        if (tracked === view) return
+        untrack()
+        tracked = view
+        view.addOnAttachStateChangeListener(attach)
+        if (view.isAttachedToWindow) view.viewTreeObserver.addOnPreDrawListener(preDraw)
+    }
+
+    private fun untrack() {
+        val view = tracked ?: return
+        tracked = null
+        view.removeOnAttachStateChangeListener(attach)
+        view.viewTreeObserver.removeOnPreDrawListener(preDraw)
+    }
+
+    override fun draw(canvas: Canvas) {
+        val preset = palette.preset
+        val owner = owner()
+        if (preset == null || owner == null || color != expected) {
+            super.draw(canvas)
+            return
+        }
+        // Pages that are not recreated (settings) follow a newly chosen preset.
+        if (expected != palette.solid(preset, tone)) reset()
+        track(owner)
+        val metrics = owner.resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        var current = shader
+        if (current == null || shaderPreset !== preset || shaderWidth != width || shaderHeight != height) {
+            current = preset.shader(0f, 0f, width.toFloat(), height.toFloat())
+            shader = current
+            shaderPreset = preset
+            shaderWidth = width
+            shaderHeight = height
+        }
+        owner.getLocationOnScreen(location)
+        matrix.setTranslate(-location[0].toFloat(), -location[1].toFloat())
+        current.setLocalMatrix(matrix)
+        gradient.shader = current
+        canvas.drawRect(bounds, gradient)
+        overlay.color = palette.overlay(tone)
+        canvas.drawRect(bounds, overlay)
+    }
+
+    override fun getConstantState(): ConstantState = State(palette, tone)
+
+    private class State(private val palette: ThemePalette, private val tone: Tone) : ConstantState() {
+        override fun newDrawable(): Drawable = SurfaceDrawable(palette, tone)
+        override fun getChangingConfigurations(): Int = 0
     }
 }

@@ -6,6 +6,7 @@ import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.TextView
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -23,18 +24,22 @@ import java.util.WeakHashMap
 
 @AliucordPlugin
 class NewThemes : Plugin() {
-    private class Page(val radios: List<CheckedSetting>, var model: WidgetSettingsAppearance.Model? = null)
+    private class Page(
+        val radios: List<CheckedSetting>,
+        val picker: NitroThemePicker,
+        var model: WidgetSettingsAppearance.Model? = null,
+    )
     private val pages = WeakHashMap<WidgetSettingsAppearance, Page>()
     private var sync: ThemeSync? = null
     private var palette: ThemePalette? = null
-    private val activityThemes = WeakHashMap<AppActivity, ThemeChoice>()
+    private val activityThemes = WeakHashMap<AppActivity, Appearance>()
     private val comparingTheme = ThreadLocal<String>()
     private var running = false
-    @Volatile private var selected = ThemeChoice.ASH
+    @Volatile private var selected = Appearance(ThemeChoice.ASH)
 
     override fun start(context: Context) {
         val store = StoreStream.getUserSettingsSystem()
-        selected = ThemeChoice.fromNative(store.theme)
+        selected = Appearance(ThemeChoice.fromNative(store.theme))
         running = true
         val bridge = ThemeSync(context.applicationContext, ::applyTheme) { message, error -> logger.warn(message, error) }
         sync = bridge
@@ -92,7 +97,7 @@ class NewThemes : Plugin() {
                 "setTheme", String::class.java, Boolean::class.javaPrimitiveType, Function0::class.java,
             ), PreHook {
                 if (it.args[1] == true) {
-                    choose(ThemeChoice.fromNative(it.args[0] as String))
+                    choose(Appearance(ThemeChoice.fromNative(it.args[0] as String)))
                     it.result = null
                 }
             })
@@ -102,7 +107,7 @@ class NewThemes : Plugin() {
             // The legacy payload collapses Dark and Onyx to Ash. Never let that
             // representation overwrite the four-value protobuf selection.
             patcher.patch(ModelUserSettings::class.java.getDeclaredMethod("getTheme"), Hook {
-                if (it.result != null) it.result = selected.native
+                if (it.result != null) it.result = selected.theme.native
             })
             patcher.patch(StoreUserSettingsSystem::class.java.getDeclaredMethod("handleConnectionOpen", ModelPayload::class.java), Hook {
                 bridge.refresh()
@@ -136,20 +141,33 @@ class NewThemes : Plugin() {
         }
     }
 
-    private fun choose(theme: ThemeChoice) {
-        applyTheme(theme)
-        sync?.choose(theme)
+    private fun choose(appearance: Appearance) {
+        applyTheme(appearance)
+        sync?.choose(appearance)
     }
 
-    private fun applyTheme(theme: ThemeChoice) {
-        if (selected != theme) palette?.clearCaches()
-        selected = theme
+    private fun applyTheme(appearance: Appearance) {
+        if (selected != appearance) palette?.clearCaches()
+        selected = appearance
         val store = StoreStream.getUserSettingsSystem()
-        if (store.theme != theme.native) store.setTheme(theme.native, false, null)
-        pages.values.forEach { page ->
-            page.radios.forEachIndexed { index, radio -> radio.g(ThemeChoice.values()[index] == theme, false) }
-        }
+        if (store.theme != appearance.theme.native) store.setTheme(appearance.theme.native, false, null)
+        pages.values.forEach { updatePage(it) }
         refreshActivity(Utils.appActivity)
+    }
+
+    private fun updatePage(page: Page) {
+        val appearance = selected
+        page.radios.forEachIndexed { index, radio ->
+            radio.g(appearance.preset == null && ThemeChoice.values()[index] == appearance.theme, false)
+        }
+        page.picker.update(appearance.preset)
+        // Settings pages are not recreated; redraw their gradient surfaces.
+        (page.radios[0].rootView as? ViewGroup)?.let { invalidateTree(it) }
+    }
+
+    private fun invalidateTree(view: View) {
+        view.invalidate()
+        if (view is ViewGroup) for (index in 0 until view.childCount) invalidateTree(view.getChildAt(index))
     }
 
     private fun bind(widget: WidgetSettingsAppearance, model: WidgetSettingsAppearance.Model?) {
@@ -159,33 +177,47 @@ class NewThemes : Plugin() {
             val parent = binding.l.parent as ViewGroup
             val layout = Utils.getResId("widget_settings_appearance", "layout")
             val radioId = Utils.getResId("settings_appearance_theme_light_radio", "id")
-            check(layout != 0 && radioId != 0) { "Discord appearance resources unavailable" }
-            fun cloneRadio(): CheckedSetting {
-                // Inflate the exact target layout to retain cs_view_type, style,
-                // spacing and Discord's text appearance on both added rows.
+            val headerId = Utils.getResId("settings_appearance_sync_header", "id")
+            val subTextId = Utils.getResId("settings_appearance_font_scale_platform", "id")
+            check(layout != 0 && radioId != 0 && headerId != 0 && subTextId != 0) { "Discord appearance resources unavailable" }
+            // Inflate the exact target layout to retain Discord's styles, spacing
+            // and text appearance on every added view.
+            fun <T : View> clone(id: Int): T {
                 val root = LayoutInflater.from(parent.context).inflate(layout, parent, false)
-                val row = root.findViewById<CheckedSetting>(radioId)
-                (row.parent as ViewGroup).removeView(row)
-                row.id = View.generateViewId()
-                return row
+                val view = root.findViewById<T>(id)
+                (view.parent as ViewGroup).removeView(view)
+                view.id = View.generateViewId()
+                return view
             }
-            val ash = cloneRadio()
-            val onyx = cloneRadio()
+            val ash = clone<CheckedSetting>(radioId)
+            val onyx = clone<CheckedSetting>(radioId)
             parent.addView(ash, parent.indexOfChild(binding.j))
             parent.addView(onyx, parent.indexOfChild(binding.j) + 1)
-            Page(listOf(binding.l, ash, binding.j, onyx)).also { pages[widget] = it }
+            val divider = run {
+                // The settings divider that precedes the sync header.
+                val root = LayoutInflater.from(parent.context).inflate(layout, parent, false)
+                val header = root.findViewById<View>(headerId)
+                val container = header.parent as ViewGroup
+                container.getChildAt(container.indexOfChild(header) - 1).also { container.removeView(it) }
+            }
+            val picker = NitroThemePicker(parent.context, clone<TextView>(headerId), clone<TextView>(subTextId), divider) {
+                choose(Appearance.of(it))
+            }
+            var index = parent.indexOfChild(binding.m) + 1
+            picker.views.forEach { parent.addView(it, index++) }
+            Page(listOf(binding.l, ash, binding.j, onyx), picker).also { pages[widget] = it }
         }
         if (model != null) page.model = model
         binding.m.visibility = View.GONE
         page.radios.forEachIndexed { index, radio ->
             val theme = ThemeChoice.values()[index]
             radio.setText(theme.label)
-            radio.g(selected == theme, false)
             // CheckedSetting.e requires a non-null listener. Replace Discord's
             // easter-egg handler with selection of this row's actual theme.
-            radio.e { choose(theme) }
-            radio.setOnCheckedListener { checked -> if (checked) choose(theme) }
+            radio.e { choose(Appearance(theme)) }
+            radio.setOnCheckedListener { checked -> if (checked) choose(Appearance(theme)) }
         }
+        updatePage(page)
     }
 
     override fun stop(context: Context) {
@@ -199,7 +231,7 @@ class NewThemes : Plugin() {
         comparingTheme.remove()
         pages.forEach { (widget, page) ->
             page.radios.forEach { it.setOnCheckedListener(null) }
-            listOf(page.radios[1], page.radios[3]).forEach { (it.parent as? ViewGroup)?.removeView(it) }
+            (listOf(page.radios[1], page.radios[3]) + page.picker.views).forEach { (it.parent as? ViewGroup)?.removeView(it) }
             if (widget.view != null) {
                 page.radios[2].setText("Dark")
                 page.model?.let { WidgetSettingsAppearance.`access$configureUI`(widget, it) }
@@ -207,7 +239,8 @@ class NewThemes : Plugin() {
         }
         pages.clear()
         // Leave a native theme the unmodified client understands.
-        val native = if (selected == ThemeChoice.LIGHT) "light" else if (selected == ThemeChoice.ONYX) "pureEvil" else "dark"
+        val theme = selected.theme
+        val native = if (theme == ThemeChoice.LIGHT) "light" else if (theme == ThemeChoice.ONYX) "pureEvil" else "dark"
         StoreStream.getUserSettingsSystem().setTheme(native, false, null)
         Utils.appActivity?.let { activity ->
             activity.window.decorView.post {
