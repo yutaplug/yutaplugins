@@ -2,6 +2,7 @@ package com.github.yutaplug.typingnotifications
 
 import android.content.Context
 import com.aliucord.api.SettingsAPI
+import com.aliucord.wrappers.users.globalName
 import com.discord.api.channel.ChannelUtils
 import com.discord.stores.StoreStream
 
@@ -67,7 +68,7 @@ internal object Filters {
     /** A readable name for a list entry, or null when Discord has not loaded it. */
     fun describe(context: Context, key: String, id: Long): String? = runCatching {
         when (key) {
-            BLOCKED_USERS, ALLOWED_USERS -> StoreStream.getUsers().users[id]?.username
+            BLOCKED_USERS, ALLOWED_USERS -> StoreStream.getUsers().users[id]?.let { it.globalName ?: it.username }
             BLOCKED_SERVERS, ALLOWED_SERVERS -> StoreStream.getGuilds().getGuild(id)?.name
             else -> StoreStream.getChannels().getChannel(id)?.let { channel ->
                 val name = ChannelUtils.d(channel, context, true)
