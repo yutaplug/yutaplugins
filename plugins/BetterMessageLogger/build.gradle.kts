@@ -1,9 +1,11 @@
-version = "1.0.26"
+version = "1.0.27"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.27
+        * Show when a message was deleted in the deleted tag and edit history
         # 1.0.26
         * Use Aliucord's themed confirmation dialog when clearing saved logs
         * Use Discord's native settings rows, headers and dividers

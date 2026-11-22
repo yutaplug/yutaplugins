@@ -108,7 +108,7 @@ internal class MessageDecorations(
                 item.itemView.findViewById<TextView>(Utils.getResId("chat_list_adapter_item_text", "id")) ?: return@post
             val saved = record(entry.message.id)
             if (history && view is SimpleDraweeSpanTextView) renderHistory(item, view, entry, saved)
-            applyDeletedLabel(view, saved?.deleted == true)
+            applyDeletedLabel(view, saved?.takeIf { it.deleted })
         }
     }
 
@@ -187,7 +187,22 @@ internal class MessageDecorations(
         }
     }
 
-    private fun applyDeletedLabel(view: TextView, deleted: Boolean) {
+    /** " (deleted: 5 min. ago)", in the same format as the inline "(edited: …)" history. */
+    private fun deletedLabel(context: Context, timestamp: Long?): String {
+        timestamp ?: return " (deleted)"
+        val time = DateUtils.getRelativeDateTimeString(
+            context,
+            timestamp,
+            DateUtils.MINUTE_IN_MILLIS,
+            DateUtils.DAY_IN_MILLIS * 2,
+            DateUtils.FORMAT_ABBREV_ALL,
+        )
+        return " (deleted: $time)"
+    }
+
+    private fun applyDeletedLabel(view: TextView, record: MessageRecord?) {
+        val deleted = record != null
+        val label = if (deleted) deletedLabel(view.context, record?.deletedTimestamp) else ""
         val native = nativeBuilder(view)
         // Discord's native builder owns the emoji drawables. Never replace it with plain spans.
         if (native == null && view is SimpleDraweeSpanTextView) return
@@ -203,10 +218,10 @@ internal class MessageDecorations(
             val end = if (showTag) builder.getSpanStart(labels[0]) else builder.length
             val validLabel = !showTag ||
                 (
-                    end == builder.length - DELETED_LABEL.length &&
+                    end == builder.length - label.length &&
                         end >= 0 &&
                         labels[0].color == labelColor &&
-                        builder.subSequence(end, builder.length).toString() == DELETED_LABEL
+                        builder.subSequence(end, builder.length).toString() == label
                 )
             if (validLabel &&
                 (
@@ -240,7 +255,7 @@ internal class MessageDecorations(
             }
             if (showTag) {
                 val start = builder.length
-                builder.append(DELETED_LABEL)
+                builder.append(label)
                 builder.setSpan(DeletedLabelSpan(labelColor), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
         }
@@ -350,7 +365,7 @@ internal class MessageDecorations(
                     }
                     rebind(view as SimpleDraweeSpanTextView, builder)
                 }
-                applyDeletedLabel(view, false)
+                applyDeletedLabel(view, null)
             }
         }
         synchronized(bound) { bound.clear() }
@@ -371,9 +386,5 @@ internal class MessageDecorations(
             super.updateDrawState(paint)
             paint.textSize *= 0.75f
         }
-    }
-
-    companion object {
-        private const val DELETED_LABEL = " (deleted)"
     }
 }

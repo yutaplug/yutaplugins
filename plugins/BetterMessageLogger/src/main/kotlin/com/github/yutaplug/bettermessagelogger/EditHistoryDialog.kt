@@ -50,7 +50,8 @@ internal object EditHistoryDialog {
 
         version(
             if (record.deleted) "Final version · deleted" else "Current",
-            format.format(Date(record.editedTimestamp ?: record.timestamp)),
+            format.format(Date(record.editedTimestamp ?: record.timestamp)) +
+                (record.deletedTimestamp?.let { " · Deleted ${format.format(Date(it))}" } ?: ""),
             record.content,
             true,
         )
