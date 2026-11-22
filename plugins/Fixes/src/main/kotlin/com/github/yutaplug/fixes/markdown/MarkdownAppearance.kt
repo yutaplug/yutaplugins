@@ -22,7 +22,7 @@ internal object MarkdownAppearance {
     val sizes = listOf(
         TextSize("Heading 1", "# Heading", HEADER_1_SCALE, 1.35f),
         TextSize("Heading 2", "## Heading", HEADER_2_SCALE, 1.20f),
-        TextSize("Heading 3", "### Heading", HEADER_3_SCALE, 1.10f),
+        TextSize("Heading 3", "### Heading", HEADER_3_SCALE, 1.0f),
         TextSize("Subtext", "-# Subtext", SUBTEXT_SCALE, 0.75f),
     )
 

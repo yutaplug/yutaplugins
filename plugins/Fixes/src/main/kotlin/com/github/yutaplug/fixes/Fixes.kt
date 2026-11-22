@@ -10,15 +10,19 @@ import com.github.yutaplug.fixes.forumtag.ForumTagFix
 import com.github.yutaplug.fixes.friend.FriendFix
 import com.github.yutaplug.fixes.friendrequest.FriendRequestFix
 import com.github.yutaplug.fixes.gifdownload.GifDownloadFix
+import com.github.yutaplug.fixes.gifsticker.GifStickerFix
 import com.github.yutaplug.fixes.markdown.MarkdownAppearance
 import com.github.yutaplug.fixes.markdown.MarkdownFix
 import com.github.yutaplug.fixes.messagelink.MessageLinkFix
+import com.github.yutaplug.fixes.messagewidth.MessageWidthFix
 import com.github.yutaplug.fixes.qrlogin.QRCodeLogin
 import com.github.yutaplug.fixes.rawgithub.RawGitHubUpdater
 import com.github.yutaplug.fixes.searchhistory.SearchHistoryFix
 import com.github.yutaplug.fixes.servernickname.ServerNicknameFix
 import com.github.yutaplug.fixes.serversheet.ServerSheetFix
+import com.github.yutaplug.fixes.serversettings.ServerSettingsFix
 import com.github.yutaplug.fixes.settings.SettingsFix
+import com.github.yutaplug.fixes.validuser.ValidUserFix
 
 @AliucordPlugin(requiresRestart = true)
 class Fixes : Plugin() {
@@ -27,6 +31,7 @@ class Fixes : Plugin() {
         FriendFix(),
         FriendRequestFix(),
         GifDownloadFix(),
+        GifStickerFix(),
         MarkdownFix(),
         MessageLinkFix(),
         SearchHistoryFix(),
@@ -36,6 +41,9 @@ class Fixes : Plugin() {
         ForumTagFix(),
         ServerNicknameFix(),
         QRCodeLogin(),
+        MessageWidthFix(),
+        ServerSettingsFix(),
+        ValidUserFix(),
     )
 
     internal val markdown: MarkdownFix get() = fixes.first { it is MarkdownFix } as MarkdownFix
@@ -93,6 +101,13 @@ class Fixes : Plugin() {
         }
         // Aliucord's own "A restart is required. Restart now?" snackbar.
         if (fix.requiresRestart) Utils.promptRestart()
+    }
+
+    /** Restarts a running fix so it picks up changes to its own options. */
+    internal fun restartFix(fix: Fix) {
+        if (!running || !fix.started) return
+        stopFix(fix, Utils.appContext)
+        startFix(fix, Utils.appContext)
     }
 
     private fun startFix(fix: Fix, context: Context) {

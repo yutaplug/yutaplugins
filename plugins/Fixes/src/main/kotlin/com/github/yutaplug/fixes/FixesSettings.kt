@@ -12,6 +12,8 @@ import com.discord.views.CheckedSetting
 import com.github.yutaplug.fixes.markdown.MarkdownAppearance
 import com.github.yutaplug.fixes.markdown.MarkdownFix
 import com.github.yutaplug.fixes.markdown.MarkdownFixSettings
+import com.github.yutaplug.fixes.serversettings.ServerSettingsFix
+import com.github.yutaplug.fixes.serversettings.ServerSettingsOptions
 import com.lytefast.flexinput.R
 
 class FixesSettings(private val plugin: Fixes) : SettingsPage() {
@@ -39,6 +41,11 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
             if (fix is MarkdownFix) {
                 row("Markdown appearance", "ic_theme_24dp") {
                     Utils.openPageWithProxy(requireContext(), MarkdownFixSettings(plugin.settings, plugin.markdown))
+                }
+            }
+            if (fix is ServerSettingsFix) {
+                row("Server settings options", "ic_settings_grey_a60_24dp") {
+                    Utils.openPageWithProxy(requireContext(), ServerSettingsOptions(plugin, fix))
                 }
             }
         }
