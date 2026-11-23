@@ -6,8 +6,12 @@ import android.content.res.Resources
 import android.content.res.TypedArray
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.RectF
 import android.graphics.Shader
 import android.view.View
 import android.view.ViewTreeObserver
@@ -21,11 +25,14 @@ import android.util.TypedValue
 import android.widget.TextView
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.content.res.ResourcesCompat
+import androidx.recyclerview.widget.RecyclerView
 import com.aliucord.api.PatcherAPI
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.aliucord.Utils
+import com.discord.utilities.views.StickyHeaderItemDecoration
 import de.robv.android.xposed.XposedBridge
+import java.util.WeakHashMap
 
 /**
  * Changes only Discord's neutral palette, retaining accents and status colors.
@@ -171,13 +178,27 @@ internal class ThemePalette(private val choice: () -> Appearance) {
                 it.result = SurfaceDrawable(this, tone)
             }
         })
-        // Code-set backgrounds (ColorCompat themed colors, adapters, etc.).
+        // Code-set backgrounds (ColorCompat themed colors, adapters, etc.). Translucent
+        // neutrals (like the mask behind nameplate text) become a translucent surface, so
+        // they blend into the gradient instead of laying a flat band over it.
         patcher.patch(View::class.java.getDeclaredMethod("setBackgroundColor", int), PreHook {
-            val tone = surfaceTone(it.args[0] as Int) ?: return@PreHook
+            val color = it.args[0] as Int
+            val alpha = Color.alpha(color)
+            if (alpha == 0) return@PreHook
+            val tone = surfaceTone(color or Color.BLACK) ?: return@PreHook
             val view = it.thisObject as View
             val current = view.background
-            if (current is SurfaceDrawable && current.tone == tone) current.reset() else view.background = SurfaceDrawable(this, tone)
+            if (current is SurfaceDrawable && current.tone == tone && current.layerAlpha == alpha && !current.fade) {
+                current.reset()
+            } else {
+                view.background = SurfaceDrawable(this, tone, alpha)
+            }
             it.result = null
+        })
+        // A left-to-right fade from a translucent neutral to transparent (nameplate masks).
+        patcher.patch(View::class.java.getDeclaredMethod("setBackgroundDrawable", Drawable::class.java), PreHook {
+            val drawable = it.args[0] as? GradientDrawable ?: return@PreHook
+            fadeSurface(drawable)?.let { surface -> it.args[0] = surface }
         })
         // These callers may already have inlined the unpatched drawable loader.
         val typedArrayDrawable = if (Build.VERSION.SDK_INT >= 26) {
@@ -219,6 +240,7 @@ internal class ThemePalette(private val choice: () -> Appearance) {
         patcher.patch(GradientDrawable::class.java.getDeclaredMethod("setColor", int), PreHook {
             mapped(it.args[0] as Int)?.let { color -> it.args[0] = color }
         })
+        patchStickyHeaders(patcher)
         // Framework callers can inline ColorStateList/ColorDrawable accessors.
         // Refresh those compiled callers as in Aliucord's native theming path.
         mapOf(
@@ -232,6 +254,46 @@ internal class ThemePalette(private val choice: () -> Appearance) {
         }
         clearCaches()
     }
+
+    /** A surface for a two-color LEFT_RIGHT gradient going from a neutral to transparent, if [drawable] is one. */
+    private fun fadeSurface(drawable: GradientDrawable): SurfaceDrawable? {
+        if (preset == null || Build.VERSION.SDK_INT < 24) return null
+        if (drawable.orientation != GradientDrawable.Orientation.LEFT_RIGHT) return null
+        val colors = drawable.colors ?: return null
+        if (colors.size != 2 || Color.alpha(colors[1]) != 0) return null
+        val alpha = Color.alpha(colors[0])
+        if (alpha == 0) return null
+        val tone = surfaceTone(colors[0] or Color.BLACK) ?: return null
+        return SurfaceDrawable(this, tone, alpha, fade = true)
+    }
+
+    /**
+     * Sticky list headers (member list sections, emoji and sticker categories, autocomplete)
+     * are a detached view that the list draws over itself, so they have no screen position of
+     * their own. Record where each one is drawn, so its gradient slice lines up with the list.
+     */
+    private fun patchStickyHeaders(patcher: PatcherAPI) {
+        val decoration = StickyHeaderItemDecoration::class.java
+        val onDrawOver = decoration.getDeclaredMethod(
+            "onDrawOver", Canvas::class.java, RecyclerView::class.java, RecyclerView.State::class.java,
+        )
+        val drawHeader = decoration.getDeclaredMethod(
+            "drawHeader", Canvas::class.java, View::class.java, Float::class.javaPrimitiveType,
+        )
+        // drawHeader is private and may be inlined into onDrawOver.
+        XposedBridge.deoptimizeMethod(onDrawOver)
+        patcher.patch(onDrawOver, PreHook { stickyList.set(it.args[1] as RecyclerView) })
+        patcher.patch(onDrawOver, Hook { stickyList.remove() })
+        patcher.patch(drawHeader, PreHook {
+            val list = stickyList.get() ?: return@PreHook
+            val origin = IntArray(2)
+            list.getLocationOnScreen(origin)
+            origin[1] += (it.args[2] as Float).toInt()
+            SurfaceDrawable.detachedOrigins[it.args[1] as View] = origin
+        })
+    }
+
+    private val stickyList = ThreadLocal<RecyclerView?>()
 
     /** Cached drawables otherwise retain the previous palette across recreation. */
     fun clearCaches() {
@@ -289,9 +351,18 @@ internal data class Tone(val base: Int, val share: Float)
  * It stays a ColorDrawable (with the averaged solid color) for code that reads
  * or changes the color; once the color is changed it draws that color plainly.
  */
-internal class SurfaceDrawable(private val palette: ThemePalette, val tone: Tone) : ColorDrawable() {
+internal class SurfaceDrawable(
+    private val palette: ThemePalette,
+    val tone: Tone,
+    /** Opacity of the whole surface, for translucent neutrals. */
+    val layerAlpha: Int = 255,
+    /** Fade from [layerAlpha] at the left edge to transparent at the right edge. */
+    val fade: Boolean = false,
+) : ColorDrawable() {
     private val gradient = Paint()
     private val overlay = Paint()
+    private val mask = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
+    private val layerBounds = RectF()
     private val location = IntArray(2)
     private val probe = IntArray(2)
     private val matrix = Matrix()
@@ -335,7 +406,8 @@ internal class SurfaceDrawable(private val palette: ThemePalette, val tone: Tone
 
     fun reset() {
         val preset = palette.preset
-        expected = if (preset != null) palette.solid(preset, tone) else tone.base or Color.BLACK
+        val solid = if (preset != null) palette.solid(preset, tone) else tone.base or Color.BLACK
+        expected = (solid and 0xffffff) or (layerAlpha shl 24)
         color = expected
     }
 
@@ -372,7 +444,7 @@ internal class SurfaceDrawable(private val palette: ThemePalette, val tone: Tone
             return
         }
         // Pages that are not recreated (settings) follow a newly chosen preset.
-        if (expected != palette.solid(preset, tone)) reset()
+        if (expected != (palette.solid(preset, tone) and 0xffffff) or (layerAlpha shl 24)) reset()
         track(owner)
         val metrics = owner.resources.displayMetrics
         val width = metrics.widthPixels
@@ -385,19 +457,69 @@ internal class SurfaceDrawable(private val palette: ThemePalette, val tone: Tone
             shaderWidth = width
             shaderHeight = height
         }
-        owner.getLocationOnScreen(location)
+        locate(owner)
         matrix.setTranslate(-location[0].toFloat(), -location[1].toFloat())
         current.setLocalMatrix(matrix)
         gradient.shader = current
+        // Translucent surfaces draw into a layer that the alpha (or fade) is then applied to,
+        // so gradient and overlay together end up exactly as see-through as the color asked.
+        layerBounds.set(bounds)
+        val layer = when {
+            fade -> canvas.saveLayer(layerBounds, null)
+            layerAlpha < 255 -> canvas.saveLayerAlpha(layerBounds, layerAlpha)
+            else -> -1
+        }
         canvas.drawRect(bounds, gradient)
         overlay.color = palette.overlay(tone)
         canvas.drawRect(bounds, overlay)
+        if (fade) {
+            mask.shader = LinearGradient(
+                bounds.left.toFloat(), 0f, bounds.right.toFloat(), 0f,
+                layerAlpha shl 24, 0, Shader.TileMode.CLAMP,
+            )
+            canvas.drawRect(bounds, mask)
+        }
+        if (layer != -1) canvas.restoreToCount(layer)
     }
 
-    override fun getConstantState(): ConstantState = State(palette, tone)
+    /**
+     * The owner's screen position. A view that isn't attached (a sticky header the list draws
+     * itself) is placed relative to the nearest ancestor whose drawn position was recorded.
+     */
+    private fun locate(owner: View) {
+        if (!owner.isAttachedToWindow) {
+            var x = 0
+            var y = 0
+            var current: View? = owner
+            while (current != null) {
+                val origin = detachedOrigins[current]
+                if (origin != null) {
+                    location[0] = origin[0] + x
+                    location[1] = origin[1] + y
+                    return
+                }
+                x += current.left
+                y += current.top
+                current = current.parent as? View
+            }
+        }
+        owner.getLocationOnScreen(location)
+    }
 
-    private class State(private val palette: ThemePalette, private val tone: Tone) : ConstantState() {
-        override fun newDrawable(): Drawable = SurfaceDrawable(palette, tone)
+    override fun getConstantState(): ConstantState = State(palette, tone, layerAlpha, fade)
+
+    private class State(
+        private val palette: ThemePalette,
+        private val tone: Tone,
+        private val layerAlpha: Int,
+        private val fade: Boolean,
+    ) : ConstantState() {
+        override fun newDrawable(): Drawable = SurfaceDrawable(palette, tone, layerAlpha, fade)
         override fun getChangingConfigurations(): Int = 0
+    }
+
+    companion object {
+        /** Screen position where a detached view was last drawn (see ThemePalette.patchStickyHeaders). Main thread only. */
+        val detachedOrigins = WeakHashMap<View, IntArray>()
     }
 }
