@@ -97,8 +97,11 @@ internal class MarkdownParser(private val settings: SettingsAPI, private val gam
         ): MessageSpec {
             val width = match.group(1).orEmpty().fold(0) { width, character -> width + if (character == '\t') 4 else 1 }
             val level = (1 + width / 2).coerceAtMost(8)
-            val node = ListItemNode(level, match.group(3) == "\n")
-            this@MarkdownParser.parse(match.group(2).orEmpty(), state, depth = depth + 1).forEach(node::addChild)
+            val marker = match.group(2).orEmpty()
+            // The list's first item picks its type and start number; MarkdownBlocks numbers the rest.
+            val number = if (marker.endsWith(".")) marker.dropLast(1).toInt() else null
+            val node = ListItemNode(level, number, match.group(4) == "\n")
+            this@MarkdownParser.parse(match.group(3).orEmpty(), state, depth = depth + 1).forEach(node::addChild)
             return MessageSpec(node, state)
         }
     }
@@ -161,7 +164,7 @@ internal class MarkdownParser(private val settings: SettingsAPI, private val gam
         val QUOTE: Pattern = Pattern.compile(
             "^(?:[ \\t]*>>>[ \\t]+([\\s\\S]*)|[ \\t]*>(?!>>)(?:[ \\t]+|(?=\\n|$))([^\\n]*(?:\\n|$)))",
         )
-        val LIST: Pattern = Pattern.compile("^([ \\t]*)[*-][ \\t]+([^\\n]*?)[ \\t]*(\\n|$)")
+        val LIST: Pattern = Pattern.compile("^([ \\t]*)([*-]|\\d{1,9}\\.)[ \\t]+([^\\n]*?)[ \\t]*(\\n|$)")
         val HEADER: Pattern = Pattern.compile("^[ \\t]*(#{1,3})[ \\t]+([^\\n]*?)[ \\t]*(\\n|$)")
         val SUBTEXT: Pattern = Pattern.compile("^[ \\t]*-#[ \\t]+([^\\n]*?)[ \\t]*(\\n|$)")
     }
@@ -205,14 +208,18 @@ private class HexColorNode(private val text: String, private val color: Int) : M
     }
 }
 
-private class ListItemNode(private val level: Int, private val newline: Boolean) : MessageNode() {
+private class ListItemNode(
+    private val level: Int,
+    private val number: Int?,
+    private val newline: Boolean,
+) : MessageNode() {
     override fun render(builder: SpannableStringBuilder, context: MessageRenderContext) {
         MarkdownBlocks.ensureLineStart(builder)
         val start = builder.length
         children?.forEach { it.render(builder, context) }
         if (builder.length == start) builder.append('\u200B')
         builder.setSpan(
-            BulletMarker(level),
+            BulletMarker(level, number),
             start,
             MarkdownBlocks.contentEnd(builder, start).coerceAtLeast(start + 1),
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,

@@ -1,4 +1,4 @@
-version = "1.0.1"
+version = "1.0.2"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,9 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.2
+        * Markdown: numbered lists (1. 2. 3.) now render, and dashes after a numbered item continue its numbering like on current Discord
+
         # 1.0.1
         * Added Message width (from zt64's MessageWidthFix): embeds and stickers use the full chat width
         * Added Server settings (from pilotbellyt-spec's ServerSettingsFix): the bans list and audit log load again, and invite durations read properly
