@@ -143,7 +143,7 @@ class FakeDecorSettings(
                 assetInput?.setText(preset.asset)
                 assetInput?.let { it.setSelection(it.length()) }
             }
-        }.show(Utils.appActivity.supportFragmentManager, "FakeDecorPresets")
+        }.show(parentFragmentManager, "FakeDecorPresets")
     }
 
     fun showOwnDecorations(decorations: List<*>) {
@@ -166,7 +166,7 @@ class FakeDecorSettings(
             title = "My Decor decorations"
             items = labels.toTypedArray()
             onResultListener = { which -> showDecorationActions(valid[which], labels[which]) }
-        }.show(Utils.appActivity.supportFragmentManager, "FakeDecorOwn")
+        }.show(parentFragmentManager, "FakeDecorOwn")
     }
 
     private fun showDecorationActions(decoration: Map<*, *>, label: String) {
@@ -186,7 +186,7 @@ class FakeDecorSettings(
                     confirmDelete(decoration["hash"]?.toString())
                 }
             }
-        }.show(Utils.appActivity.supportFragmentManager, "FakeDecorOwnActions")
+        }.show(parentFragmentManager, "FakeDecorOwnActions")
     }
 
     private fun confirmDelete(hash: String?) {
@@ -199,7 +199,7 @@ class FakeDecorSettings(
             .setOnOkListener {
                 plugin.deleteDecoration(hash)
                 dialog.dismiss()
-            }.show(Utils.appActivity.supportFragmentManager, "FakeDecorDelete")
+            }.show(parentFragmentManager, "FakeDecorDelete")
     }
 
     private fun section(title: String) {
