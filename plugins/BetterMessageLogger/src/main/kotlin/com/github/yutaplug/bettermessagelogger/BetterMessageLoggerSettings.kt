@@ -164,7 +164,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
             .setOnOkListener {
                 BetterMessageLogger.instance?.clearDatabase { if (storageCaption != null) updateStorage() }
                 confirm.dismiss()
-            }.show(Utils.appActivity.supportFragmentManager, "BetterMessageLoggerClear")
+            }.show(parentFragmentManager, "BetterMessageLoggerClear")
     }
 
     private fun idDialog(key: String, title: String) {

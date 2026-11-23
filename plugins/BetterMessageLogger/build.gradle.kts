@@ -1,9 +1,11 @@
-version = "1.0.28"
+version = "1.0.29"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.29
+        * The clear logs dialog no longer stops opening after you open and close another screen, like settings or an image
         # 1.0.28
         * Timestamps follow the CustomTimestamps plugin's format when it is enabled
         # 1.0.27
