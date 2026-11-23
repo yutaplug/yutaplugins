@@ -166,7 +166,7 @@ internal class MessageDecorations(
                 builder
                     .append(" (edited: ")
                     .append(
-                        DateUtils.getRelativeDateTimeString(
+                        Timestamps.custom(edit.timestamp, context) ?: DateUtils.getRelativeDateTimeString(
                             context,
                             edit.timestamp,
                             DateUtils.DAY_IN_MILLIS,
@@ -190,7 +190,7 @@ internal class MessageDecorations(
     /** " (deleted: 5 min. ago)", in the same format as the inline "(edited: …)" history. */
     private fun deletedLabel(context: Context, timestamp: Long?): String {
         timestamp ?: return " (deleted)"
-        val time = DateUtils.getRelativeDateTimeString(
+        val time = Timestamps.custom(timestamp, context) ?: DateUtils.getRelativeDateTimeString(
             context,
             timestamp,
             DateUtils.MINUTE_IN_MILLIS,

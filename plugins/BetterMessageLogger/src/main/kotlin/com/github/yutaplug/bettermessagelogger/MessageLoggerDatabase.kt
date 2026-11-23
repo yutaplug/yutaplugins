@@ -297,7 +297,9 @@ internal class MessageLoggerDatabase(
     fun exportTextAsync(output: File, done: (Result<File>) -> Unit) = enqueue("export text", done) {
         atomicExport(output) { stream ->
             val writer = OutputStreamWriter(stream, Charsets.UTF_8)
-            val format = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM)
+            val dateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM)
+
+            fun format(time: Long) = Timestamps.custom(time) ?: dateFormat.format(Date(time))
             writer.write("BetterMessageLogger export\n\n")
             db().rawQuery("SELECT * FROM messages ORDER BY timestamp, message_id", null).use { cursor ->
                 while (cursor.moveToNext()) {
@@ -305,9 +307,9 @@ internal class MessageLoggerDatabase(
                     writer.write("Message ID: ${record.id}\nChannel ID: ${record.channelId}\n")
                     writer.write("Server ID: ${record.guildId ?: "DM"}\n")
                     writer.write("Author: ${record.authorName} (${record.authorId})\n")
-                    writer.write("Date: ${format.format(Date(record.timestamp))}\n")
+                    writer.write("Date: ${format(record.timestamp)}\n")
                     writer.write("Status: ${if (record.deleted) "DELETED" else "EDITED"}\n")
-                    record.deletedTimestamp?.let { writer.write("Deleted: ${format.format(Date(it))}\n") }
+                    record.deletedTimestamp?.let { writer.write("Deleted: ${format(it)}\n") }
                     writer.write("Content:\n${record.content}\n")
                     db()
                         .rawQuery(
@@ -318,7 +320,7 @@ internal class MessageLoggerDatabase(
                             while (history.moveToNext()) {
                                 if (first) writer.write("Edit history:\n")
                                 first = false
-                                writer.write("${format.format(Date(history.getLong(0)))}:\n${history.getString(1)}\n")
+                                writer.write("${format(history.getLong(0))}:\n${history.getString(1)}\n")
                             }
                         }
                     writer.write("\n")

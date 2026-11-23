@@ -1,9 +1,11 @@
-version = "1.0.27"
+version = "1.0.28"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.28
+        * Timestamps follow the CustomTimestamps plugin's format when it is enabled
         # 1.0.27
         * Show when a message was deleted in the deleted tag and edit history
         # 1.0.26

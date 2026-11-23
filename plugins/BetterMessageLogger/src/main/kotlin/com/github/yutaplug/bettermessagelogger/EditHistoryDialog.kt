@@ -10,7 +10,9 @@ import java.util.Date
 internal object EditHistoryDialog {
     fun show(context: Context, record: MessageRecord) {
         val ui = LoggerUi(context)
-        val format = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+        val dateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+
+        fun format(time: Long) = Timestamps.custom(time, context) ?: dateFormat.format(Date(time))
         val content = ui.dialogContent()
         content.addView(
             ui
@@ -50,8 +52,8 @@ internal object EditHistoryDialog {
 
         version(
             if (record.deleted) "Final version · deleted" else "Current",
-            format.format(Date(record.editedTimestamp ?: record.timestamp)) +
-                (record.deletedTimestamp?.let { " · Deleted ${format.format(Date(it))}" } ?: ""),
+            format(record.editedTimestamp ?: record.timestamp) +
+                (record.deletedTimestamp?.let { " · Deleted ${format(it)}" } ?: ""),
             record.content,
             true,
         )
@@ -60,7 +62,7 @@ internal object EditHistoryDialog {
             val edit = record.edits[index]
             version(
                 if (index == 0) "Original" else "Version ${index + 1}",
-                "Replaced ${format.format(Date(edit.timestamp))}",
+                "Replaced ${format(edit.timestamp)}",
                 edit.content,
             )
             index--
