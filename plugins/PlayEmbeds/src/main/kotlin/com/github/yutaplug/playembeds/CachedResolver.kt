@@ -22,12 +22,18 @@ internal fun Pattern.allGroups(input: CharSequence, group: Int = 1): List<String
     return results
 }
 
-/** A stream Discord's ExoPlayer can play as one progressive source. */
+/**
+ * A stream Discord's ExoPlayer can play as one progressive source. [quality] is
+ * the video height when it can be chosen (YouTube), with [qualities] the heights
+ * that can be switched to.
+ */
 internal data class ResolvedMedia(
     val uri: String,
     val width: Int,
     val height: Int,
     val audioOnly: Boolean,
+    val quality: Int = 0,
+    val qualities: List<Int> = emptyList(),
 )
 
 /**
@@ -55,8 +61,10 @@ internal abstract class CachedResolver<V : Any>(private val failureTtlMs: Long =
 
     fun handles(url: String?): Boolean = url != null && key(url) != null
 
-    fun cached(url: String?): V? {
-        val key = url?.let(::key) ?: return null
+    fun cached(url: String?): V? = cachedKey(url?.let(::key))
+
+    protected fun cachedKey(key: String?): V? {
+        key ?: return null
         return synchronized(cache) { validEntry(key)?.value }
     }
 
@@ -66,8 +74,11 @@ internal abstract class CachedResolver<V : Any>(private val failureTtlMs: Long =
     }
 
     /** Returns false when [url] isn't handled; otherwise [done] runs later on the main thread. */
-    fun resolve(url: String?, done: (V?) -> Unit): Boolean {
-        val key = url?.let(::key) ?: return false
+    fun resolve(url: String?, done: (V?) -> Unit): Boolean = resolveKey(url?.let(::key), done)
+
+    /** Like [resolve], for a key a subclass derived itself (e.g. with extra options). */
+    protected fun resolveKey(key: String?, done: (V?) -> Unit): Boolean {
+        key ?: return false
         synchronized(cache) {
             if (closed) return false
             validEntry(key)?.let { entry ->

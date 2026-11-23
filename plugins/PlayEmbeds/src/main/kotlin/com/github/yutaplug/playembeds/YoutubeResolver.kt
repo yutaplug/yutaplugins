@@ -3,18 +3,26 @@ package com.github.yutaplug.playembeds
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
+import android.security.NetworkSecurityPolicy
 import com.aliucord.Http
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.FutureTask
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import java.util.regex.Pattern
 
 internal enum class LoadStage { RESOLVING, DOWNLOADING, MUXING }
 
@@ -26,15 +34,28 @@ internal class LoadProgress {
     val downloadedBytes = AtomicLong()
 }
 
+/** Downloaded YouTube videos, kept until the app restarts so replays start at once. */
+internal object YoutubeCache {
+    /** `yt_<id>.<quality>p.mp4`; the quality is the video's short side (YouTube's "720p"). */
+    val VIDEO_FILE: Pattern = Pattern.compile("^yt_([A-Za-z0-9_-]+)\\.(\\d+)p\\.mp4$")
+
+    /** `yt_<id>.qualities`: a JSON array of the qualities the video offers. */
+    val QUALITIES_FILE: Pattern = Pattern.compile("^yt_([A-Za-z0-9_-]+)\\.qualities$")
+}
+
 /**
  * Resolves YouTube videos through the InnerTube player API.
  *
  * Clients that still answer without a PO token (IOS_PRODUCER) return only
  * separate video and audio streams, and Discord's ExoPlayer has no
  * MergingMediaSource (R8 stripped it). So both streams are downloaded in byte
- * ranges (open-ended requests are throttled to playback speed) and remuxed
- * into one local MP4 with Android's MediaMuxer. A muxed progressive format
- * (itag 18) is used directly when a client still offers one.
+ * ranges (open-ended requests are throttled to playback speed), several at a
+ * time, and remuxed into one local MP4 with Android's MediaMuxer. A muxed
+ * progressive format (itag 18) is streamed directly when a client still offers
+ * one and the quality allows it.
+ *
+ * Player responses are cached (so switching quality skips the lookup), and
+ * finished MP4s are kept on disk until the app restarts.
  *
  * Client values follow yt-dlp's `INNERTUBE_CLIENTS` (yt_dlp/extractor/youtube/_base.py).
  * When YouTube starts rejecting a client, update or reorder [CLIENTS].
@@ -48,15 +69,39 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         val extra: Map<String, Any>,
     )
 
-    private class Stream(val url: String, val length: Long, val width: Int, val height: Int)
+    /**
+     * [quality] is the short side, which is what YouTube calls the quality (a 1080x1920 short is 1080p).
+     * [initEnd] and [indexEnd] locate the DASH init segment and sidx (-1 when not given).
+     */
+    private class Stream(
+        val url: String,
+        val length: Long,
+        val width: Int,
+        val height: Int,
+        val initEnd: Long,
+        val indexStart: Long,
+        val indexEnd: Long,
+    ) {
+        val quality: Int get() = minOf(width, height)
+        val isDash: Boolean get() = initEnd > 0 && indexStart > initEnd && indexEnd > indexStart &&
+            indexEnd < MAX_INDEX_BYTES
+    }
+
+    private class Chunk(val url: String, val file: File, val start: Long, val end: Long)
+
+    /** A usable player API answer from `CLIENTS[clientIndex]`, valid until [expires] (elapsedRealtime). */
+    private class PlayerResponse(val data: JSONObject, val clientIndex: Int, val expires: Long)
 
     private val loads = ConcurrentHashMap<String, LoadProgress>()
+    private val responses = ConcurrentHashMap<String, FutureTask<PlayerResponse?>>()
+    private var streamServer: StreamServer? = null
 
     /** Throughput of the last finished load, so the next estimate can start right away. */
     @Volatile private var lastDownloadBytesPerSec = 0L
     @Volatile private var lastMuxBytesPerSec = 0L
 
     init {
+        // Videos are only kept until the app restarts.
         clearCache()
     }
 
@@ -70,13 +115,36 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
 
     override fun isStillValid(value: ResolvedMedia): Boolean {
         val uri = Uri.parse(value.uri)
-        return uri.scheme != "file" || File(uri.path.orEmpty()).exists()
+        return when {
+            uri.scheme == "file" -> File(uri.path.orEmpty()).exists()
+            uri.host == StreamServer.LOOPBACK_HOST -> streamServer?.serves(value.uri) == true
+            else -> true
+        }
     }
 
-    override fun onClose() = clearCache()
+    override fun onClose() {
+        responses.clear()
+        synchronized(this) {
+            streamServer?.close()
+            streamServer = null
+        }
+        clearCache()
+    }
 
-    /** The running load for [url], or null when it's queued, finished or not started. */
-    fun progress(url: String): LoadProgress? = key(url)?.let { loads[it] }
+    private fun clearCache() {
+        cacheDir.listFiles()?.forEach { it.delete() }
+    }
+
+    /** Resolve [url] at [quality] (a height such as 720, or [AUTO_QUALITY]). */
+    fun resolve(url: String, quality: Int, done: (ResolvedMedia?) -> Unit): Boolean =
+        resolveKey(qualityKey(url, quality), done)
+
+    fun cached(url: String, quality: Int): ResolvedMedia? = cachedKey(qualityKey(url, quality))
+
+    /** The running load for [url] at [quality], or null when it's queued, finished or not started. */
+    fun progress(url: String, quality: Int): LoadProgress? = qualityKey(url, quality)?.let { loads[it] }
+
+    private fun qualityKey(url: String, quality: Int): String? = key(url)?.let { "$it|$quality" }
 
     /** Milliseconds left for [tracker], or null when there's nothing to base an estimate on yet. */
     fun estimateMs(tracker: LoadProgress): Long? {
@@ -102,27 +170,105 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
     }
 
     override fun load(key: String): Pair<ResolvedMedia, Long>? {
+        val base = key.substringBefore('|')
+        val quality = key.substringAfter('|', "").toIntOrNull() ?: AUTO_QUALITY
         val tracker = LoadProgress()
         loads[key] = tracker
         try {
-            for (client in CLIENTS) {
-                tracker.stage = LoadStage.RESOLVING
-                val data = try {
-                    player(client, key)
-                } catch (_: Throwable) {
-                    null
-                } ?: continue
+            if (base.startsWith("v:")) {
+                fromDisk(base.removePrefix("v:"), quality)?.let { return it to FILE_TTL_MS }
+            }
+            val task = responseTask(base)
+            // Runs here unless another load for this video already started (or finished) it.
+            task.run()
+            var response = try {
+                task.get()
+            } catch (_: Throwable) {
+                null
+            }
+            var fromCache = true
+            while (response != null) {
                 val result = try {
-                    streamFrom(data, tracker)
+                    streamFrom(response.data, quality, tracker)
                 } catch (_: Throwable) {
                     null
                 }
-                if (result != null) return result
+                if (result != null) {
+                    if (!fromCache) responses[base] = completedTask(response)
+                    return result
+                }
+                // This client's streams didn't work out; try the next one.
+                tracker.stage = LoadStage.RESOLVING
+                fromCache = false
+                response = try {
+                    fetchResponse(base, response.clientIndex + 1)
+                } catch (_: Throwable) {
+                    null
+                }
             }
+            responses.remove(base)
             return null
         } finally {
             loads.remove(key)
         }
+    }
+
+    /** The shared lookup for [base]: a running or still valid one, else a new (not yet started) task. */
+    private fun responseTask(base: String): FutureTask<PlayerResponse?> {
+        while (true) {
+            val existing = responses[base]
+            if (existing != null) {
+                if (!existing.isDone || validResponse(existing) != null) return existing
+                responses.remove(base, existing)
+                continue
+            }
+            val task = FutureTask(Callable<PlayerResponse?> { fetchResponse(base, 0) })
+            if (responses.putIfAbsent(base, task) == null) {
+                trimResponses()
+                return task
+            }
+        }
+    }
+
+    private fun completedTask(response: PlayerResponse): FutureTask<PlayerResponse?> =
+        FutureTask(Callable<PlayerResponse?> { response }).also { it.run() }
+
+    private fun validResponse(task: FutureTask<PlayerResponse?>): PlayerResponse? = try {
+        task.get()?.takeIf { it.expires > SystemClock.elapsedRealtime() }
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun trimResponses() {
+        if (responses.size <= MAX_RESPONSES) return
+        val removable = responses.entries.filter { it.value.isDone }
+        for (index in 0 until minOf(removable.size, responses.size - MAX_RESPONSES)) {
+            val entry = removable[index]
+            responses.remove(entry.key, entry.value)
+        }
+    }
+
+    /** The first client from [fromClient] on whose answer has streams, trimmed to what's needed. */
+    private fun fetchResponse(base: String, fromClient: Int): PlayerResponse? {
+        for (index in fromClient until CLIENTS.size) {
+            val data = try {
+                player(CLIENTS[index], base)
+            } catch (_: Throwable) {
+                null
+            } ?: continue
+            val streaming = data.optJSONObject("streamingData") ?: continue
+            val hasStreams = (streaming.optJSONArray("formats")?.length() ?: 0) > 0 ||
+                (streaming.optJSONArray("adaptiveFormats")?.length() ?: 0) > 0
+            if (!hasStreams) continue
+            val expiresSeconds = streaming.optLong("expiresInSeconds", 0L).takeIf { it > 0 } ?: 3_600L
+            val videoId = data.optJSONObject("videoDetails")?.optString("videoId").orEmpty()
+            val trimmed = JSONObject()
+                .put("streamingData", streaming)
+                .put("videoDetails", JSONObject().put("videoId", videoId))
+            val ttlMs = (expiresSeconds - URL_EXPIRY_MARGIN_S).coerceAtLeast(60L) * 1_000L
+            return PlayerResponse(trimmed, index, SystemClock.elapsedRealtime() + ttlMs)
+        }
+        return null
     }
 
     private fun player(client: Client, key: String): JSONObject? {
@@ -160,29 +306,58 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         return data
     }
 
-    private fun streamFrom(data: JSONObject, tracker: LoadProgress): Pair<ResolvedMedia, Long>? {
+    private fun streamFrom(data: JSONObject, quality: Int, tracker: LoadProgress): Pair<ResolvedMedia, Long>? {
         val streaming = data.optJSONObject("streamingData") ?: return null
         val expiresSeconds = streaming.optLong("expiresInSeconds", 0L).takeIf { it > 0 } ?: 3_600L
-
-        muxedFormat(streaming.optJSONArray("formats"))?.let { format ->
-            val ttlMs = (expiresSeconds - 600L).coerceAtLeast(60L) * 1_000L
-            val media = ResolvedMedia(
-                format.optString("url"),
-                format.optInt("width", 16),
-                format.optInt("height", 9),
-                audioOnly = false,
-            )
-            return media to ttlMs
-        }
-
-        val adaptive = streaming.optJSONArray("adaptiveFormats") ?: return null
-        val audio = audioStream(adaptive) ?: return null
-        val video = videoStream(adaptive, MAX_TOTAL_BYTES - audio.length) ?: return null
         val videoId = data.optJSONObject("videoDetails")?.optString("videoId")?.takeIf { it.isNotEmpty() }
-            ?: return null
-        val file = downloadAndMux(videoId, video, audio, tracker) ?: return null
-        return ResolvedMedia(Uri.fromFile(file).toString(), video.width, video.height, audioOnly = false) to
-            3_600_000L
+
+        val adaptive = streaming.optJSONArray("adaptiveFormats")
+        val audio = adaptive?.let(::audioStream)
+        val videos = if (adaptive != null && audio != null) videoStreams(adaptive) else emptyList()
+        val muxed = muxedFormat(streaming.optJSONArray("formats"))
+        val muxedWidth = muxed?.optInt("width", 640) ?: 0
+        val muxedHeight = muxed?.optInt("height", 360) ?: 0
+        val muxedQuality = if (muxed != null) minOf(muxedWidth, muxedHeight) else 0
+        val qualities = (videos.map { it.quality } + listOf(muxedQuality))
+            .filter { it > 0 }
+            .distinct()
+            .sorted()
+
+        val muxedMedia = muxed?.let {
+            ResolvedMedia(it.optString("url"), muxedWidth, muxedHeight, false, muxedQuality, qualities) to
+                (expiresSeconds - URL_EXPIRY_MARGIN_S).coerceAtLeast(60L) * 1_000L
+        }
+        // Streaming the muxed format starts at once, so Auto takes it when there is one.
+        if (muxedMedia != null && (quality == AUTO_QUALITY || quality == muxedQuality)) return muxedMedia
+
+        if (audio == null || videoId == null) return muxedMedia
+        pickVideo(videos, quality)?.let { video ->
+            try {
+                startStream(videoId, video, audio, qualities, expiresSeconds)
+            } catch (_: Throwable) {
+                null
+            }?.let { return it }
+        }
+        // Without streaming, the whole video is downloaded and remuxed first, so it must fit.
+        val fitting = videos.filter { it.length + audio.length <= MAX_TOTAL_BYTES }
+        val video = pickVideo(fitting, quality) ?: return muxedMedia
+        val file = downloadAndMux(videoId, video, audio, qualities, tracker) ?: return null
+        val media = ResolvedMedia(
+            Uri.fromFile(file).toString(),
+            video.width,
+            video.height,
+            audioOnly = false,
+            quality = video.quality,
+            qualities = qualities,
+        )
+        return media to FILE_TTL_MS
+    }
+
+    /** The best stream up to [quality] (360p for Auto), else the lowest one. */
+    private fun pickVideo(videos: List<Stream>, quality: Int): Stream? {
+        val target = if (quality == AUTO_QUALITY) AUTO_MAX_QUALITY else quality
+        return videos.filter { it.quality <= target }.maxByOrNull { it.quality }
+            ?: videos.minByOrNull { it.quality }
     }
 
     private fun muxedFormat(formats: JSONArray?): JSONObject? {
@@ -198,20 +373,18 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         return chosen
     }
 
-    /** The tallest H.264 MP4 stream up to 360p that fits in [maxBytes], else the smallest that fits. */
-    private fun videoStream(formats: JSONArray, maxBytes: Long): Stream? {
-        var best: Stream? = null
-        var smallest: Stream? = null
+    /** H.264 MP4 streams, the smallest one per quality. */
+    private fun videoStreams(formats: JSONArray): List<Stream> {
+        val byQuality = HashMap<Int, Stream>()
         for (index in 0 until formats.length()) {
             val format = formats.optJSONObject(index) ?: continue
             val mime = format.optString("mimeType")
             if (!mime.startsWith("video/mp4") || !mime.contains("avc1")) continue
             val stream = stream(format) ?: continue
-            if (stream.length > maxBytes) continue
-            if (stream.height <= MAX_VIDEO_HEIGHT && (best == null || stream.height > best.height)) best = stream
-            if (smallest == null || stream.height < smallest.height) smallest = stream
+            val existing = byQuality[stream.quality]
+            if (existing == null || stream.length < existing.length) byQuality[stream.quality] = stream
         }
-        return best ?: smallest
+        return ArrayList(byQuality.values)
     }
 
     private fun audioStream(formats: JSONArray): Stream? {
@@ -230,17 +403,198 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         val url = format.optString("url")
         if (url.isEmpty() || !isGoogleVideo(url)) return null
         val length = format.optString("contentLength").toLongOrNull()?.takeIf { it > 0 } ?: return null
-        return Stream(url, length, format.optInt("width", 16), format.optInt("height", 9))
+        val initRange = format.optJSONObject("initRange")
+        val indexRange = format.optJSONObject("indexRange")
+        return Stream(
+            url,
+            length,
+            format.optInt("width", 16),
+            format.optInt("height", 9),
+            initEnd = initRange?.optString("end")?.toLongOrNull() ?: -1L,
+            indexStart = indexRange?.optString("start")?.toLongOrNull() ?: -1L,
+            indexEnd = indexRange?.optString("end")?.toLongOrNull() ?: -1L,
+        )
     }
 
-    private fun downloadAndMux(videoId: String, video: Stream, audio: Stream, tracker: LoadProgress): File? {
+    /**
+     * Plays [video] with [audio] through the local [StreamServer], merged on the
+     * fly, so it starts after the first segments rather than a full download.
+     * Null when the streams aren't DASH or loopback HTTP isn't allowed.
+     */
+    private fun startStream(
+        videoId: String,
+        video: Stream,
+        audio: Stream,
+        qualities: List<Int>,
+        expiresSeconds: Long,
+    ): Pair<ResolvedMedia, Long>? {
+        if (!video.isDash || !audio.isDash || !loopbackAllowed()) return null
+        val target = videoFile(videoId, video.quality)
+        if (target.length() > 0) {
+            target.setLastModified(System.currentTimeMillis())
+            return ResolvedMedia(Uri.fromFile(target).toString(), video.width, video.height, false, video.quality, qualities) to
+                FILE_TTL_MS
+        }
+
+        // Both streams' init segment and index, in parallel; a few KB each.
+        var audioTrack: Mp4Merge.Track? = null
+        val audioThread = Thread {
+            audioTrack = try {
+                dashTrack(audio)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        audioThread.start()
+        val videoTrack = dashTrack(video)
+        audioThread.join()
+        val layout = Mp4Merge.merge(videoTrack ?: return null, audioTrack ?: return null) ?: return null
+
         cacheDir.mkdirs()
-        val safeId = videoId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
-        val target = File(cacheDir, "yt_$safeId$VIDEO_SUFFIX")
-        if (target.length() > 0) return target
-        val videoFile = File(cacheDir, "yt_$safeId.video.part")
-        val audioFile = File(cacheDir, "yt_$safeId.audio.part")
-        val muxFile = File(cacheDir, "yt_$safeId.mux.part")
+        val keep = layout.total <= MAX_TOTAL_BYTES
+        val partFile = File(cacheDir, "yt_${safeId(videoId)}.${video.quality}p.stream.part")
+        val ttlMs = (expiresSeconds - URL_EXPIRY_MARGIN_S).coerceAtLeast(60L) * 1_000L
+        if (keep) writeQualities(videoId, qualities)
+        val url = server().register(
+            layout,
+            SystemClock.elapsedRealtime() + ttlMs,
+            partFile.takeIf { keep },
+            target.takeIf { keep },
+        )
+        val media = ResolvedMedia(url, video.width, video.height, false, video.quality, qualities)
+        return media to ttlMs
+    }
+
+    private fun dashTrack(stream: Stream): Mp4Merge.Track? {
+        val length = (stream.indexEnd + 1).toInt()
+        val bytes = ByteArray(length)
+        Http.Request("${stream.url}&range=0-${stream.indexEnd}").use { request ->
+            request.setRequestTimeout(TIMEOUT_MS)
+            request.execute().use { response ->
+                if (!response.ok()) return null
+                response.stream().use { input ->
+                    var filled = 0
+                    while (filled < length) {
+                        val read = input.read(bytes, filled, length - filled)
+                        if (read < 0) return null
+                        filled += read
+                    }
+                }
+            }
+        }
+        return Mp4Merge.parseTrack(stream.url, bytes, stream.initEnd.toInt(), stream.indexStart.toInt())
+    }
+
+    @Synchronized
+    private fun server(): StreamServer {
+        streamServer?.let { return it }
+        val created = StreamServer { file -> trimCache(file) }
+        streamServer = created
+        return created
+    }
+
+    /** Discord blocks cleartext HTTP; PlayEmbeds allows it for 127.0.0.1 only (see [PlayEmbeds]). */
+    private fun loopbackAllowed(): Boolean = try {
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.N ||
+            NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(StreamServer.LOOPBACK_HOST)
+    } catch (_: Throwable) {
+        false
+    }
+
+    private fun safeId(videoId: String): String = videoId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+
+    private fun videoFile(videoId: String, quality: Int): File =
+        File(cacheDir, "yt_${safeId(videoId)}.${quality}p$VIDEO_SUFFIX")
+
+    private fun qualitiesFile(videoId: String): File = File(cacheDir, "yt_${safeId(videoId)}.qualities")
+
+    /** The downloaded files for [videoId], by quality. */
+    private fun cachedFiles(videoId: String): Map<Int, File> {
+        val id = safeId(videoId)
+        val files = HashMap<Int, File>()
+        cacheDir.listFiles()?.forEach { file ->
+            val matcher = YoutubeCache.VIDEO_FILE.matcher(file.name)
+            if (!matcher.matches() || matcher.group(1) != id || file.length() <= 0) return@forEach
+            matcher.group(2)?.toIntOrNull()?.let { files[it] = file }
+        }
+        return files
+    }
+
+    /** A video downloaded earlier: exactly [quality], or the best one kept for Auto. */
+    private fun fromDisk(videoId: String, quality: Int): ResolvedMedia? {
+        val files = cachedFiles(videoId)
+        val entry = if (quality == AUTO_QUALITY) {
+            files.entries.maxByOrNull { it.key }
+        } else {
+            files.entries.firstOrNull { it.key == quality }
+        } ?: return null
+        val file = entry.value
+        file.setLastModified(System.currentTimeMillis())
+        val size = videoSize(file) ?: return null
+        val qualities = (readQualities(videoId) + files.keys).distinct().sorted()
+        return ResolvedMedia(Uri.fromFile(file).toString(), size.first, size.second, false, entry.key, qualities)
+    }
+
+    private fun videoSize(file: File): Pair<Int, Int>? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                ?.toIntOrNull() ?: 0
+            if (width == null || height == null || width <= 0 || height <= 0) {
+                null
+            } else if (rotation == 90 || rotation == 270) {
+                height to width
+            } else {
+                width to height
+            }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Throwable) {
+                // Nothing left to free.
+            }
+        }
+    }
+
+    private fun readQualities(videoId: String): List<Int> = try {
+        val array = JSONArray(qualitiesFile(videoId).readText())
+        val result = ArrayList<Int>()
+        for (index in 0 until array.length()) array.optInt(index).takeIf { it > 0 }?.let { result.add(it) }
+        result
+    } catch (_: Throwable) {
+        emptyList()
+    }
+
+    private fun writeQualities(videoId: String, qualities: List<Int>) {
+        try {
+            qualitiesFile(videoId).writeText(JSONArray(qualities).toString())
+        } catch (_: Throwable) {
+            // Only used to list qualities for cached videos.
+        }
+    }
+
+    private fun downloadAndMux(
+        videoId: String,
+        video: Stream,
+        audio: Stream,
+        qualities: List<Int>,
+        tracker: LoadProgress,
+    ): File? {
+        cacheDir.mkdirs()
+        val target = videoFile(videoId, video.quality)
+        if (target.length() > 0) {
+            target.setLastModified(System.currentTimeMillis())
+            return target
+        }
+        val prefix = "yt_${safeId(videoId)}.${video.quality}p"
+        val videoFile = File(cacheDir, "$prefix.video.part")
+        val audioFile = File(cacheDir, "$prefix.audio.part")
+        val muxFile = File(cacheDir, "$prefix.mux.part")
         val totalBytes = video.length + audio.length
         try {
             tracker.totalBytes = totalBytes
@@ -248,27 +602,18 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
             val downloadStart = SystemClock.elapsedRealtime()
             tracker.stageStartMs = downloadStart
             tracker.stage = LoadStage.DOWNLOADING
-            // Download audio on a second thread while this one fetches video.
-            var audioError: Throwable? = null
-            val audioThread = Thread {
-                try {
-                    download(audio, audioFile, tracker.downloadedBytes)
-                } catch (error: Throwable) {
-                    audioError = error
-                }
-            }
-            audioThread.start()
-            download(video, videoFile, tracker.downloadedBytes)
-            audioThread.join()
-            audioError?.let { throw it }
+            download(listOf(video to videoFile, audio to audioFile), tracker.downloadedBytes)
             val muxStart = SystemClock.elapsedRealtime()
             lastDownloadBytesPerSec = totalBytes * 1_000L / (muxStart - downloadStart).coerceAtLeast(1L)
             tracker.stageStartMs = muxStart
             tracker.stage = LoadStage.MUXING
-            mux(videoFile, audioFile, muxFile)
+            // Rewriting the containers takes about as long as copying the file; remuxing
+            // sample by sample is the slow fallback for streams without a DASH index.
+            if (!mergeFiles(video, audio, videoFile, audioFile, muxFile)) mux(videoFile, audioFile, muxFile)
             lastMuxBytesPerSec = totalBytes * 1_000L / (SystemClock.elapsedRealtime() - muxStart).coerceAtLeast(1L)
             if (!muxFile.renameTo(target)) return null
-            trimCache()
+            writeQualities(videoId, qualities)
+            trimCache(target)
             return target
         } catch (_: Throwable) {
             return null
@@ -279,30 +624,110 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         }
     }
 
-    /** Fetch [stream] in ranges; an open-ended request is throttled to playback speed. */
-    private fun download(stream: Stream, file: File, downloaded: AtomicLong) {
-        val buffer = ByteArray(COPY_BUFFER_BYTES)
-        FileOutputStream(file).use { out ->
+    /**
+     * Fetch every stream in [CHUNK_BYTES] ranges, [DOWNLOAD_THREADS] at a time.
+     * One range per request: an open-ended request is throttled to playback speed.
+     */
+    private fun download(streams: List<Pair<Stream, File>>, downloaded: AtomicLong) {
+        val chunks = ArrayList<Chunk>()
+        for ((stream, file) in streams) {
+            RandomAccessFile(file, "rw").use { it.setLength(stream.length) }
             var start = 0L
             while (start < stream.length) {
                 val end = minOf(start + CHUNK_BYTES, stream.length) - 1
-                Http.Request("${stream.url}&range=$start-$end").use { request ->
-                    request.setRequestTimeout(TIMEOUT_MS)
-                    request.execute().use { response ->
-                        if (!response.ok()) throw IOException("HTTP ${response.statusCode}")
-                        response.stream().use { input ->
-                            while (true) {
-                                val read = input.read(buffer)
-                                if (read < 0) break
-                                out.write(buffer, 0, read)
-                                downloaded.addAndGet(read.toLong())
+                chunks.add(Chunk(stream.url, file, start, end))
+                start = end + 1
+            }
+        }
+        val next = AtomicInteger()
+        val error = AtomicReference<Throwable?>()
+        val workers = ArrayList<Thread>()
+        while (workers.size < minOf(DOWNLOAD_THREADS, chunks.size)) {
+            val worker = Thread {
+                val buffer = ByteArray(COPY_BUFFER_BYTES)
+                while (error.get() == null) {
+                    val index = next.getAndIncrement()
+                    if (index >= chunks.size) break
+                    try {
+                        fetchChunk(chunks[index], buffer, downloaded)
+                    } catch (failure: Throwable) {
+                        error.compareAndSet(null, failure)
+                    }
+                }
+            }
+            worker.start()
+            workers.add(worker)
+        }
+        workers.forEach { it.join() }
+        error.get()?.let { throw it }
+    }
+
+    private fun fetchChunk(chunk: Chunk, buffer: ByteArray, downloaded: AtomicLong) {
+        var attempt = 0
+        while (true) {
+            var written = 0L
+            try {
+                RandomAccessFile(chunk.file, "rw").use { out ->
+                    out.seek(chunk.start)
+                    Http.Request("${chunk.url}&range=${chunk.start}-${chunk.end}").use { request ->
+                        request.setRequestTimeout(TIMEOUT_MS)
+                        request.execute().use { response ->
+                            if (!response.ok()) throw IOException("HTTP ${response.statusCode}")
+                            response.stream().use { input ->
+                                while (true) {
+                                    val read = input.read(buffer)
+                                    if (read < 0) break
+                                    out.write(buffer, 0, read)
+                                    written += read
+                                    downloaded.addAndGet(read.toLong())
+                                }
                             }
                         }
                     }
                 }
-                start = end + 1
+                if (written != chunk.end - chunk.start + 1) throw IOException("Incomplete range")
+                return
+            } catch (failure: Throwable) {
+                downloaded.addAndGet(-written)
+                if (++attempt >= CHUNK_ATTEMPTS) throw failure
             }
         }
+    }
+
+    /** Merge downloaded DASH streams with [Mp4Merge]; false when they can't be merged that way. */
+    private fun mergeFiles(video: Stream, audio: Stream, videoFile: File, audioFile: File, output: File): Boolean {
+        if (!video.isDash || !audio.isDash) return false
+        return try {
+            RandomAccessFile(videoFile, "r").use { videoIn ->
+                RandomAccessFile(audioFile, "r").use { audioIn ->
+                    val videoTrack = fileTrack(video, videoIn) ?: return false
+                    val audioTrack = fileTrack(audio, audioIn) ?: return false
+                    val layout = Mp4Merge.merge(videoTrack, audioTrack) ?: return false
+                    RandomAccessFile(output, "rw").use { out ->
+                        out.setLength(0)
+                        out.write(layout.header)
+                        for (piece in layout.pieces) {
+                            val source = if (piece.track === videoTrack) videoIn else audioIn
+                            val data = ByteArray(piece.segment.size)
+                            source.seek(piece.segment.sourceOffset)
+                            source.readFully(data)
+                            Mp4Merge.patchSegment(data, piece)
+                            out.write(data)
+                        }
+                    }
+                    true
+                }
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun fileTrack(stream: Stream, file: RandomAccessFile): Mp4Merge.Track? {
+        val bytes = ByteArray((stream.indexEnd + 1).toInt())
+        file.seek(0)
+        file.readFully(bytes)
+        return Mp4Merge.parseTrack(stream.url, bytes, stream.initEnd.toInt(), stream.indexStart.toInt())
     }
 
     private fun mux(videoFile: File, audioFile: File, output: File) {
@@ -385,32 +810,56 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         return uri.scheme == "https" && EmbedUrls.isHost(uri.host, "googlevideo.com")
     }
 
-    private fun trimCache() {
-        cacheDir.listFiles()
-            ?.filter { it.name.endsWith(VIDEO_SUFFIX) }
-            ?.sortedByDescending { it.lastModified() }
-            ?.drop(MAX_CACHED_FILES)
-            ?.forEach { it.delete() }
+    /** Keep the newest videos within [MAX_CACHED_FILES] and [MAX_CACHE_BYTES]; [keep] always stays. */
+    private fun trimCache(keep: File) {
+        val files = cacheDir.listFiles() ?: return
+        val videos = files
+            .filter { YoutubeCache.VIDEO_FILE.matcher(it.name).matches() }
+            .sortedByDescending { it.lastModified() }
+        var count = 0
+        var total = 0L
+        val keptIds = HashSet<String>()
+        for (file in videos) {
+            val length = file.length()
+            if (file != keep && (count + 1 > MAX_CACHED_FILES || total + length > MAX_CACHE_BYTES)) {
+                file.delete()
+                continue
+            }
+            count++
+            total += length
+            val matcher = YoutubeCache.VIDEO_FILE.matcher(file.name)
+            if (matcher.matches()) matcher.group(1)?.let { keptIds.add(it) }
+        }
+        files.forEach { file ->
+            val matcher = YoutubeCache.QUALITIES_FILE.matcher(file.name)
+            if (matcher.matches() && !keptIds.contains(matcher.group(1).orEmpty())) file.delete()
+        }
     }
 
-    private fun clearCache() {
-        cacheDir.listFiles()?.forEach { it.delete() }
-    }
+    companion object {
+        /** Stream the muxed format when there is one, else download up to [AUTO_MAX_QUALITY]. */
+        const val AUTO_QUALITY = 0
+        const val AUTO_MAX_QUALITY = 360
 
-    private companion object {
-        const val PLAYER_URL = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
-        const val MUXED_ITAG = 18
-        const val AAC_ITAG = 140
-        const val MAX_VIDEO_HEIGHT = 360
-        const val MAX_TOTAL_BYTES = 150L * 1024L * 1024L
-        const val CHUNK_BYTES = 4L * 1024L * 1024L
-        const val MIN_BUFFER_BYTES = 1024 * 1024
-        const val COPY_BUFFER_BYTES = 64 * 1024
-        const val MIN_RATE_SAMPLE_MS = 1_000L
-        const val MAX_CACHED_FILES = 3
-        const val VIDEO_SUFFIX = ".mp4"
+        private const val PLAYER_URL = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+        private const val MUXED_ITAG = 18
+        private const val AAC_ITAG = 140
+        private const val MAX_TOTAL_BYTES = 250L * 1024L * 1024L
+        private const val MAX_INDEX_BYTES = 4L * 1024L * 1024L
+        private const val MAX_CACHE_BYTES = 400L * 1024L * 1024L
+        private const val MAX_CACHED_FILES = 3
+        private const val CHUNK_BYTES = 2L * 1024L * 1024L
+        private const val CHUNK_ATTEMPTS = 2
+        private const val DOWNLOAD_THREADS = 4
+        private const val MAX_RESPONSES = 32
+        private const val URL_EXPIRY_MARGIN_S = 600L
+        private const val FILE_TTL_MS = 3_600_000L
+        private const val MIN_BUFFER_BYTES = 1024 * 1024
+        private const val COPY_BUFFER_BYTES = 64 * 1024
+        private const val MIN_RATE_SAMPLE_MS = 1_000L
+        private const val VIDEO_SUFFIX = ".mp4"
 
-        val CLIENTS = listOf(
+        private val CLIENTS = listOf(
             // The only client that answered without a bot check in testing (Nov 2026).
             Client(
                 name = "IOS_PRODUCER",

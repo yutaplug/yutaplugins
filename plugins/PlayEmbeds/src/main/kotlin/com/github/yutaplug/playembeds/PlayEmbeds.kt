@@ -12,6 +12,7 @@ import android.graphics.PorterDuff
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -30,6 +31,7 @@ import androidx.constraintlayout.widget.ConstraintLayout
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
+import com.aliucord.fragments.SelectDialog
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.discord.api.message.embed.MessageEmbed
@@ -43,6 +45,8 @@ import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.EmbedEntry
 import com.discord.widgets.media.WidgetMedia
 import com.google.android.exoplayer2.PlaybackException
+import com.google.android.exoplayer2.ui.PlayerView
+import de.robv.android.xposed.XposedBridge
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
@@ -65,9 +69,19 @@ class PlayEmbeds : Plugin() {
     /** Keyed by each player's ExoPlayer listener (`AppMediaPlayer.g`), which receives errors. */
     private val errorCallbacks = WeakHashMap<Any, () -> Unit>()
 
+    /** Quality picked in a YouTube player, by embed URL, so replaying the video keeps it. */
+    private val youtubeQualityChoices = HashMap<String, Int>()
+
     private var youtube: YoutubeResolver? = null
     private var soundCloud: SoundCloudResolver? = null
     private var spotify: SpotifyResolver? = null
+
+    internal val replaceWholeCard get() = settings.getBool(KEY_WHOLE_CARD, false)
+    internal val youtubeQuality get() = settings.getInt(KEY_YOUTUBE_QUALITY, YoutubeResolver.AUTO_QUALITY)
+
+    init {
+        settingsTab = SettingsTab(PlayEmbedsSettings::class.java, SettingsTab.Type.PAGE).withArgs(this)
+    }
 
     override fun start(context: Context) {
         EmbedUrls.fxVideoResolver = FxVideoResolver()
@@ -75,9 +89,35 @@ class PlayEmbeds : Plugin() {
         soundCloud = SoundCloudResolver(File(context.cacheDir, "playembeds"))
         spotify = SpotifyResolver()
         NativePlayers.init()
+        allowLoopbackCleartext()
         patchEmbedRows()
         patchNativeHostedLaunches()
         patchPlayerErrors()
+    }
+
+    /**
+     * Discord's network security config forbids cleartext HTTP, which would
+     * stop its player from reading YouTube streams from [StreamServer]. Allow
+     * it for 127.0.0.1 only; every other host keeps Discord's policy. If the
+     * hook can't be placed, YouTube falls back to downloading first.
+     */
+    private fun allowLoopbackCleartext() {
+        try {
+            XposedBridge.disableHiddenApiRestrictions()
+        } catch (_: Throwable) {
+            // Then the classes below may be unreachable; the fallback handles that.
+        }
+        val hook = PreHook { frame ->
+            if (frame.args.getOrNull(0) == StreamServer.LOOPBACK_HOST) frame.result = true
+        }
+        for (className in CLEARTEXT_POLICY_CLASSES) {
+            try {
+                val method = Class.forName(className).getDeclaredMethod("isCleartextTrafficPermitted", String::class.java)
+                patcher.patch(method, hook)
+            } catch (_: Throwable) {
+                // Not on this Android version.
+            }
+        }
     }
 
     /** Discord only logs ExoPlayer errors; surface them so a dead stream falls back. */
@@ -459,22 +499,27 @@ class PlayEmbeds : Plugin() {
 
         val rowKey = embedRowKeys[container]
         val containerRef = WeakReference(container)
-        val youtubeResolver = youtube
-        if (embed.provider == HostedProvider.YOUTUBE && youtubeResolver != null &&
-            youtubeResolver.cached(embed.url) == null
-        ) {
-            showYoutubeLoading(container, embed.url, youtubeResolver)
-        } else {
-            showLoading(container)
-        }
-        resolver.resolve(embed.url) { media ->
-            val target = containerRef.get() ?: return@resolve
+        val done: (ResolvedMedia?) -> Unit = done@{ media ->
+            val target = containerRef.get() ?: return@done
             hideLoading(target)
-            if (!target.isAttachedToWindow || embedRowKeys[target] != rowKey) return@resolve
+            if (!target.isAttachedToWindow || embedRowKeys[target] != rowKey) return@done
             if (media == null || !attachPlayer(target, embed.url, media, embed.provider)) {
                 openExternally(target.context, embed.url)
             }
         }
+        val youtubeResolver = youtube?.takeIf { embed.provider == HostedProvider.YOUTUBE }
+        if (youtubeResolver == null) {
+            showLoading(container)
+            resolver.resolve(embed.url, done)
+            return true
+        }
+        val quality = youtubeQualityChoices[embed.url] ?: youtubeQuality
+        if (youtubeResolver.cached(embed.url, quality) == null) {
+            showYoutubeLoading(container) { youtubeResolver.progress(embed.url, quality) }
+        } else {
+            showLoading(container)
+        }
+        youtubeResolver.resolve(embed.url, quality, done)
         return true
     }
 
@@ -495,7 +540,12 @@ class PlayEmbeds : Plugin() {
         val width = video?.d()?.takeIf { it > 0 } ?: thumbnail?.d()?.takeIf { it > 0 } ?: 16
         val height = video?.a()?.takeIf { it > 0 } ?: thumbnail?.a()?.takeIf { it > 0 } ?: 9
         val attached = attachPlayer(container, videoUrl, ResolvedMedia(videoUrl, width, height, false), null)
-        if (attached) hostedEmbeds[container] = embed
+        if (attached) {
+            // A whole-card player lives in a wrapper that took over the card's place.
+            val wrapper = (container.parent as? ViewGroup)
+                ?.takeIf { players[it]?.replacement?.originalCard === container }
+            hostedEmbeds[wrapper ?: container] = embed
+        }
         return attached
     }
 
@@ -507,18 +557,23 @@ class PlayEmbeds : Plugin() {
     ): Boolean {
         removeSpotifyPlayButton(container)
         val player = NativePlayers.create(container.context) ?: return false
+        val wholeCard = replaceWholeCard && container.id == id("chat_list_item_embed_container_card")
         val state = when {
             media.audioOnly -> attachAudioPlayer(container, player, identity, media)
-            // The whole card is replaced only when there's no large preview to play in.
+            wholeCard ->
+                attachWholeCardVideo(container, player, identity, media, fitVideo = true)
+                    ?: attachPreviewVideo(container, player, identity, media)
+            // Otherwise the whole card is replaced only when there's no large preview to play in.
             provider == HostedProvider.YOUTUBE ->
                 attachPreviewVideo(container, player, identity, media)
-                    ?: attachWholeCardVideo(container, player, identity, media)
+                    ?: attachWholeCardVideo(container, player, identity, media, fitVideo = false)
             else -> attachPreviewVideo(container, player, identity, media)
         }
         if (state == null) {
             NativePlayers.release(player)
             return false
         }
+        if (provider == HostedProvider.YOUTUBE && !media.audioOnly) addQualityButton(state, identity, media)
         val playerContainer = state.replacement?.wrapper ?: container
         // `players` holds its values weakly; the view's tag is the strong reference that
         // keeps the state alive exactly as long as the player view exists. Without it the
@@ -572,33 +627,67 @@ class PlayEmbeds : Plugin() {
         return true
     }
 
-    /** YouTube replaces the whole embed card, as its preview is only a thumbnail. */
+    /**
+     * Replaces the whole embed card with the player. With [fitVideo] the card is
+     * hidden and the player takes the video's aspect ratio at the card's width;
+     * otherwise it covers the card at its current size (YouTube cards without a
+     * large preview, whose thumbnail is too small to play in).
+     */
     private fun attachWholeCardVideo(
         container: ViewGroup,
         player: AppMediaPlayer,
         identity: String,
         media: ResolvedMedia,
+        fitVideo: Boolean,
     ): NativePlayerState? {
         val replacement = wrapEmbedForHostedPlayer(container) ?: return null
-        val playerView = NativePlayers.videoView(container.context)
-        val root = TouchGuardLayout(container.context).apply {
+        val context = container.context
+        val playerView = NativePlayers.videoView(context)
+        val root = TouchGuardLayout(context).apply {
             addView(playerView, FrameLayout.LayoutParams(MATCH, MATCH))
         }
         addFullscreenButton(playerView, root)
-        replacement.wrapper.addView(root, FrameLayout.LayoutParams(MATCH, MATCH))
+        val previousVisibility = ArrayList<Pair<View, Int>>()
+        val params = if (fitVideo) {
+            val size = fittedVideoSize(context, media, replacement.originalWidth)
+            previousVisibility.add(container to container.visibility)
+            container.visibility = View.GONE
+            replacement.wrapper.minimumWidth = 0
+            replacement.wrapper.minimumHeight = 0
+            FrameLayout.LayoutParams(size.first, size.second)
+        } else {
+            FrameLayout.LayoutParams(MATCH, MATCH)
+        }
+        replacement.wrapper.addView(root, params)
         root.bringToFront()
         NativePlayers.play(player, media.uri, playerView, null)
         return NativePlayerState(
             player,
             root,
             replacement.wrapper,
-            emptyList(),
-            forceGone = false,
+            previousVisibility,
+            forceGone = fitVideo,
             url = identity,
             extraViews = emptyList(),
             previousMinimumWidth = replacement.wrapper.minimumWidth,
             replacement = replacement,
         )
+    }
+
+    /** The video's aspect ratio at up to [cardWidth] wide, capped at Discord's embed image height. */
+    private fun fittedVideoSize(context: Context, media: ResolvedMedia, cardWidth: Int): Pair<Int, Int> {
+        val embedResources = EmbedResourceUtils.INSTANCE
+        val videoWidth = media.width.coerceAtLeast(1)
+        val videoHeight = media.height.coerceAtLeast(1)
+        val maxWidth = minOf(cardWidth, embedResources.computeMaximumImageWidthPx(context)).coerceAtLeast(1)
+        val maxHeight = embedResources.getMAX_IMAGE_VIEW_HEIGHT_PX()
+        var width = maxWidth
+        var height = (width.toLong() * videoHeight / videoWidth).toInt()
+        if (height > maxHeight) {
+            height = maxHeight
+            width = (height.toLong() * videoWidth / videoHeight).toInt()
+        }
+        return width.coerceAtLeast(1) to height.coerceAtLeast(1)
     }
 
     /** Swap the image/inline-media preview for a video surface of the same size. */
@@ -893,35 +982,13 @@ class PlayEmbeds : Plugin() {
      * Discord's upload progress row (view_upload_progress): the current step,
      * a progress bar and, once it can be estimated, the time left.
      */
-    private fun showYoutubeLoading(container: ViewGroup, url: String, resolver: YoutubeResolver) {
+    private fun showYoutubeLoading(container: ViewGroup, progress: () -> LoadProgress?) {
         val context = container.context
-        val layoutId = Utils.getResId("view_upload_progress", "layout")
-        if (layoutId <= 0) {
+        val card = youtubeLoadingCard(context)
+        if (card == null) {
             showLoading(container)
             return
         }
-        val card = FrameLayout(context).apply {
-            background = GradientDrawable().apply {
-                cornerRadius = dp(context, 8).toFloat()
-                setColor(themedColor(context, "colorBackgroundFloating", Color.DKGRAY))
-            }
-            elevation = dp(context, 4).toFloat()
-            setPadding(dp(context, 12), dp(context, 8), dp(context, 12), 0)
-            // Taps on the popup shouldn't reach the preview underneath.
-            isClickable = true
-        }
-        val content = try {
-            LayoutInflater.from(context).inflate(layoutId, card, false)
-        } catch (_: Throwable) {
-            showLoading(container)
-            return
-        }
-        content.findViewById<View>(id("progress_file_image"))?.visibility = View.GONE
-        content.findViewById<TextView>(id("progress_text"))
-            ?.setTextColor(themedColor(context, "colorHeaderPrimary", Color.WHITE))
-        content.findViewById<TextView>(id("progress_subtext"))
-            ?.setTextColor(themedColor(context, "colorTextMuted", Color.LTGRAY))
-        card.addView(content)
 
         // Center over a large preview; a small thumbnail can't hold it, so use the whole card then.
         val preview = previewView(container)
@@ -938,17 +1005,178 @@ class PlayEmbeds : Plugin() {
         parent.addView(card, centeredParams(parent, anchor, width, WRAP))
         card.bringToFront()
         loadingIndicators[container] = card
+        startLoadingTicker(card, progress)
+    }
 
+    /** The popup's content: Discord's upload progress row on a floating card, or null without it. */
+    private fun youtubeLoadingCard(context: Context): FrameLayout? {
+        val layoutId = Utils.getResId("view_upload_progress", "layout")
+        if (layoutId <= 0) return null
+        val card = FrameLayout(context).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(context, 8).toFloat()
+                setColor(themedColor(context, "colorBackgroundFloating", Color.DKGRAY))
+            }
+            elevation = dp(context, 4).toFloat()
+            setPadding(dp(context, 12), dp(context, 8), dp(context, 12), 0)
+            // Taps on the popup shouldn't reach the preview underneath.
+            isClickable = true
+        }
+        val content = try {
+            LayoutInflater.from(context).inflate(layoutId, card, false)
+        } catch (_: Throwable) {
+            return null
+        }
+        content.findViewById<View>(id("progress_file_image"))?.visibility = View.GONE
+        content.findViewById<TextView>(id("progress_text"))
+            ?.setTextColor(themedColor(context, "colorHeaderPrimary", Color.WHITE))
+        content.findViewById<TextView>(id("progress_subtext"))
+            ?.setTextColor(themedColor(context, "colorTextMuted", Color.LTGRAY))
+        card.addView(content)
+        return card
+    }
+
+    /** Refreshes [card] from [progress] until it's removed from its parent. */
+    private fun startLoadingTicker(card: View, progress: () -> LoadProgress?) {
+        val resolver = youtube ?: return
         val cardRef = WeakReference(card)
         val tick = object : Runnable {
             override fun run() {
                 val view = cardRef.get() ?: return
                 if (view.parent == null) return
-                updateYoutubeLoading(view, resolver.progress(url), resolver)
+                updateYoutubeLoading(view, progress(), resolver)
                 Utils.mainThread.postDelayed(this, LOADING_TICK_MS)
             }
         }
         tick.run()
+    }
+
+    /**
+     * A quality label at the end of the YouTube player's control bar, styled
+     * like its duration. Tapping it lists the video's qualities; picking one
+     * loads it and continues from the same position.
+     */
+    private fun addQualityButton(state: NativePlayerState, url: String, media: ResolvedMedia) {
+        val playerView = (state.root as? ViewGroup)?.getChildAt(0) as? PlayerView ?: return
+        val duration = playerView.findViewById<TextView>(id("exo_duration")) ?: return
+        val bar = duration.parent as? LinearLayout ?: return
+        val context = playerView.context
+        val label = TextView(context).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, duration.textSize)
+            typeface = duration.typeface
+            setTextColor(duration.textColors)
+            includeFontPadding = duration.includeFontPadding
+            gravity = Gravity.CENTER
+            val padding = dp(context, 4)
+            setPadding(padding, padding, padding, padding)
+            val ripple = TypedValue()
+            if (context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true)) {
+                setBackgroundResource(ripple.resourceId)
+            }
+        }
+        val control = QualityControl(state, playerView, label, url, media)
+        control.updateLabel()
+        label.setOnClickListener { showQualityPicker(control) }
+        bar.addView(
+            label,
+            bar.indexOfChild(duration) + 1,
+            LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(context, 12) },
+        )
+    }
+
+    private class QualityControl(
+        val state: NativePlayerState,
+        val playerView: PlayerView,
+        val label: TextView,
+        val url: String,
+        var media: ResolvedMedia,
+    ) {
+        /** The quality being loaded, so only the last pick is applied. */
+        var pending: Int? = null
+        var loadingCard: View? = null
+
+        fun updateLabel() {
+            label.text = if (media.quality > 0) "${media.quality}p" else "Quality"
+            label.contentDescription = "Video quality: ${label.text}"
+        }
+
+        fun isActive(): Boolean = state.root.tag === state
+    }
+
+    private fun showQualityPicker(control: QualityControl) {
+        val qualities = (control.media.qualities + control.media.quality)
+            .filter { it > 0 }
+            .distinct()
+            .sortedDescending()
+        if (qualities.size < 2) {
+            Utils.showToast("No other qualities for this video")
+            return
+        }
+        val current = control.pending ?: control.media.quality
+        SelectDialog().apply {
+            title = "Video quality"
+            items = qualities.map { if (it == current) "✓ ${it}p" else "${it}p" }.toTypedArray()
+            onResultListener = { which -> qualities.getOrNull(which)?.let { switchQuality(control, it) } }
+        }.show(Utils.appActivity.supportFragmentManager, "PlayEmbedsQuality")
+    }
+
+    private fun switchQuality(control: QualityControl, quality: Int) {
+        val resolver = youtube ?: return
+        if (!control.isActive() || quality == control.pending) return
+        if (quality == control.media.quality) {
+            // Back to what's playing: drop the pending switch.
+            control.pending = null
+            hideQualityLoading(control)
+            return
+        }
+        control.pending = quality
+        hideQualityLoading(control)
+
+        val cached = resolver.cached(control.url, quality)
+        if (cached != null) {
+            applyQuality(control, cached)
+            return
+        }
+        val root = control.state.root as? FrameLayout
+        val card = youtubeLoadingCard(root?.context ?: control.label.context)
+        if (root != null && card != null) {
+            val context = root.context
+            val width = minOf(dp(context, 260), (root.width - dp(context, 16)).coerceAtLeast(dp(context, 160)))
+            root.addView(card, FrameLayout.LayoutParams(width, WRAP, Gravity.CENTER))
+            card.bringToFront()
+            control.loadingCard = card
+            startLoadingTicker(card) { resolver.progress(control.url, quality) }
+        } else {
+            Utils.showToast("Loading ${quality}p…")
+        }
+        resolver.resolve(control.url, quality) { media ->
+            if (control.pending != quality) return@resolve
+            hideQualityLoading(control)
+            control.pending = null
+            if (!control.isActive()) return@resolve
+            if (media == null) {
+                Utils.showToast("Couldn't load ${quality}p", true)
+                return@resolve
+            }
+            applyQuality(control, media)
+        }
+    }
+
+    private fun applyQuality(control: QualityControl, media: ResolvedMedia) {
+        control.pending = null
+        val player = control.state.player
+        val position = NativePlayers.position(player)
+        val playing = NativePlayers.isPlaying(player)
+        NativePlayers.play(player, media.uri, control.playerView, null, position, playing)
+        control.media = media
+        control.updateLabel()
+        youtubeQualityChoices[control.url] = media.quality
+    }
+
+    private fun hideQualityLoading(control: QualityControl) {
+        val card = control.loadingCard ?: return
+        control.loadingCard = null
+        (card.parent as? ViewGroup)?.removeView(card)
     }
 
     private fun updateYoutubeLoading(card: View, tracker: LoadProgress?, resolver: YoutubeResolver) {
@@ -1186,14 +1414,24 @@ class PlayEmbeds : Plugin() {
         errorCallbacks.clear()
         embedRowKeys.clear()
         searchEmbedClicks.clear()
+        youtubeQualityChoices.clear()
         patcher.unpatchAll()
     }
 
-    private companion object {
-        const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
-        const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
-        const val DETACH_RELEASE_DELAY_MS = 1_000L
-        const val MIN_VISIBLE_FRACTION = 0.25f
-        const val LOADING_TICK_MS = 500L
+    internal companion object {
+        const val KEY_WHOLE_CARD = "replaceWholeCard"
+        const val KEY_YOUTUBE_QUALITY = "youtubeQuality"
+
+        private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+        private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+        private const val DETACH_RELEASE_DELAY_MS = 1_000L
+        private const val MIN_VISIBLE_FRACTION = 0.25f
+        private const val LOADING_TICK_MS = 500L
+
+        /** Where Android checks a host's cleartext permission (the policy, and the config it asks). */
+        private val CLEARTEXT_POLICY_CLASSES = listOf(
+            "android.security.net.config.ConfigNetworkSecurityPolicy",
+            "android.security.net.config.ApplicationConfig",
+        )
     }
 }

@@ -1,9 +1,15 @@
-version = "1.0.9"
+version = "1.0.10"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.10
+        * YouTube videos now start almost instantly: they stream while playing instead of downloading first
+        * Choose the quality in the YouTube player, and a default quality in the plugin settings
+        * New setting to play videos in place of the whole embed card
+        * YouTube videos watched to the end replay without loading until the app restarts
+
         # 1.0.9
         * Pause players once they scroll out of view
         * Show a loading popup with progress and time left while a YouTube video loads

@@ -46,10 +46,34 @@ internal object NativePlayers {
         setShowTimeoutMs(0)
     }
 
-    fun play(player: AppMediaPlayer, uri: String, playerView: PlayerView, controlView: PlayerControlView?) {
+    /** `AppMediaPlayer.prepare(source, playWhenReady, loop, startMs, view, controls)`. */
+    fun play(
+        player: AppMediaPlayer,
+        uri: String,
+        playerView: PlayerView,
+        controlView: PlayerControlView?,
+        positionMs: Long = 0L,
+        playWhenReady: Boolean = true,
+    ) {
         val source = MediaSource(Uri.parse(uri), FEATURE_TAG, MediaType.VIDEO)
-        player.a(source, true, false, 0L, playerView, controlView)
+        player.a(source, playWhenReady, false, positionMs, playerView, controlView)
         player.d(1f)
+    }
+
+    /** `Player.getCurrentPosition()`, obfuscated as `y1.T()`. */
+    fun position(player: AppMediaPlayer): Long = try {
+        val exo: Any = player.f
+        exo.javaClass.getMethod("T").invoke(exo) as? Long ?: 0L
+    } catch (_: Throwable) {
+        0L
+    }
+
+    /** `Player.getPlayWhenReady()`, obfuscated as `y1.j()`. */
+    fun isPlaying(player: AppMediaPlayer): Boolean = try {
+        val exo: Any = player.f
+        exo.javaClass.getMethod("j").invoke(exo) as? Boolean ?: true
+    } catch (_: Throwable) {
+        true
     }
 
     /** `SimpleExoPlayer.setPlayWhenReady(false)`, obfuscated as `k2.u(boolean)`. */
