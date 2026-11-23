@@ -3,9 +3,9 @@ package com.github.yutaplug.playembeds
 import android.app.Activity
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.WebChromeClient
-import android.webkit.WebView
 import android.widget.FrameLayout
+import android.widget.ImageButton
+import com.discord.player.AppMediaPlayer
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.discord.widgets.chat.list.entries.EmbedEntry
 import java.lang.ref.WeakReference
@@ -24,25 +24,33 @@ internal class WeakValueMap<K : Any, V : Any> {
     fun clear() = entries.clear()
 }
 
-internal data class FullscreenState(
-    val activity: Activity,
-    val overlay: FrameLayout,
-    val callback: WebChromeClient.CustomViewCallback,
-    val previousSystemUiVisibility: Int,
-    val wasFullscreen: Boolean,
-    val playerParent: ViewGroup?,
-    val playerLayoutParams: ViewGroup.LayoutParams?,
-    val embedReplacement: HostedEmbedReplacement?,
-)
-
-internal data class HostedPlayerState(
-    val webView: WebView,
+/** An inline ExoPlayer that replaced (part of) an embed's preview. */
+internal data class NativePlayerState(
+    val player: AppMediaPlayer,
+    /** The view added to [parent]; its parent changing means the row was rebuilt. */
+    val root: View,
     val parent: ViewGroup,
     val previousVisibility: List<Pair<View, Int>>,
+    /** Hide remembered views with GONE (true) or only turn visible ones INVISIBLE. */
+    val forceGone: Boolean,
+    /** The embed URL for hosted players, the media URL for direct videos. */
     val url: String,
-    val extraView: View?,
+    val extraViews: List<View>,
     val previousMinimumWidth: Int,
     val replacement: HostedEmbedReplacement? = null,
+)
+
+/** Where a fullscreen player came from, and the window state to restore. */
+internal class FullscreenState(
+    val activity: Activity,
+    val overlay: FrameLayout,
+    val button: ImageButton,
+    val parent: ViewGroup,
+    val index: Int,
+    val layoutParams: ViewGroup.LayoutParams,
+    val previousSystemUiVisibility: Int,
+    val wasFullscreen: Boolean,
+    val previousOrientation: Int,
 )
 
 internal data class HostedEmbedReplacement(
@@ -60,10 +68,3 @@ internal class SearchEmbedClick(handler: WidgetChatListAdapter.EventHandler, val
     private val handlerRef = WeakReference(handler)
     val handler: WidgetChatListAdapter.EventHandler? get() = handlerRef.get()
 }
-
-internal data class InlineVideoState(
-    val webView: WebView,
-    val parent: ViewGroup,
-    val previousVisibility: List<Pair<View, Int>>,
-    val url: String,
-)

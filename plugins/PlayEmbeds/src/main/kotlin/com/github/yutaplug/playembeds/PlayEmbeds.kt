@@ -3,27 +3,23 @@ package com.github.yutaplug.playembeds
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
-import android.media.AudioManager
+import android.content.pm.ActivityInfo
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PorterDuff
 import android.net.Uri
 import android.view.Gravity
-import android.view.KeyEvent
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewParent
 import android.view.WindowManager
-import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
 import androidx.constraintlayout.widget.Barrier
 import androidx.constraintlayout.widget.ConstraintLayout
 import com.aliucord.Utils
@@ -32,16 +28,18 @@ import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.discord.api.message.embed.MessageEmbed
+import com.discord.player.AppMediaPlayer
 import com.discord.player.MediaSource
 import com.discord.utilities.embed.EmbedResourceUtils
-import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemEmbed
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
+import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemEmbed
 import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.EmbedEntry
 import com.discord.widgets.media.WidgetMedia
-import java.util.Locale
+import com.google.android.exoplayer2.PlaybackException
+import java.io.File
+import java.lang.ref.WeakReference
 import java.util.WeakHashMap
-import java.util.concurrent.ConcurrentHashMap
 
 @AliucordPlugin(requiresRestart = true)
 @Suppress("unused")
@@ -49,60 +47,51 @@ class PlayEmbeds : Plugin() {
     private val embedLinks = WeakHashMap<ViewGroup, EmbedLink>()
     private val configuredEmbeds = WeakHashMap<View, MessageEmbed>()
     private val hostedEmbeds = WeakHashMap<ViewGroup, MessageEmbed>()
-    private val hostedPlayers = WeakValueMap<ViewGroup, HostedPlayerState>()
     private val embedRowKeys = WeakHashMap<ViewGroup, Pair<Long, Int>>()
     private val searchEmbedClicks = WeakHashMap<ViewGroup, SearchEmbedClick>()
-    private val inlineVideoPlayers = WeakValueMap<ViewGroup, InlineVideoState>()
+    private val players = WeakValueMap<ViewGroup, NativePlayerState>()
+    private val loadingIndicators = WeakValueMap<ViewGroup, View>()
     private val spotifyPlayButtons = WeakValueMap<ViewGroup, ImageView>()
-    private val fullscreenPlayers = WeakValueMap<WebView, FullscreenState>()
-    // Kept separate from row state because audio-focus callbacks can arrive on
-    // Chromium threads while chat rows are being rebound on the main thread.
-    private val activeEmbedWebViews = ConcurrentHashMap.newKeySet<WebView>()
+
+    /** Keyed by the player root currently moved into a fullscreen overlay. */
+    private val fullscreenPlayers = WeakHashMap<View, FullscreenState>()
+
+    /** Keyed by each player's ExoPlayer listener (`AppMediaPlayer.g`), which receives errors. */
+    private val errorCallbacks = WeakHashMap<Any, () -> Unit>()
+
+    private var youtube: YoutubeResolver? = null
+    private var soundCloud: SoundCloudResolver? = null
+    private var spotify: SpotifyResolver? = null
 
     override fun start(context: Context) {
         EmbedUrls.fxVideoResolver = FxVideoResolver()
+        youtube = YoutubeResolver(File(context.cacheDir, "playembeds-youtube"))
+        soundCloud = SoundCloudResolver(File(context.cacheDir, "playembeds"))
+        spotify = SpotifyResolver()
+        NativePlayers.init()
         patchEmbedRows()
         patchNativeHostedLaunches()
-        patchWebViewAudioFocus()
+        patchPlayerErrors()
     }
 
-    /**
-     * Chromium asks Android for exclusive audio focus whenever a WebView starts
-     * media. Report focus as granted for an attached PlayEmbeds player without
-     * forwarding that request to the system, so other apps keep their audio.
-     *
-     * Both overloads are patched because the Android System WebView decides
-     * which one to use. The Chromium stack check keeps Discord's native media,
-     * calls, and non-WebView audio on Android's normal focus path.
-     */
-    private fun patchWebViewAudioFocus() {
-        val audioManager = AudioManager::class.java
-        val shouldSuppress = {
-            activeEmbedWebViews.isNotEmpty() && Thread.currentThread().stackTrace.any { element ->
-                element.className.startsWith("org.chromium.") ||
-                    element.className.startsWith("com.android.webview.chromium.")
-            }
-        }
-        val suppressFocus = PreHook { frame ->
-            if (shouldSuppress()) frame.setResult(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        }
-        // Present since Android 8. Resolve by name so devices on older Android
-        // versions can still load the plugin and use the legacy overload below.
-        runCatching { Class.forName("android.media.AudioFocusRequest") }.getOrNull()?.let { requestClass ->
-            audioManager.methods.firstOrNull { method ->
-                method.name == "requestAudioFocus" && method.parameterTypes.contentEquals(arrayOf(requestClass))
-            }?.let { patcher.patch(it, suppressFocus) }
-        }
-        audioManager.getMethod(
-            "requestAudioFocus",
-            AudioManager.OnAudioFocusChangeListener::class.java,
-            Int::class.javaPrimitiveType,
-            Int::class.javaPrimitiveType,
-        ).let { patcher.patch(it, suppressFocus) }
+    /** Discord only logs ExoPlayer errors; surface them so a dead stream falls back. */
+    private fun patchPlayerErrors() {
+        val listener = Class.forName("b.a.p.k")
+        val onError = listener.getDeclaredMethod("s", PlaybackException::class.java)
+        patcher.patch(
+            onError,
+            Hook { frame ->
+                val callback = errorCallbacks.remove(frame.thisObject) ?: return@Hook
+                Utils.mainThread.post { callback() }
+            },
+        )
     }
 
     private fun patchEmbedRows() {
-        val getAdapter = WidgetChatListAdapterItemEmbed::class.java.getDeclaredMethod("access\$getAdapter\$p", WidgetChatListAdapterItemEmbed::class.java)
+        val getAdapter = WidgetChatListAdapterItemEmbed::class.java.getDeclaredMethod(
+            "access\$getAdapter\$p",
+            WidgetChatListAdapterItemEmbed::class.java,
+        )
         val onConfigure = WidgetChatListAdapterItemEmbed::class.java.getDeclaredMethod(
             "onConfigure",
             Int::class.javaPrimitiveType,
@@ -118,17 +107,13 @@ class PlayEmbeds : Plugin() {
                 val entry = frame.args.getOrNull(1) as? EmbedEntry
                 embedContainers(item.itemView).forEach { container ->
                     val currentEmbed = entry?.embed
-                    val state = hostedPlayers[container]
-                    val inlineState = inlineVideoPlayers[container]
+                    val state = players[container]
                     val sameRow = entry != null &&
                         embedRowKeys[container] == (entry.message.id to entry.embedIndex)
-                    val samePlayer = sameRow && currentEmbed != null && ((state != null &&
-                        EmbedUrls.hostedEmbed(currentEmbed)?.url == state.url &&
-                        state.webView.parent === state.parent) ||
-                        (inlineState != null &&
-                            EmbedUrls.genericVideoUrl(currentEmbed) == inlineState.url &&
-                            inlineState.webView.parent === inlineState.parent))
-                    if (!samePlayer) resetEmbedContainer(container)
+                    val samePlayer = sameRow && currentEmbed != null && state != null &&
+                        isShowing(state) && state.url == playerIdentity(currentEmbed)
+                    val sameLoading = sameRow && loadingIndicators[container] != null
+                    if (!samePlayer && !sameLoading) resetEmbedContainer(container)
                 }
             },
         )
@@ -140,16 +125,17 @@ class PlayEmbeds : Plugin() {
                 configuredEmbeds[item.itemView] = entry.embed
                 embedContainers(item.itemView).forEach { container ->
                     embedRowKeys[container] = entry.message.id to entry.embedIndex
-                    hostedPlayers[container]?.let { state ->
+                    players[container]?.let { state ->
                         state.previousVisibility.forEach { (view, visibility) ->
-                            if (visibility == View.VISIBLE) view.visibility = View.INVISIBLE
+                            if (state.forceGone) {
+                                view.visibility = View.GONE
+                            } else if (visibility == View.VISIBLE) {
+                                view.visibility = View.INVISIBLE
+                            }
                         }
-                        state.webView.bringToFront()
+                        state.root.bringToFront()
                     }
-                    inlineVideoPlayers[container]?.let { state ->
-                        state.previousVisibility.forEach { (view, _) -> view.visibility = View.GONE }
-                        state.webView.bringToFront()
-                    }
+                    loadingIndicators[container]?.bringToFront()
                 }
                 val adapter = getAdapter.invoke(null, item) as WidgetChatListAdapter
                 val handler = adapter.eventHandler
@@ -162,13 +148,14 @@ class PlayEmbeds : Plugin() {
                 val link = EmbedUrls.embedLink(entry.embed)
                 if (link == null) {
                     if (entry.embed.m() == null) {
-                        val root = java.lang.ref.WeakReference(item.itemView)
+                        val root = WeakReference(item.itemView)
                         val embed = entry.embed
                         val rowKey = entry.message.id to entry.embedIndex
                         EmbedUrls.fxVideoResolver?.resolve(embed.l()) { video ->
                             val view = root.get()
                             if (video != null && view != null && configuredEmbeds[view] === embed &&
-                                embedContainers(view).any { embedRowKeys[it] == rowKey }) {
+                                embedContainers(view).any { embedRowKeys[it] == rowKey }
+                            ) {
                                 EmbedUrls.embedLink(embed)?.let { attachMediaClickHandlers(view, it) }
                             }
                         }
@@ -180,6 +167,9 @@ class PlayEmbeds : Plugin() {
         )
     }
 
+    private fun playerIdentity(embed: MessageEmbed): String? =
+        EmbedUrls.genericVideoUrl(embed) ?: EmbedUrls.hostedEmbed(embed)?.url
+
     private fun patchNativeHostedLaunches() {
         val widgetMediaLaunch = WidgetMedia.Companion::class.java.getDeclaredMethod(
             "launch",
@@ -190,16 +180,13 @@ class PlayEmbeds : Plugin() {
             widgetMediaLaunch,
             PreHook { frame ->
                 val embed = frame.args.getOrNull(1) as? MessageEmbed ?: return@PreHook
+                val container = findHostedContainer(embed) ?: return@PreHook
                 if (EmbedUrls.genericVideoUrl(embed) != null) {
-                    val container = findHostedContainer(embed)
-                    if (container != null && playInlineVideoEmbed(container, embed)) {
-                        frame.setResult(null)
-                        return@PreHook
-                    }
+                    if (playInlineVideo(container, embed)) frame.setResult(null)
+                    return@PreHook
                 }
                 val hosted = EmbedUrls.hostedEmbed(embed) ?: return@PreHook
-                val container = findHostedContainer(embed) ?: return@PreHook
-                if (openHostedEmbed(container, hosted)) frame.setResult(null)
+                if (playHosted(container, hosted)) frame.setResult(null)
             },
         )
 
@@ -218,7 +205,7 @@ class PlayEmbeds : Plugin() {
                 }
                 val embed = container?.let { hostedEmbeds[it] }
                 if (container != null && embed != null && EmbedUrls.genericVideoUrl(embed) != null) {
-                    if (playInlineVideoEmbed(container, embed)) {
+                    if (playInlineVideo(container, embed)) {
                         frame.setResult(null)
                         return@PreHook
                     }
@@ -226,7 +213,7 @@ class PlayEmbeds : Plugin() {
                 val url = mediaSourceUrl(frame.thisObject) ?: return@PreHook
                 if (EmbedUrls.isMediaLink(url)) return@PreHook
                 val hosted = EmbedUrls.hostedEmbed(url) ?: return@PreHook
-                if (!openHostedEmbed(view, hosted)) return@PreHook
+                if (!playHosted(view, hosted)) return@PreHook
                 frame.setResult(null)
             },
         )
@@ -258,13 +245,13 @@ class PlayEmbeds : Plugin() {
                 }
                 if (EmbedUrls.genericVideoUrl(embed) != null) {
                     val target = container ?: return@PreHook
-                    if (playInlineVideoEmbed(target, embed)) {
+                    if (playInlineVideo(target, embed)) {
                         frame.setResult(null)
                         return@PreHook
                     }
                 }
                 val hosted = EmbedUrls.hostedEmbed(embed) ?: return@PreHook
-                if (!openHostedEmbed(source, hosted)) return@PreHook
+                if (!playHosted(source, hosted)) return@PreHook
                 frame.setResult(null)
             },
         )
@@ -323,8 +310,7 @@ class PlayEmbeds : Plugin() {
             openEmbed(view, currentLink)
         }
 
-        val containers = embedContainers(root)
-        containers.forEach { container ->
+        embedContainers(root).forEach { container ->
             embedLinks[container] = link
             if (link is EmbedLink.InlineVideo) {
                 hostedEmbeds[container] = link.embed
@@ -339,9 +325,9 @@ class PlayEmbeds : Plugin() {
     }
 
     private fun resetEmbedContainer(container: ViewGroup) {
-        val replacedCard = hostedPlayers[container]?.replacement?.originalCard
-        removeHostedPlayer(container)
-        removeInlineVideoPlayer(container)
+        val replacedCard = players[container]?.replacement?.originalCard
+        removeNativePlayer(container)
+        hideLoading(container)
         listOfNotNull(container, replacedCard).forEach { view ->
             removeSpotifyPlayButton(view)
             embedLinks.remove(view)
@@ -371,17 +357,19 @@ class PlayEmbeds : Plugin() {
         when (link) {
             is EmbedLink.InlineVideo -> {
                 val container = findHostedContainer(view) ?: return
-                playInlineVideoEmbed(container, link.embed)
+                playInlineVideo(container, link.embed)
             }
             is EmbedLink.Hosted -> {
-                if (!openHostedEmbed(view, link.embed)) {
-                    try {
-                        view.context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link.embed.url)))
-                    } catch (_: ActivityNotFoundException) {
-                        Utils.showToast("Unable to open the embed", true)
-                    }
-                }
+                if (!playHosted(view, link.embed)) openExternally(view.context, link.embed.url)
             }
+        }
+    }
+
+    private fun openExternally(context: Context, url: String) {
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: ActivityNotFoundException) {
+            Utils.showToast("Unable to open the embed", true)
         }
     }
 
@@ -427,18 +415,331 @@ class PlayEmbeds : Plugin() {
             ?.key
     }
 
-    private fun openHostedEmbed(view: View, embed: HostedEmbed): Boolean {
+    private fun resolverFor(provider: HostedProvider): CachedResolver<ResolvedMedia>? = when (provider) {
+        HostedProvider.YOUTUBE -> youtube
+        HostedProvider.SOUNDCLOUD -> soundCloud
+        HostedProvider.SPOTIFY -> spotify
+    }
+
+    private fun playHosted(view: View, embed: HostedEmbed): Boolean {
         val container = findHostedContainer(view)
             ?: embed.sourceEmbed?.let(::findHostedContainer)
             ?: return false
-        return openHostedEmbed(container, embed)
+        return playHosted(container, embed)
     }
 
-    private fun requestAncestorsDisallowIntercept(view: View, disallow: Boolean) {
-        var ancestor: ViewParent? = view.parent
-        while (ancestor != null) {
-            ancestor.requestDisallowInterceptTouchEvent(disallow)
-            ancestor = (ancestor as? View)?.parent
+    /**
+     * YouTube, SoundCloud and Spotify links are webpages, not media files.
+     * Resolve a progressive stream in the background, then play it inline
+     * with Discord's ExoPlayer. Anything that can't be resolved opens externally.
+     */
+    private fun playHosted(container: ViewGroup, embed: HostedEmbed): Boolean {
+        players[container]?.let { state ->
+            if (state.url == embed.url && isShowing(state)) {
+                state.root.bringToFront()
+                return true
+            }
+            // Removing a whole-card player puts the original card back in place of the wrapper.
+            val replacedCard = state.replacement?.originalCard
+            removeNativePlayer(container)
+            if (replacedCard != null) return playHosted(replacedCard, embed)
+        }
+        val resolver = resolverFor(embed.provider) ?: return false
+        if (!resolver.handles(embed.url)) {
+            openExternally(container.context, embed.url)
+            return true
+        }
+        if (loadingIndicators[container] != null) return true
+
+        val rowKey = embedRowKeys[container]
+        val containerRef = WeakReference(container)
+        showLoading(container)
+        resolver.resolve(embed.url) { media ->
+            val target = containerRef.get() ?: return@resolve
+            hideLoading(target)
+            if (!target.isAttachedToWindow || embedRowKeys[target] != rowKey) return@resolve
+            if (media == null || !attachPlayer(target, embed.url, media, embed.provider)) {
+                openExternally(target.context, embed.url)
+            }
+        }
+        return true
+    }
+
+    /** Replace a direct-video preview with a native player for Discord's video URL. */
+    private fun playInlineVideo(container: ViewGroup, embed: MessageEmbed): Boolean {
+        val videoUrl = EmbedUrls.genericVideoUrl(embed) ?: return false
+        players[container]?.let { state ->
+            if (state.url == videoUrl && isShowing(state)) {
+                state.root.bringToFront()
+                return true
+            }
+            val replacedCard = state.replacement?.originalCard
+            removeNativePlayer(container)
+            if (replacedCard != null) return playInlineVideo(replacedCard, embed)
+        }
+        val video = embed.m()
+        val thumbnail = embed.h()
+        val width = video?.d()?.takeIf { it > 0 } ?: thumbnail?.d()?.takeIf { it > 0 } ?: 16
+        val height = video?.a()?.takeIf { it > 0 } ?: thumbnail?.a()?.takeIf { it > 0 } ?: 9
+        val attached = attachPlayer(container, videoUrl, ResolvedMedia(videoUrl, width, height, false), null)
+        if (attached) hostedEmbeds[container] = embed
+        return attached
+    }
+
+    private fun attachPlayer(
+        container: ViewGroup,
+        identity: String,
+        media: ResolvedMedia,
+        provider: HostedProvider?,
+    ): Boolean {
+        removeSpotifyPlayButton(container)
+        val player = NativePlayers.create(container.context) ?: return false
+        val state = when {
+            media.audioOnly -> attachAudioPlayer(container, player, identity, media)
+            // The whole card is replaced only when there's no large preview to play in.
+            provider == HostedProvider.YOUTUBE ->
+                attachPreviewVideo(container, player, identity, media)
+                    ?: attachWholeCardVideo(container, player, identity, media)
+            else -> attachPreviewVideo(container, player, identity, media)
+        }
+        if (state == null) {
+            NativePlayers.release(player)
+            return false
+        }
+        val playerContainer = state.replacement?.wrapper ?: container
+        // `players` holds its values weakly; the view's tag is the strong reference that
+        // keeps the state alive exactly as long as the player view exists. Without it the
+        // state can be collected mid-playback, and a recycled row then keeps showing the
+        // old video because resetEmbedContainer can no longer find it.
+        state.root.tag = state
+        players[playerContainer] = state
+        // Weak references only: the map value must not pin its own key (the player's listener).
+        val containerRef = WeakReference(playerContainer)
+        val playerRef = WeakReference(player)
+        errorCallbacks[player.g] = {
+            val target = containerRef.get()
+            val current = playerRef.get()
+            if (target != null && current != null && players[target]?.player === current) {
+                removeNativePlayer(target)
+                Utils.showToast("Couldn't play this embed", true)
+                if (provider != null) openExternally(target.context, identity)
+            }
+        }
+        // Like Discord's own inline media, stop once the row leaves the screen
+        // (or the chat closes). The delay ignores brief detaches during relayout.
+        state.root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) {}
+
+            override fun onViewDetachedFromWindow(view: View) {
+                val viewRef = WeakReference(view)
+                Utils.mainThread.postDelayed({
+                    val root = viewRef.get() ?: return@postDelayed
+                    val target = containerRef.get() ?: return@postDelayed
+                    if (!root.isAttachedToWindow && players[target]?.root === root) removeNativePlayer(target)
+                }, DETACH_RELEASE_DELAY_MS)
+            }
+        })
+        playerContainer.requestLayout()
+        return true
+    }
+
+    /** YouTube replaces the whole embed card, as its preview is only a thumbnail. */
+    private fun attachWholeCardVideo(
+        container: ViewGroup,
+        player: AppMediaPlayer,
+        identity: String,
+        media: ResolvedMedia,
+    ): NativePlayerState? {
+        val replacement = wrapEmbedForHostedPlayer(container) ?: return null
+        val playerView = NativePlayers.videoView(container.context)
+        val root = TouchGuardLayout(container.context).apply {
+            addView(playerView, FrameLayout.LayoutParams(MATCH, MATCH))
+        }
+        addFullscreenButton(playerView, root)
+        replacement.wrapper.addView(root, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.bringToFront()
+        NativePlayers.play(player, media.uri, playerView, null)
+        return NativePlayerState(
+            player,
+            root,
+            replacement.wrapper,
+            emptyList(),
+            forceGone = false,
+            url = identity,
+            extraViews = emptyList(),
+            previousMinimumWidth = replacement.wrapper.minimumWidth,
+            replacement = replacement,
+        )
+    }
+
+    /** Swap the image/inline-media preview for a video surface of the same size. */
+    private fun attachPreviewVideo(
+        container: ViewGroup,
+        player: AppMediaPlayer,
+        identity: String,
+        media: ResolvedMedia,
+    ): NativePlayerState? {
+        val imageContainer = container.findViewById<View>(id("embed_image_container")) as? ViewGroup
+        val inlineMedia = container.findViewById<View>(id("embed_inline_media")) as? ViewGroup
+        val content = container.findViewById<View>(id("chat_list_item_embed_content"))
+        val parent = when {
+            content?.visibility == View.VISIBLE && imageContainer?.visibility == View.VISIBLE -> imageContainer
+            inlineMedia?.visibility == View.VISIBLE -> inlineMedia
+            else -> return null
+        }
+        val previousVisibility = ArrayList<Pair<View, Int>>()
+        if (parent === imageContainer) {
+            listOfNotNull(
+                parent.findViewById<View>(id("chat_list_item_embed_image")),
+                parent.findViewById<View>(id("chat_list_item_embed_image_icons")),
+            ).forEach { previousVisibility.add(it to it.visibility) }
+        } else {
+            for (index in 0 until parent.childCount) {
+                val child = parent.getChildAt(index)
+                previousVisibility.add(child to child.visibility)
+            }
+        }
+
+        // The image card wraps its children. A MATCH_PARENT player cannot
+        // provide its own size once the native preview is removed.
+        val preview = parent.findViewById<View>(
+            id(if (parent === imageContainer) "chat_list_item_embed_image" else "inline_media_image_preview"),
+        )
+        val embedResources = EmbedResourceUtils.INSTANCE
+        val fallbackSize = embedResources.calculateScaledSize(
+            media.width.coerceAtLeast(1),
+            media.height.coerceAtLeast(1),
+            embedResources.computeMaximumImageWidthPx(parent.context),
+            embedResources.getMAX_IMAGE_VIEW_HEIGHT_PX(),
+            parent.resources,
+            0,
+        )
+        val width = (parent.width - parent.paddingLeft - parent.paddingRight).takeIf { it > 0 }
+            ?: preview?.layoutParams?.width?.takeIf { it > 0 }
+            ?: fallbackSize.first
+        val height = (parent.height - parent.paddingTop - parent.paddingBottom).takeIf { it > 0 }
+            ?: preview?.layoutParams?.height?.takeIf { it > 0 }
+            ?: fallbackSize.second
+
+        val playerView = NativePlayers.videoView(parent.context)
+        val root = TouchGuardLayout(parent.context).apply {
+            addView(playerView, FrameLayout.LayoutParams(MATCH, MATCH))
+        }
+        addFullscreenButton(playerView, root)
+        previousVisibility.forEach { (child, _) -> child.visibility = View.GONE }
+        parent.addView(root, FrameLayout.LayoutParams(width, height))
+        root.bringToFront()
+        NativePlayers.play(player, media.uri, playerView, null)
+        return NativePlayerState(
+            player,
+            root,
+            parent,
+            previousVisibility,
+            forceGone = true,
+            url = identity,
+            extraViews = emptyList(),
+            previousMinimumWidth = parent.minimumWidth,
+        )
+    }
+
+    /**
+     * Audio keeps the embed's artwork visible. The control bar sits over the
+     * bottom of a large preview, or below the text for compact thumbnail cards.
+     */
+    private fun attachAudioPlayer(
+        container: ViewGroup,
+        player: AppMediaPlayer,
+        identity: String,
+        media: ResolvedMedia,
+    ): NativePlayerState? {
+        val context = container.context
+        val preview = previewView(container)
+        val previewParent = preview?.parent as? ViewGroup
+        val controlBar = NativePlayers.controlBar(context)
+        val root = TouchGuardLayout(context).apply {
+            addView(controlBar, FrameLayout.LayoutParams(MATCH, WRAP))
+        }
+        // AppMediaPlayer needs a PlayerView even for audio; it never shows.
+        val hiddenView = NativePlayers.videoView(context)
+
+        if (preview != null && previewParent is FrameLayout) {
+            val previousVisibility = ArrayList<Pair<View, Int>>()
+            for (index in 0 until previewParent.childCount) {
+                val child = previewParent.getChildAt(index)
+                if (child !== preview && child.visibility == View.VISIBLE) {
+                    previousVisibility.add(child to child.visibility)
+                    child.visibility = View.INVISIBLE
+                }
+            }
+            previewParent.addView(root, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+            root.bringToFront()
+            NativePlayers.play(player, media.uri, hiddenView, controlBar)
+            return NativePlayerState(
+                player,
+                root,
+                previewParent,
+                previousVisibility,
+                forceGone = false,
+                url = identity,
+                extraViews = emptyList(),
+                previousMinimumWidth = previewParent.minimumWidth,
+            )
+        }
+
+        // Compact card: small thumbnail (or none) beside the text.
+        val content = container.findViewById<View>(id("chat_list_item_embed_content"))
+            ?.takeIf { it.visibility == View.VISIBLE }
+            ?: return null
+        val cardLayout = content.parent as? ConstraintLayout ?: return null
+        val previousMinimumWidth = cardLayout.minimumWidth
+        val maxWidth = EmbedResourceUtils.INSTANCE.computeMaximumImageWidthPx(context)
+        cardLayout.minimumWidth = maxOf(previousMinimumWidth, maxWidth)
+        val dividerId = id("chat_list_item_embed_divider")
+        val referenced = listOfNotNull(preview?.takeIf { it.parent === cardLayout }?.id, content.id)
+            .filter { it != View.NO_ID }
+        val barrier = Barrier(context).apply {
+            id = View.generateViewId()
+            type = Barrier.BOTTOM
+            referencedIds = referenced.toIntArray()
+        }
+        cardLayout.addView(barrier, ConstraintLayout.LayoutParams(0, 0))
+        val barWidth = maxOf(dp(context, 1), maxWidth - (container.findViewById<View>(dividerId)?.width ?: 0))
+        val params = ConstraintLayout.LayoutParams(barWidth, WRAP).apply {
+            startToEnd = dividerId
+            endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
+            horizontalBias = 0f
+            topToBottom = barrier.id
+            topMargin = dp(context, 4)
+            bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
+            bottomMargin = dp(context, 8)
+        }
+        cardLayout.addView(root, params)
+        root.bringToFront()
+        NativePlayers.play(player, media.uri, hiddenView, controlBar)
+        return NativePlayerState(
+            player,
+            root,
+            cardLayout,
+            emptyList(),
+            forceGone = false,
+            url = identity,
+            extraViews = listOf(barrier),
+            previousMinimumWidth = previousMinimumWidth,
+        )
+    }
+
+    /** The embed's visible preview image: large image, inline media, or small thumbnail. */
+    private fun previewView(container: ViewGroup): View? {
+        val imageContainer = container.findViewById<View>(id("embed_image_container"))
+        val inlineMedia = container.findViewById<View>(id("embed_inline_media"))
+        val content = container.findViewById<View>(id("chat_list_item_embed_content"))
+        return when {
+            content?.visibility == View.VISIBLE && imageContainer?.visibility == View.VISIBLE ->
+                imageContainer.findViewById(id("chat_list_item_embed_image"))
+            inlineMedia?.visibility == View.VISIBLE ->
+                inlineMedia.findViewById(id("inline_media_image_preview"))
+            else -> container.findViewById<View>(id("chat_list_item_embed_image_thumbnail"))
+                ?.takeIf { it.visibility == View.VISIBLE }
         }
     }
 
@@ -468,13 +769,7 @@ class PlayEmbeds : Plugin() {
         originalParent.removeViewAt(originalIndex)
         container.id = View.generateViewId()
         originalParent.addView(wrapper, originalIndex, originalLayoutParams)
-        wrapper.addView(
-            container,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ),
-        )
+        wrapper.addView(container, FrameLayout.LayoutParams(MATCH, MATCH))
         moveEmbedViewState(container, wrapper)
         return HostedEmbedReplacement(
             wrapper,
@@ -494,518 +789,22 @@ class PlayEmbeds : Plugin() {
         embedRowKeys.remove(from)?.let { embedRowKeys[to] = it }
         searchEmbedClicks.remove(from)?.let { searchEmbedClicks[to] = it }
         spotifyPlayButtons.remove(from)?.let { spotifyPlayButtons[to] = it }
+        loadingIndicators.remove(from)?.let { loadingIndicators[to] = it }
     }
 
-    private fun copyLayoutParams(params: ViewGroup.LayoutParams): ViewGroup.LayoutParams {
-        return when (params) {
-            is ConstraintLayout.LayoutParams -> ConstraintLayout.LayoutParams(params)
-            is FrameLayout.LayoutParams -> FrameLayout.LayoutParams(params)
-            is ViewGroup.MarginLayoutParams -> ViewGroup.MarginLayoutParams(params)
-            else -> ViewGroup.LayoutParams(params)
-        }
-    }
-
-    /**
-     * YouTube and SoundCloud URLs are webpages, not progressive media files.
-     * Add their provider player to the embed itself instead of opening a
-     * dialog, external app, or browser.
-     */
-    private fun openHostedEmbed(container: ViewGroup, embed: HostedEmbed): Boolean {
-        val state = hostedPlayers[container]
-        val existing = state?.webView
-        if (existing != null) {
-            if (existing.parent == state.parent) {
-                removeSpotifyPlayButton(container)
-                existing.visibility = View.VISIBLE
-                existing.bringToFront()
-                loadHostedPlayer(existing, embed)
-                return true
-            }
-            val replacedCard = state.replacement?.originalCard
-            removeHostedPlayer(container)
-            if (replacedCard != null) {
-                return openHostedEmbed(replacedCard, embed)
-            }
-        }
-
-        val replaceWholeEmbed = embed.provider == HostedProvider.YOUTUBE
-        val imageContainer = container.findViewById<View>(Utils.getResId("embed_image_container", "id"))
-        val inlineMedia = container.findViewById<View>(Utils.getResId("embed_inline_media", "id"))
-        val content = container.findViewById<View>(Utils.getResId("chat_list_item_embed_content", "id"))
-        val preview = when {
-            content?.visibility == View.VISIBLE && imageContainer?.visibility == View.VISIBLE ->
-                imageContainer.findViewById<View>(Utils.getResId("chat_list_item_embed_image", "id"))
-            inlineMedia?.visibility == View.VISIBLE ->
-                inlineMedia.findViewById<View>(Utils.getResId("inline_media_image_preview", "id"))
-            else -> container.findViewById<View>(Utils.getResId("chat_list_item_embed_image_thumbnail", "id"))
-                ?.takeIf { it.visibility == View.VISIBLE }
-        } ?: return false
-        val replacement = if (replaceWholeEmbed) wrapEmbedForHostedPlayer(container) else null
-        val playerParent = replacement?.wrapper ?: (preview.parent as? ViewGroup ?: return false)
-        val playerContainer = replacement?.wrapper ?: container
-        val compactSpotify = embed.provider == HostedProvider.SPOTIFY &&
-            preview.id == Utils.getResId("chat_list_item_embed_image_thumbnail", "id") &&
-            playerParent is ConstraintLayout && content?.visibility == View.VISIBLE
-        val previousMinimumWidth = playerParent.minimumWidth
-        val width = if (replacement != null) {
-            ViewGroup.LayoutParams.MATCH_PARENT
-        } else {
-            preview.width.takeIf { it > 0 }
-                ?: preview.layoutParams.width.takeIf { it > 0 }
-                ?: return false
-        }
-        val height = if (replacement != null) {
-            ViewGroup.LayoutParams.MATCH_PARENT
-        } else {
-            preview.height.takeIf { it > 0 }
-                ?: preview.layoutParams.height.takeIf { it > 0 }
-                ?: return false
-        }
-        removeSpotifyPlayButton(container)
-        if (compactSpotify) {
-            playerParent.minimumWidth = maxOf(
-                previousMinimumWidth,
-                EmbedResourceUtils.INSTANCE.computeMaximumImageWidthPx(container.context),
-            )
-        }
-        val dividerId = Utils.getResId("chat_list_item_embed_divider", "id")
-        val bottomBarrier = if (compactSpotify) {
-            Barrier(container.context).apply {
-                id = View.generateViewId()
-                type = Barrier.BOTTOM
-                referencedIds = intArrayOf(preview.id, content.id)
-            }.also { playerParent.addView(it, ConstraintLayout.LayoutParams(0, 0)) }
-        } else null
-        val playerParams = if (replacement != null) {
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-        } else if (bottomBarrier != null) {
-            val maxPlayerWidth = maxOf(
-                dp(container.context, 1),
-                EmbedResourceUtils.INSTANCE.computeMaximumImageWidthPx(container.context) -
-                    (container.findViewById<View>(dividerId)?.width ?: 0),
-            )
-            ConstraintLayout.LayoutParams(maxPlayerWidth, dp(container.context, SPOTIFY_PLAYER_HEIGHT_DP)).apply {
-                startToEnd = dividerId
-                endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
-                horizontalBias = 0f
-                topToBottom = bottomBarrier.id
-                topMargin = dp(container.context, 8)
-                bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
-                bottomMargin = dp(container.context, 8)
-            }
-        } else {
-            when (playerParent) {
-                is ConstraintLayout -> ConstraintLayout.LayoutParams(preview.layoutParams as ConstraintLayout.LayoutParams)
-                is FrameLayout -> FrameLayout.LayoutParams(preview.layoutParams)
-                else -> ViewGroup.LayoutParams(preview.layoutParams)
-            }.apply {
-                this.width = width
-                this.height = height
-            }
-        }
-
-        val webView = object : WebView(container.context) {
-            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-                // Some Discord/device-specific parent containers don't reliably
-                // propagate this request through the full hierarchy. Request it
-                // directly from every ancestor so seekbar drags stay with YouTube
-                // instead of becoming panel/chat swipes.
-                val finished = event.actionMasked == MotionEvent.ACTION_UP ||
-                    event.actionMasked == MotionEvent.ACTION_CANCEL
-                requestAncestorsDisallowIntercept(this, !finished)
-                return try {
-                    super.dispatchTouchEvent(event)
-                } finally {
-                    // Reassert after WebView's own dispatch; release all parents
-                    // only once the gesture ends.
-                    requestAncestorsDisallowIntercept(this, !finished)
-                }
-            }
-        }
-        webView.setBackgroundColor(Color.BLACK)
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            mediaPlaybackRequiresUserGesture = false
-            loadsImagesAutomatically = true
-            allowContentAccess = true
-            allowFileAccess = false
-            builtInZoomControls = false
-            displayZoomControls = false
-            setSupportZoom(false)
-        }
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-        webView.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                return redirectYoutubeVideo(view, embed, request.url.toString()) ||
-                    redirectSpotifyLink(view, embed, request.url.toString()) ||
-                    !EmbedUrls.isHttpUrl(request.url.toString())
-            }
-
-            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                if (embed.provider == HostedProvider.YOUTUBE && isYoutubePlayerRequest(request)) {
-                    Utils.showToast("YouTube player failed to load: ${error.description}", true)
-                }
-            }
-
-            override fun onReceivedHttpError(
-                view: WebView,
-                request: WebResourceRequest,
-                response: WebResourceResponse,
-            ) {
-                if (embed.provider == HostedProvider.YOUTUBE && isYoutubePlayerRequest(request)) {
-                    Utils.showToast("YouTube player failed to load (HTTP ${response.statusCode})", true)
-                }
-            }
-
-            @Suppress("DEPRECATION")
-            @Deprecated("Deprecated in Java")
-            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
-                return redirectYoutubeVideo(view, embed, url) ||
-                    redirectSpotifyLink(view, embed, url) || !EmbedUrls.isHttpUrl(url)
-            }
-        }
-        webView.webChromeClient = object : WebChromeClient() {
-            @Suppress("DEPRECATION")
-            @Deprecated("Deprecated in Java")
-            override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-                showFullscreen(webView, view, callback)
-            }
-
-            @Suppress("DEPRECATION")
-            @Deprecated("Deprecated in Java")
-            override fun onShowCustomView(view: View, requestedOrientation: Int, callback: CustomViewCallback) {
-                showFullscreen(webView, view, callback)
-            }
-
-            @Suppress("DEPRECATION")
-            override fun onHideCustomView() {
-                hideFullscreen(webView)
-            }
-        }
-        // YouTube replaces the full embed card; other hosted players stay within
-        // Discord's original preview area and preserve the surrounding metadata.
-        val previousVisibility = ArrayList<Pair<View, Int>>()
-        if (replacement != null || compactSpotify) {
-            // Keep the artwork and metadata visible above the playable panel.
-        } else if (playerParent is ConstraintLayout) {
-            previousVisibility.add(preview to preview.visibility)
-            preview.visibility = View.INVISIBLE
-        } else {
-            for (index in 0 until playerParent.childCount) {
-                val child = playerParent.getChildAt(index)
-                previousVisibility.add(child to child.visibility)
-                if (child.visibility == View.VISIBLE) child.visibility = View.INVISIBLE
-            }
-        }
-        val playerState = HostedPlayerState(
-            webView,
-            playerParent,
-            previousVisibility,
-            embed.url,
-            bottomBarrier,
-            previousMinimumWidth,
-            replacement,
-        )
-        webView.tag = playerState
-        hostedPlayers[playerContainer] = playerState
-        playerParent.addView(webView, playerParams)
-        activeEmbedWebViews.add(webView)
-        webView.bringToFront()
-        playerContainer.requestLayout()
-        loadHostedPlayer(webView, embed)
-        return true
-    }
-
-    private fun loadHostedPlayer(webView: WebView, embed: HostedEmbed) {
-        val appOrigin = "https://${webView.context.packageName.lowercase(Locale.ROOT)}"
-        val url = EmbedUrls.hostedPlayerUrl(embed)
-        if (embed.provider == HostedProvider.YOUTUBE) {
-            // Load the embed endpoint as the WebView's page rather than nesting
-            // it in a synthetic iframe document. Keep the app origin as Referer
-            // for YouTube's player identity checks.
-            webView.loadUrl(url, mapOf("Referer" to "$appOrigin/"))
-        } else {
-            if (embed.provider == HostedProvider.SPOTIFY) {
-                val html = """
-                    <!doctype html>
-                    <html>
-                      <head>
-                        <meta charset="utf-8">
-                        <meta name="viewport" content="width=device-width, initial-scale=1">
-                        <style>
-                          html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#121212}
-                          iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
-                        </style>
-                      </head>
-                      <body>
-                        <iframe src="${escapeHtmlAttribute(url)}" title="Spotify player"
-                          allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
-                          allowfullscreen></iframe>
-                      </body>
-                    </html>
-                """
-                webView.loadDataWithBaseURL("https://open.spotify.com/", html, "text/html", "UTF-8", null)
-            } else {
-                webView.loadUrl(url)
-            }
-        }
-    }
-
-    private fun redirectYoutubeVideo(webView: WebView, embed: HostedEmbed, url: String): Boolean {
-        if (embed.provider != HostedProvider.YOUTUBE) return false
-        val uri = Uri.parse(url)
-        val host = uri.host
-        if (!EmbedUrls.isHost(host, "youtube.com") && !EmbedUrls.isHost(host, "youtu.be")) return false
-        val path = uri.path.orEmpty().trim('/')
-        // An /embed request is the player itself. A watch/shorts/live link
-        // selected inside it must not replace the iframe with YouTube's site.
-        if (path == "embed" || path.startsWith("embed/")) return false
-        if (EmbedUrls.youtubeVideoId(uri) == null && uri.getQueryParameter("list").isNullOrEmpty()) return false
-        hideFullscreen(webView)
-        webView.post {
-            if (webView.parent != null) {
-                loadHostedPlayer(webView, embed.copy(url = url))
-            }
-        }
-        return true
-    }
-
-    private fun redirectSpotifyLink(webView: WebView, embed: HostedEmbed, url: String): Boolean {
-        if (embed.provider != HostedProvider.SPOTIFY || !EmbedUrls.isHttpUrl(url)) return false
-        val uri = Uri.parse(url)
-        if (!EmbedUrls.isHost(uri.host, "open.spotify.com")) return false
-        val playerUrl = EmbedUrls.spotifyPlayerUrl(url)
-        if (playerUrl == url || uri.pathSegments.any { it.equals("embed", ignoreCase = true) }) return false
-        // spotify.link redirects to an ordinary content page. Replace that
-        // navigation with Spotify's playable embed endpoint.
-        webView.post {
-            if (webView.parent != null) loadHostedPlayer(webView, embed.copy(url = url))
-        }
-        return true
-    }
-
-    private fun isYoutubePlayerRequest(request: WebResourceRequest): Boolean {
-        return request.isForMainFrame ||
-            (EmbedUrls.isHost(request.url.host, "youtube.com") && request.url.path?.startsWith("/embed/") == true)
-    }
-
-    private fun playInlineVideoEmbed(container: ViewGroup, embed: MessageEmbed): Boolean =
-        openInlineVideoEmbed(container, embed)
-
-    /** Replace the preview on tap with an HTML5 player using Discord's video URL. */
-    private fun openInlineVideoEmbed(container: ViewGroup, embed: MessageEmbed): Boolean {
-        val videoUrl = EmbedUrls.genericVideoUrl(embed) ?: return false
-        inlineVideoPlayers[container]?.let { state ->
-            if (state.url == videoUrl && state.webView.parent === state.parent) {
-                if (!fullscreenPlayers.containsKey(state.webView)) state.webView.visibility = View.VISIBLE
-                state.webView.bringToFront()
-                return true
-            }
-        }
-        removeInlineVideoPlayer(container)
-
-        val imageContainerId = Utils.getResId("embed_image_container", "id")
-        val inlineMediaId = Utils.getResId("embed_inline_media", "id")
-        val contentId = Utils.getResId("chat_list_item_embed_content", "id")
-        val imageContainer = container.findViewById<View>(imageContainerId) as? ViewGroup
-        val inlineMedia = container.findViewById<View>(inlineMediaId) as? ViewGroup
-        val content = container.findViewById<View>(contentId)
-        val parent = when {
-            content?.visibility == View.VISIBLE && imageContainer?.visibility == View.VISIBLE -> imageContainer
-            inlineMedia?.visibility == View.VISIBLE -> inlineMedia
-            else -> return false
-        }
-        val previousVisibility = ArrayList<Pair<View, Int>>()
-
-        fun remember(view: View?) {
-            if (view == null) return
-            previousVisibility.add(view to view.visibility)
-        }
-
-        if (parent === imageContainer) {
-            remember(parent.findViewById(Utils.getResId("chat_list_item_embed_image", "id")))
-            remember(parent.findViewById(Utils.getResId("chat_list_item_embed_image_icons", "id")))
-        } else {
-            for (index in 0 until parent.childCount) remember(parent.getChildAt(index))
-        }
-
-        // The image card wraps its children. A MATCH_PARENT WebView cannot
-        // provide its own size once the native preview is removed.
-        val previewId = Utils.getResId(
-            if (parent === imageContainer) "chat_list_item_embed_image" else "inline_media_image_preview",
-            "id",
-        )
-        val preview = parent.findViewById<View>(previewId)
-        val video = embed.m()
-        val thumbnail = embed.h()
-        val sourceWidth = video?.d()?.takeIf { it > 0 }
-            ?: thumbnail?.d()?.takeIf { it > 0 }
-            ?: 16
-        val sourceHeight = video?.a()?.takeIf { it > 0 }
-            ?: thumbnail?.a()?.takeIf { it > 0 }
-            ?: 9
-        val embedResources = EmbedResourceUtils.INSTANCE
-        val fallbackSize = embedResources.calculateScaledSize(
-            sourceWidth,
-            sourceHeight,
-            embedResources.computeMaximumImageWidthPx(parent.context),
-            embedResources.getMAX_IMAGE_VIEW_HEIGHT_PX(),
-            parent.resources,
-            0,
-        )
-        val playerWidth = (parent.width - parent.paddingLeft - parent.paddingRight).takeIf { it > 0 }
-            ?: preview?.layoutParams?.width?.takeIf { it > 0 }
-            ?: fallbackSize.first
-        val playerHeight = (parent.height - parent.paddingTop - parent.paddingBottom).takeIf { it > 0 }
-            ?: preview?.layoutParams?.height?.takeIf { it > 0 }
-            ?: fallbackSize.second
-
-        val webView = WebView(parent.context)
-        // The player must be visible while streaming. Waiting for page-finished
-        // can leave an already-playing video hidden behind its grey preview.
-        webView.visibility = View.VISIBLE
-        webView.setBackgroundColor(Color.BLACK)
-        webView.isHorizontalScrollBarEnabled = false
-        webView.isVerticalScrollBarEnabled = false
-        webView.settings.apply {
-            javaScriptEnabled = false
-            domStorageEnabled = false
-            // This WebView is created by an embed/play-button tap.
-            mediaPlaybackRequiresUserGesture = false
-            loadsImagesAutomatically = true
-            allowContentAccess = false
-            allowFileAccess = false
-            builtInZoomControls = false
-            displayZoomControls = false
-            setSupportZoom(false)
-        }
-        webView.webViewClient = object : WebViewClient() {
-            @Suppress("DEPRECATION")
-            @Deprecated("Deprecated in Java")
-            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
-                return !EmbedUrls.isHttpUrl(url)
-            }
-        }
-        webView.webChromeClient = object : WebChromeClient() {
-            @Suppress("DEPRECATION")
-            @Deprecated("Deprecated in Java")
-            override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-                showFullscreen(webView, view, callback)
-            }
-
-            @Suppress("DEPRECATION")
-            @Deprecated("Deprecated in Java")
-            override fun onShowCustomView(
-                view: View,
-                requestedOrientation: Int,
-                callback: CustomViewCallback,
-            ) {
-                showFullscreen(webView, view, callback)
-            }
-
-            @Suppress("DEPRECATION")
-            @Deprecated("Deprecated in Java")
-            override fun onHideCustomView() {
-                hideFullscreen(webView)
-            }
-        }
-
-        val posterUrl = thumbnail?.b()?.takeIf(EmbedUrls::isHttpUrl)
-            ?: thumbnail?.c()?.takeIf(EmbedUrls::isHttpUrl)
-        val posterAttribute = posterUrl?.let { " poster=\"${escapeHtmlAttribute(it)}\"" }.orEmpty()
-        // Preserve the whitespace: trimIndent calls isBlank, which crashes with
-        // Discord's obfuscated Kotlin runtime. HTML ignores this indentation.
-        val html = """
-            <!doctype html>
-            <html>
-              <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <style>html,body{width:100%;height:100%;margin:0;padding:0;overflow:hidden}</style>
-              </head>
-              <body style="margin:0;padding:0;background:#000">
-                <video controls autoplay playsinline preload="metadata"$posterAttribute
-                  src="${escapeHtmlAttribute(videoUrl)}"
-                  style="display:block;width:100%;height:100%;object-fit:contain"></video>
-              </body>
-            </html>
-        """
-
-        val layoutParams = if (parent is FrameLayout) {
-            FrameLayout.LayoutParams(
-                playerWidth,
-                playerHeight,
-            )
-        } else {
-            ViewGroup.LayoutParams(
-                playerWidth,
-                playerHeight,
-            )
-        }
-        // Match PlayableEmbeds' image-card replacement: remove the original
-        // preview from layout and give the visible player its own dimensions.
-        previousVisibility.forEach { (child, _) -> child.visibility = View.GONE }
-        parent.addView(webView, layoutParams)
-        webView.bringToFront()
-        val playerState = InlineVideoState(webView, parent, previousVisibility, videoUrl)
-        webView.tag = playerState
-        inlineVideoPlayers[container] = playerState
-        hostedEmbeds[container] = embed
-        activeEmbedWebViews.add(webView)
-        // loadData uses a data URL: '#' truncates unencoded HTML and '%' can
-        // decode signed/redirect URLs. An HTTP(S) base loads the HTML verbatim.
-        val baseUrl = embed.l()?.takeIf(EmbedUrls::isHttpUrl) ?: videoUrl
-        webView.loadDataWithBaseURL(baseUrl, html, "text/html", "UTF-8", null)
-        container.requestLayout()
-        return true
-    }
-
-    private fun escapeHtmlAttribute(value: String): String {
-        return value
-            .replace("&", "&amp;")
-            .replace("\"", "&quot;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-    }
-
-    private fun removeInlineVideoPlayer(container: ViewGroup) {
-        val state = inlineVideoPlayers.remove(container) ?: return
-        activeEmbedWebViews.remove(state.webView)
-        hideFullscreen(state.webView)
-        state.webView.tag = null
-        state.webView.stopLoading()
-        state.webView.loadUrl("about:blank")
-        (state.webView.parent as? ViewGroup)?.removeView(state.webView)
-        state.webView.destroy()
-        state.previousVisibility.forEach { (view, visibility) ->
-            view.visibility = visibility
-        }
-    }
-
-    private fun dp(context: Context, value: Int): Int {
-        return (value * context.resources.displayMetrics.density).toInt()
-    }
-
-    private fun removeHostedPlayer(container: ViewGroup) {
-        val state = hostedPlayers.remove(container) ?: return
-        val replacement = state.replacement
-        val webView = state.webView
-        activeEmbedWebViews.remove(webView)
-        hideFullscreen(webView)
-        webView.tag = null
-        webView.stopLoading()
-        webView.loadUrl("about:blank")
-        (webView.parent as? ViewGroup)?.removeView(webView)
-        webView.destroy()
-        state.extraView?.let { (it.parent as? ViewGroup)?.removeView(it) }
+    private fun removeNativePlayer(container: ViewGroup) {
+        val state = players.remove(container) ?: return
+        state.root.tag = null
+        exitFullscreen(state.root)
+        errorCallbacks.remove(state.player.g)
+        NativePlayers.release(state.player)
+        (state.root.parent as? ViewGroup)?.removeView(state.root)
+        state.extraViews.forEach { (it.parent as? ViewGroup)?.removeView(it) }
         state.parent.minimumWidth = state.previousMinimumWidth
         state.previousVisibility.forEach { (view, visibility) ->
             view.visibility = visibility
         }
+        val replacement = state.replacement
         if (replacement != null) {
             (replacement.originalCard.parent as? ViewGroup)?.removeView(replacement.originalCard)
             replacement.wrapper.id = View.generateViewId()
@@ -1024,117 +823,146 @@ class PlayEmbeds : Plugin() {
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun showFullscreen(webView: WebView, customView: View, callback: WebChromeClient.CustomViewCallback) {
-        val activity = activityFrom(webView.context) ?: run {
-            callback.onCustomViewHidden()
-            return
+    /** A spinner styled like Discord's inline_media_loading_indicator, over the preview. */
+    private fun showLoading(container: ViewGroup) {
+        val context = container.context
+        val anchor = previewView(container)
+        val parent = anchor?.parent as? ViewGroup ?: container
+        val sizeId = Utils.getResId("embed_play_button_width", "dimen")
+        val size = if (sizeId > 0) context.resources.getDimensionPixelSize(sizeId) else dp(context, 48)
+        val indicator = ProgressBar(context).apply {
+            isIndeterminate = true
+            val backgroundId = Utils.getResId("drawable_circle_primary_900", "drawable")
+            if (backgroundId > 0) setBackgroundResource(backgroundId)
+            val padding = dp(context, 8)
+            setPadding(padding, padding, padding, padding)
+            indeterminateTintList = ColorStateList.valueOf(Color.WHITE)
+            alpha = 0.6f
+            elevation = dp(context, 2).toFloat()
         }
-        hideFullscreen(webView)
-
-        val decor = activity.window.decorView as? ViewGroup ?: run {
-            callback.onCustomViewHidden()
-            return
-        }
-        val playerParent = webView.parent as? ViewGroup
-        val hostedReplacement = hostedPlayers.values
-            .firstOrNull { it.webView === webView }
-            ?.replacement
-        (customView.parent as? ViewGroup)?.removeView(customView)
-        val previousSystemUiVisibility = decor.systemUiVisibility
-        val wasFullscreen = activity.window.attributes.flags and
-            WindowManager.LayoutParams.FLAG_FULLSCREEN != 0
-        val overlay = FrameLayout(activity).apply {
-            setBackgroundColor(Color.BLACK)
-            isFocusableInTouchMode = true
-            setOnKeyListener { _, keyCode, event ->
-                if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
-                    hideFullscreen(webView)
-                    true
-                } else {
-                    false
+        val params = when {
+            parent is ConstraintLayout && anchor != null && anchor.id != View.NO_ID ->
+                ConstraintLayout.LayoutParams(size, size).apply {
+                    startToStart = anchor.id
+                    endToEnd = anchor.id
+                    topToTop = anchor.id
+                    bottomToBottom = anchor.id
                 }
-            }
-            addView(
-                customView,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                ),
-            )
+            parent is FrameLayout -> FrameLayout.LayoutParams(size, size, Gravity.CENTER)
+            else -> ViewGroup.LayoutParams(size, size)
         }
-        decor.addView(
-            overlay,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ),
+        parent.addView(indicator, params)
+        indicator.bringToFront()
+        loadingIndicators[container] = indicator
+    }
+
+    private fun hideLoading(container: ViewGroup) {
+        val indicator = loadingIndicators.remove(container) ?: return
+        (indicator.parent as? ViewGroup)?.removeView(indicator)
+    }
+
+    /** The player is in its embed, or temporarily moved into the fullscreen overlay. */
+    private fun isShowing(state: NativePlayerState): Boolean =
+        state.root.parent === state.parent || fullscreenPlayers.containsKey(state.root)
+
+    /** Adds a fullscreen toggle to the end of Discord's control bar (after the duration). */
+    private fun addFullscreenButton(playerView: View, root: View) {
+        val duration = playerView.findViewById<View>(id("exo_duration")) ?: return
+        val bar = duration.parent as? LinearLayout ?: return
+        val context = playerView.context
+        val styleId = Utils.getResId("ExoMediaButton", "style")
+        val button = if (styleId > 0) ImageButton(context, null, 0, styleId) else ImageButton(context)
+        button.scaleType = ImageView.ScaleType.FIT_CENTER
+        button.setPadding(0, 0, 0, 0)
+        setFullscreenIcon(button, fullscreen = false)
+        button.setOnClickListener {
+            if (fullscreenPlayers.containsKey(root)) exitFullscreen(root) else enterFullscreen(root, button)
+        }
+        val size = dp(context, 24)
+        bar.addView(button, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
+    }
+
+    private fun setFullscreenIcon(button: ImageButton, fullscreen: Boolean) {
+        val iconId = Utils.getResId(
+            if (fullscreen) "exo_icon_fullscreen_exit" else "exo_icon_fullscreen_enter",
+            "drawable",
         )
-        webView.visibility = View.INVISIBLE
+        if (iconId > 0) button.setImageResource(iconId)
+        button.contentDescription = if (fullscreen) "Exit fullscreen" else "Fullscreen"
+    }
+
+    /**
+     * Moves the playing view (not a new player) into a black overlay over the
+     * whole window, so playback continues without a restart. Discord's activity
+     * doesn't handle rotation itself and would be recreated, destroying the
+     * player, so the current orientation is locked while fullscreen.
+     */
+    @Suppress("DEPRECATION")
+    private fun enterFullscreen(root: View, button: ImageButton) {
+        if (fullscreenPlayers.containsKey(root)) return
+        val activity = activityFrom(root.context) ?: return
+        val decor = activity.window.decorView as? ViewGroup ?: return
+        val parent = root.parent as? ViewGroup ?: return
+        val index = parent.indexOfChild(root)
+        val params = root.layoutParams ?: return
+
+        val overlay = FullscreenOverlay(activity) { exitFullscreen(root) }
+        val state = FullscreenState(
+            activity,
+            overlay,
+            button,
+            parent,
+            index,
+            params,
+            decor.systemUiVisibility,
+            activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_FULLSCREEN != 0,
+            activity.requestedOrientation,
+        )
+        (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(decor.windowToken, 0)
+        parent.removeView(root)
+        overlay.addView(root, FrameLayout.LayoutParams(MATCH, MATCH))
+        decor.addView(overlay, FrameLayout.LayoutParams(MATCH, MATCH))
+        fullscreenPlayers[root] = state
+
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        decor.systemUiVisibility = previousSystemUiVisibility or
+        decor.systemUiVisibility = state.previousSystemUiVisibility or
             View.SYSTEM_UI_FLAG_FULLSCREEN or
             View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         overlay.requestFocus()
-        val fullscreenState = FullscreenState(
-            activity,
-            overlay,
-            callback,
-            previousSystemUiVisibility,
-            wasFullscreen,
-            playerParent,
-            webView.layoutParams?.let(::copyLayoutParams),
-            hostedReplacement,
-        )
-        overlay.tag = fullscreenState
-        fullscreenPlayers[webView] = fullscreenState
+        setFullscreenIcon(button, fullscreen = true)
     }
 
     @Suppress("DEPRECATION")
-    private fun hideFullscreen(webView: WebView) {
-        val state = fullscreenPlayers.remove(webView) ?: return
-        state.overlay.tag = null
-        state.overlay.removeAllViews()
+    private fun exitFullscreen(root: View) {
+        val state = fullscreenPlayers.remove(root) ?: return
+        val activity = state.activity
+        state.overlay.removeView(root)
         (state.overlay.parent as? ViewGroup)?.removeView(state.overlay)
-        webView.visibility = View.VISIBLE
-        state.activity.window.decorView.systemUiVisibility = state.previousSystemUiVisibility
-        if (!state.wasFullscreen) {
-            state.activity.window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        }
-        state.callback.onCustomViewHidden()
-        webView.post {
-            if (webView.parent === state.playerParent) {
-                state.playerLayoutParams?.let { webView.layoutParams = copyLayoutParams(it) }
-            }
-            state.embedReplacement?.let { replacement ->
-                val wrapper = replacement.wrapper
-                if (wrapper.parent != null) {
-                    wrapper.layoutParams = copyLayoutParams(replacement.originalLayoutParams).apply {
-                        width = replacement.originalWidth
-                        height = replacement.originalHeight
-                    }
-                    wrapper.minimumWidth = replacement.originalWidth
-                    wrapper.minimumHeight = replacement.originalHeight
-                    replacement.originalCard.layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                    wrapper.requestLayout()
-                }
-            }
-            state.playerParent?.requestLayout()
-            state.playerParent?.invalidate()
-        }
+        activity.window.decorView.systemUiVisibility = state.previousSystemUiVisibility
+        if (!state.wasFullscreen) activity.window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        activity.requestedOrientation = state.previousOrientation
+        val index = state.index.coerceIn(0, state.parent.childCount)
+        state.parent.addView(root, index, state.layoutParams)
+        root.bringToFront()
+        setFullscreenIcon(state.button, fullscreen = false)
     }
 
     private fun activityFrom(context: Context): Activity? {
         var current: Context? = context
         while (current != null) {
             if (current is Activity) return current
-            current = (current as? android.content.ContextWrapper)?.baseContext
+            current = (current as? ContextWrapper)?.baseContext
         }
         return null
+    }
+
+    private fun id(name: String): Int = Utils.getResId(name, "id")
+
+    private fun dp(context: Context, value: Int): Int {
+        return (value * context.resources.displayMetrics.density).toInt()
     }
 
     private fun addSpotifyPlayButton(container: ViewGroup, listener: View.OnClickListener) {
@@ -1158,8 +986,8 @@ class PlayEmbeds : Plugin() {
         button.isClickable = true
         button.setOnClickListener(listener)
 
-        val thumbnailId = Utils.getResId("chat_list_item_embed_image_thumbnail", "id")
-        val imageContainerId = Utils.getResId("embed_image_container", "id")
+        val thumbnailId = id("chat_list_item_embed_image_thumbnail")
+        val imageContainerId = id("embed_image_container")
         val image = listOfNotNull(
             container.findViewById<View>(thumbnailId),
             container.findViewById<View>(imageContainerId),
@@ -1192,26 +1020,33 @@ class PlayEmbeds : Plugin() {
     }
 
     override fun stop(context: Context) {
+        ArrayList(fullscreenPlayers.keys).forEach(::exitFullscreen)
+        ArrayList(players.keys).forEach(::removeNativePlayer)
+        ArrayList(loadingIndicators.keys).forEach(::hideLoading)
+        ArrayList(spotifyPlayButtons.keys).forEach(::removeSpotifyPlayButton)
         EmbedUrls.fxVideoResolver?.close()
         EmbedUrls.fxVideoResolver = null
+        youtube?.close()
+        soundCloud?.close()
+        spotify?.close()
+        youtube = null
+        soundCloud = null
+        spotify = null
         configuredEmbeds.clear()
-        ArrayList(fullscreenPlayers.keys).forEach(::hideFullscreen)
-        ArrayList(hostedPlayers.keys).forEach(::removeHostedPlayer)
-        ArrayList(inlineVideoPlayers.keys).forEach(::removeInlineVideoPlayer)
-        ArrayList(spotifyPlayButtons.keys).forEach(::removeSpotifyPlayButton)
         embedLinks.clear()
         hostedEmbeds.clear()
-        hostedPlayers.clear()
-        inlineVideoPlayers.clear()
-        fullscreenPlayers.clear()
+        players.clear()
+        loadingIndicators.clear()
         spotifyPlayButtons.clear()
-        activeEmbedWebViews.clear()
+        errorCallbacks.clear()
         embedRowKeys.clear()
         searchEmbedClicks.clear()
         patcher.unpatchAll()
     }
 
     private companion object {
-        const val SPOTIFY_PLAYER_HEIGHT_DP = 152
+        const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+        const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+        const val DETACH_RELEASE_DELAY_MS = 1_000L
     }
 }

@@ -20,7 +20,7 @@ internal data class HostedEmbed(
 
 internal enum class HostedProvider { YOUTUBE, SOUNDCLOUD, SPOTIFY }
 
-/** Decides which URLs can play locally and builds provider player URLs. */
+/** Decides which URLs can play locally and which provider resolves them. */
 internal object EmbedUrls {
     var fxVideoResolver: FxVideoResolver? = null
     private const val MAX_REDIRECT_DEPTH = 4
@@ -41,9 +41,6 @@ internal object EmbedUrls {
     private val GIF_HOSTS = setOf("giphy.com", "klipy.com", "tenor.com")
     private val GIF_PROVIDER_NAMES = setOf("giphy", "klipy", "tenor")
     private val HOSTED_PROVIDER_NAMES = setOf("youtube", "soundcloud", "spotify")
-    private val SPOTIFY_CONTENT_TYPES = setOf(
-        "album", "artist", "episode", "playlist", "show", "track",
-    )
 
     fun embedLink(embed: MessageEmbed): EmbedLink? {
         if (isGifEmbed(embed) || isDirectLinkedMediaEmbed(embed)) return null
@@ -153,49 +150,6 @@ internal object EmbedUrls {
     fun isHost(host: String?, domain: String): Boolean {
         val normalized = host?.lowercase(Locale.ROOT) ?: return false
         return normalized == domain || normalized.endsWith(".$domain")
-    }
-
-    fun hostedPlayerUrl(embed: HostedEmbed): String = when (embed.provider) {
-        HostedProvider.YOUTUBE -> youtubePlayerUrl(embed.url)
-        HostedProvider.SOUNDCLOUD -> {
-            val uri = Uri.parse(embed.url)
-            if (isHost(uri.host, "w.soundcloud.com") && uri.path?.startsWith("/player") == true) {
-                if (uri.getQueryParameter("auto_play") != null) embed.url else
-                    uri.buildUpon().appendQueryParameter("auto_play", "true").build().toString()
-            } else {
-                "https://w.soundcloud.com/player/?url=${Uri.encode(embed.url)}" +
-                    "&auto_play=true&hide_related=false&show_comments=true" +
-                    "&show_user=true&show_reposts=false&visual=true&show_teaser=false"
-            }
-        }
-        HostedProvider.SPOTIFY -> spotifyPlayerUrl(embed.url)
-    }
-
-    fun spotifyPlayerUrl(url: String): String {
-        val segments = Uri.parse(url).pathSegments
-            .filter { it.isNotEmpty() && !it.startsWith("intl-", ignoreCase = true) }
-        val contentIndex = segments.indexOfFirst { it.equals("embed", ignoreCase = true) }
-        val typeIndex = if (contentIndex >= 0) contentIndex + 1 else 0
-        val type = segments.getOrNull(typeIndex)?.lowercase(Locale.ROOT)
-        val id = segments.getOrNull(typeIndex + 1)
-        if (type !in SPOTIFY_CONTENT_TYPES || id.isNullOrEmpty()) return url
-        return "https://open.spotify.com/embed/$type/${Uri.encode(id)}?utm_source=generator"
-    }
-
-    private fun youtubePlayerUrl(url: String): String {
-        val uri = Uri.parse(url)
-        val videoId = youtubeVideoId(uri)
-        val playlistId = uri.getQueryParameter("list")?.takeIf { it.isNotEmpty() }
-        return if (videoId == null) {
-            if (playlistId == null) url else {
-                "https://www.youtube.com/embed?listType=playlist&list=${Uri.encode(playlistId)}" +
-                    "&playsinline=1&autoplay=1"
-            }
-        } else {
-            "https://www.youtube.com/embed/${Uri.encode(videoId)}" +
-                "?playsinline=1&autoplay=1" +
-                (playlistId?.let { "&list=${Uri.encode(it)}" } ?: "")
-        }
     }
 
     fun youtubeVideoId(uri: Uri): String? {

@@ -1,9 +1,18 @@
-version = "1.0.7"
+version = "1.0.8"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.8
+        * Remove WebViews: YouTube, SoundCloud and Spotify now play in Discord's native player
+        * YouTube videos play inside the embed, with a fullscreen button
+        * SoundCloud tracks play over their artwork; sets play their first track
+        * Spotify plays 30-second previews (full tracks only work in the Spotify app)
+        * Links that can't play natively open in their app or browser
+        * Stop players when scrolled away
+        * Fix previously played videos showing up in other embeds
+
         # 1.0.6
         Refactor and cleanup
 
