@@ -44,6 +44,18 @@ subprojects {
         github("https://github.com/yutaplug/yutaplugins")
     }
 
+    // Aliucord's gradle plugin writes manifest.json in the package task's doFirst without declaring
+    // the manifest fields as inputs, so a version-only bump left the old manifest in an "up-to-date" zip.
+    afterEvaluate {
+        val aliucord = extensions.getByType<AliucordExtension>()
+        tasks.named("package") {
+            inputs.property("pluginVersion", version.toString())
+            inputs.property("pluginDescription", description.orEmpty())
+            inputs.property("pluginChangelog", aliucord.changelog.orElse(""))
+            inputs.property("pluginChangelogMedia", aliucord.changelogMedia.orElse(""))
+        }
+    }
+
     configure<KtlintExtension> {
         version.set(libs.versions.ktlint.asProvider())
 
