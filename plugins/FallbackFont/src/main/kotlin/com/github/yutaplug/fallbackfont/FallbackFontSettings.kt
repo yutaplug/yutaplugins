@@ -73,14 +73,14 @@ class FallbackFontSettings(private val plugin: FallbackFont) : SettingsPage() {
             items = if (hasFont) arrayOf("Choose font file", "Remove font") else arrayOf("Choose font file")
             onResultListener = { which ->
                 if (which == 0) {
-                    FontPickerFragment.open(Utils.appActivity, slot)
+                    FontPickerFragment.open(requireActivity(), slot)
                 } else {
                     plugin.removeFont(Utils.appContext, slot)
                     refresh()
                     Utils.showToast("${slot.title} removed")
                 }
             }
-        }.show(Utils.appActivity.supportFragmentManager, "FallbackFontSlot")
+        }.show(parentFragmentManager, "FallbackFontSlot")
     }
 
     private fun section(title: String) {
