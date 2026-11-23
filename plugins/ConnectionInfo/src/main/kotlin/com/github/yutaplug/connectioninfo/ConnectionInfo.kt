@@ -1,12 +1,15 @@
 package com.github.yutaplug.connectioninfo
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.drawable.Drawable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.TextAppearanceSpan
 import android.widget.TextView
 import androidx.core.content.res.ResourcesCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -110,7 +113,7 @@ class ConnectionInfo : Plugin() {
                         if (!running) return@setOnClickListener
                         val dialog = ConnectionActionsDialog(account, icon)
                         dialogs.add(dialog)
-                        dialog.show(Utils.appActivity.supportFragmentManager, "ConnectionInfoActions")
+                        dialog.show(fragmentManagerFor(view.context), "ConnectionInfoActions")
                     }
                 }
                 if (lines.isEmpty()) {
@@ -135,6 +138,13 @@ class ConnectionInfo : Plugin() {
                 view.contentDescription = "${account.g()}, $text"
             },
         )
+    }
+
+    /** The screen showing [context]: Aliucord's appActivity can be a screen that was already closed. */
+    private fun fragmentManagerFor(context: Context): FragmentManager {
+        var current: Context? = context
+        while (current is ContextWrapper && current !is FragmentActivity) current = current.baseContext
+        return (current as? FragmentActivity)?.supportFragmentManager ?: Utils.appActivity.supportFragmentManager
     }
 
     private fun connectionIcon(account: ConnectedAccount): Drawable? {
