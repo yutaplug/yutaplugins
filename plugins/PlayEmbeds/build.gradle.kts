@@ -1,9 +1,12 @@
-version = "1.0.11"
+version = "1.0.12"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.12
+        * The quality menu and the download permission prompt no longer stop opening after you open and close another screen, like settings or an image
+
         # 1.0.11
         * Embeds now play in search results too; tapping anything else still jumps to the message
         * Download button in the player saves the video or audio to Downloads

@@ -10,6 +10,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import com.aliucord.Utils
+import com.discord.app.AppActivity
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
@@ -35,7 +36,8 @@ internal class MediaDownloader(private val context: Context) {
     private val active = Collections.synchronizedSet(HashSet<String>())
     @Volatile private var closed = false
 
-    fun download(uri: String, title: String?, audioOnly: Boolean) {
+    /** [activity] is the screen showing the player; Aliucord's appActivity can be a closed screen. */
+    fun download(uri: String, title: String?, audioOnly: Boolean, activity: AppActivity?) {
         if (closed) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             start(uri, title, audioOnly)
@@ -43,7 +45,7 @@ internal class MediaDownloader(private val context: Context) {
         }
         // Before Android 10 writing to Downloads needs the storage permission; ask like Discord's media viewer.
         try {
-            Utils.appActivity.x.requestMediaDownload { start(uri, title, audioOnly) }
+            (activity ?: Utils.appActivity).x.requestMediaDownload { start(uri, title, audioOnly) }
         } catch (_: Throwable) {
             start(uri, title, audioOnly)
         }

@@ -30,6 +30,8 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.constraintlayout.widget.Barrier
 import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -1162,7 +1164,7 @@ class PlayEmbeds : Plugin() {
             "ic_file_download_white_24dp",
             if (audioOnly) "Download audio" else "Download video",
         ) {
-            downloader?.download(uri(), title, audioOnly)
+            downloader?.download(uri(), title, audioOnly, activityFrom(controls.context) as? AppActivity)
         }
     }
 
@@ -1222,7 +1224,7 @@ class PlayEmbeds : Plugin() {
             title = "Video quality"
             items = qualities.map { if (it == current) "✓ ${it}p" else "${it}p" }.toTypedArray()
             onResultListener = { which -> qualities.getOrNull(which)?.let { switchQuality(control, it) } }
-        }.show(Utils.appActivity.supportFragmentManager, "PlayEmbedsQuality")
+        }.show(fragmentManagerFor(control.label.context), "PlayEmbedsQuality")
     }
 
     private fun switchQuality(control: QualityControl, quality: Int) {
@@ -1622,6 +1624,16 @@ class PlayEmbeds : Plugin() {
             current = (current as? ContextWrapper)?.baseContext
         }
         return null
+    }
+
+    /**
+     * The fragment manager of the screen showing [context]. Aliucord's appActivity only changes when a
+     * screen is created, so after closing settings or the image viewer it points at a closed screen,
+     * and Discord's dialogs silently refuse to show there.
+     */
+    private fun fragmentManagerFor(context: Context): FragmentManager {
+        val activity = activityFrom(context) as? FragmentActivity
+        return activity?.supportFragmentManager ?: Utils.appActivity.supportFragmentManager
     }
 
     private fun id(name: String): Int = Utils.getResId(name, "id")
