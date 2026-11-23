@@ -1,8 +1,11 @@
-version = "1.1.2"
+version = "1.1.3"
 description = "Translate messages from the message menu, or automatically, into the language you choose."
 
 aliucord {
     changelog.set("""
+        # 1.1.3
+        * The service and language menus no longer stop opening after you open and close another screen, like settings or an image.
+
         # 1.1.2
         * Fixed Google Translate saying some messages, like Traditional Chinese ones, were already in English instead of translating them.
 

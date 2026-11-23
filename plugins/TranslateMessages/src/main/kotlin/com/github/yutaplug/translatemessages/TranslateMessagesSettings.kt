@@ -99,7 +99,7 @@ class TranslateMessagesSettings(private val plugin: TranslateMessages) : Setting
                 serviceSubtitle?.text = services[which].second
                 showServiceOptions()
             }
-        }.show(Utils.appActivity.supportFragmentManager, "TranslateService")
+        }.show(parentFragmentManager, "TranslateService")
     }
 
     /** Shows only the fields the selected service uses. */
@@ -136,7 +136,7 @@ class TranslateMessagesSettings(private val plugin: TranslateMessages) : Setting
                 if (code == current) "$label ✓" else label
             }.toTypedArray()
             onResultListener = { which -> onPick(languages[which].first) }
-        }.show(Utils.appActivity.supportFragmentManager, "TranslateLanguage")
+        }.show(parentFragmentManager, "TranslateLanguage")
     }
 
     private fun input(parent: LinearLayout, hint: String, value: String, variation: Int, onChange: (String) -> Unit) {
