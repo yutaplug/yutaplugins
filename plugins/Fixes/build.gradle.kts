@@ -1,4 +1,4 @@
-version = "1.0.2"
+version = "1.0.3"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,12 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.3
+        * Added Plugin menus: menus and popups from plugins no longer stop opening after you open and close another screen, like settings or an image
+        * Added Message menu in search: holding a message in search opens its menu instead of jumping to it
+        * Added Server long press: the menu from holding a server or folder no longer closes by itself when you let go
+        * Markdown: the reset dialog in the settings no longer stops opening after you open and close another screen, like settings or an image
+
         # 1.0.2
         * Markdown: numbered lists (1. 2. 3.) now render, and dashes after a numbered item continue its numbering like on current Discord
 

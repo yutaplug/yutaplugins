@@ -5,6 +5,7 @@ import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.SettingsAPI
 import com.aliucord.entities.Plugin
+import com.github.yutaplug.fixes.appactivity.AppActivityFix
 import com.github.yutaplug.fixes.fontscale.FontScaleFix
 import com.github.yutaplug.fixes.forumtag.ForumTagFix
 import com.github.yutaplug.fixes.friend.FriendFix
@@ -18,6 +19,8 @@ import com.github.yutaplug.fixes.messagewidth.MessageWidthFix
 import com.github.yutaplug.fixes.qrlogin.QRCodeLogin
 import com.github.yutaplug.fixes.rawgithub.RawGitHubUpdater
 import com.github.yutaplug.fixes.searchhistory.SearchHistoryFix
+import com.github.yutaplug.fixes.searchmenu.SearchMessageMenuFix
+import com.github.yutaplug.fixes.serverhold.ServerHoldFix
 import com.github.yutaplug.fixes.servernickname.ServerNicknameFix
 import com.github.yutaplug.fixes.serversheet.ServerSheetFix
 import com.github.yutaplug.fixes.serversettings.ServerSettingsFix
@@ -44,6 +47,9 @@ class Fixes : Plugin() {
         MessageWidthFix(),
         ServerSettingsFix(),
         ValidUserFix(),
+        AppActivityFix(),
+        SearchMessageMenuFix(),
+        ServerHoldFix(),
     )
 
     internal val markdown: MarkdownFix get() = fixes.first { it is MarkdownFix } as MarkdownFix

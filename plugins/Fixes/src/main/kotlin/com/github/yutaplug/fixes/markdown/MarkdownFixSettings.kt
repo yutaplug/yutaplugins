@@ -190,7 +190,7 @@ internal class MarkdownFixSettings(private val settings: SettingsAPI, private va
             .setOnOkListener {
                 reset()
                 confirm.dismiss()
-            }.show(Utils.appActivity.supportFragmentManager, "MarkdownFixReset")
+            }.show(parentFragmentManager, "MarkdownFixReset")
     }
 
     /**
