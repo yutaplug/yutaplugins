@@ -1,8 +1,11 @@
-version = "1.0.3"
+version = "1.0.4"
 description = "Backports Discord desktop's six most recent profile pictures to mobile."
 aliucord {
     changelog.set(
         """
+        # 1.0.4
+        * The confirmation dialog no longer stops opening after you open and close another screen, like settings or an image
+
         # 1.0.3
         * Show recent avatars directly in the avatar menu
         * Support the captcha Discord asks for when changing avatar

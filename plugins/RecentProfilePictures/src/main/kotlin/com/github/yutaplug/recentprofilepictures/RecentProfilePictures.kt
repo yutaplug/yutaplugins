@@ -210,7 +210,11 @@ class RecentProfilePictures : Plugin() {
             .setOnOkListener {
                 dialog.dismiss()
                 selectRecentAvatar(editor, avatarId)
-            }.show(Utils.appActivity.supportFragmentManager, "RecentProfilePicturesConfirm")
+            }.show(
+                // The profile editor's own screen: Aliucord's appActivity can be a screen that was already closed.
+                editor.activity?.supportFragmentManager ?: Utils.appActivity.supportFragmentManager,
+                "RecentProfilePicturesConfirm",
+            )
         openDialogs.add(dialog)
     }
 
