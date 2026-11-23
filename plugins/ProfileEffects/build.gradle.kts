@@ -1,8 +1,12 @@
-version = "1.0.10"
+version = "1.0.11"
 description = "Backports viewing Discord Nitro profile effects and profile frames."
 aliucord {
     changelog.set(
         """
+        # 1.0.11
+        * Replace the effect WebView with a native APNG renderer that decodes one frame at a time
+        * Lower memory use and improve compatibility with older Android versions
+        * Cache effect assets on disk
         # 1.0.9
         * Rewrite the plugin in Kotlin
         * Fix crashes when closing profile sheets and improve overlay and WebView cleanup
