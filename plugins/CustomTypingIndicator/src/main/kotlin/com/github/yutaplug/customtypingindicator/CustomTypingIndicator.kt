@@ -70,7 +70,11 @@ class CustomTypingIndicator : Plugin() {
                 try {
                     val style = TypingStyle.fromParent(JSONObject(json))
                     if (typing != null) {
-                        if (style != null) styles[typing.d()] = style else styles.remove(typing.d())
+                        val previous = if (style != null) styles.put(typing.d(), style) else styles.remove(typing.d())
+                        // Your own events are another source for the editor, since GET /users/@me may lack the style.
+                        if (style != null && style != previous && typing.d() == StoreStream.getUsers().me.id) {
+                            TypingStyle.saved = style
+                        }
                     }
                 } catch (error: Throwable) {
                     logger.error("Failed to read typing indicator style", error)

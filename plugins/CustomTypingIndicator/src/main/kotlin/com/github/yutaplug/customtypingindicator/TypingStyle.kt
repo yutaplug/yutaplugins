@@ -76,6 +76,22 @@ data class TypingStyle(val emojis: List<TypingEmoji>, val animation: Int, val su
             return TypingStyle(emojis, animation, suggestion)
         }
 
+        private const val KEY_SAVED_STYLE = "savedStyle"
+
+        private val savedSettings by lazy { com.aliucord.api.SettingsAPI("CustomTypingIndicator") }
+
+        /**
+         * Your own style as last saved or seen. `GET /users/@me` doesn't always return
+         * `typing_indicator_style`, so the editor falls back to this when it's missing.
+         */
+        var saved: TypingStyle?
+            get() = try {
+                savedSettings.getString(KEY_SAVED_STYLE, "").takeIf { it.isNotEmpty() }?.let { fromJson(JSONObject(it)) }
+            } catch (_: Throwable) {
+                null
+            }
+            set(value) = savedSettings.setString(KEY_SAVED_STYLE, value?.toJson()?.toString() ?: "")
+
         /** Reads `typing_indicator_style` from a user object or TYPING_START payload. */
         fun fromParent(parent: JSONObject): TypingStyle? =
             if (parent.isNull("typing_indicator_style")) null else fromJson(parent.optJSONObject("typing_indicator_style"))

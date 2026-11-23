@@ -16,11 +16,14 @@ import com.aliucord.fragments.ConfirmDialog
 import com.aliucord.fragments.SelectDialog
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.utils.DimenUtils
+import com.aliucord.utils.RxUtils
+import com.aliucord.utils.RxUtils.subscribe
 import com.aliucord.wrappers.users.globalName
 import com.discord.models.domain.emoji.Emoji
 import com.discord.models.domain.emoji.ModelEmojiCustom
 import com.discord.models.domain.emoji.ModelEmojiUnicode
 import com.discord.stores.StoreStream
+import com.discord.utilities.captcha.CaptchaHelper
 import com.discord.utilities.color.ColorCompat
 import com.discord.utilities.mg_recycler.MGRecyclerAdapter
 import com.discord.views.typing.TypingDots
@@ -227,7 +230,14 @@ class TypingIndicatorPage : SettingsPage() {
                     request.execute().use { response ->
                         check(response.ok()) { "HTTP ${response.statusCode}" }
                         val user = JSONObject(response.text())
-                        user.optInt("premium_type", 0) to TypingStyle.fromParent(user)
+                        // An explicit null means it was removed (maybe on another client); a missing field tells nothing.
+                        val style = if (user.has(STYLE_FIELD)) {
+                            TypingStyle.fromParent(user).also { TypingStyle.saved = it }
+                        } else {
+                            logger.info("GET /users/@me has no $STYLE_FIELD; using the last saved one")
+                            TypingStyle.saved
+                        }
+                        user.optInt("premium_type", 0) to style
                     }
                 }
             }
@@ -257,7 +267,7 @@ class TypingIndicatorPage : SettingsPage() {
             }.show(Utils.appActivity.supportFragmentManager, "CustomTypingIndicatorRemove")
     }
 
-    private fun save(remove: Boolean) {
+    private fun save(remove: Boolean, captcha: CaptchaSolution? = null) {
         if (saving || loading) return
         val style = if (remove) null else current()
         if (style != null && style.emojis.isEmpty() && style.suggestion == 0) {
@@ -275,15 +285,27 @@ class TypingIndicatorPage : SettingsPage() {
         saving = true
         render()
         Utils.threadPool.execute {
+            var challenge: JSONObject? = null
             val error = try {
-                patch(JSONObject().put("typing_indicator_style", style?.toJson() ?: JSONObject.NULL))
+                patch(JSONObject().put(STYLE_FIELD, style?.toJson() ?: JSONObject.NULL), captcha)
+                TypingStyle.saved = style
                 null
+            } catch (e: CaptchaRequired) {
+                // Only prompt once: a second captcha means the solved token was rejected.
+                if (captcha == null) challenge = e.body
+                if (captcha == null) null else "Discord rejected the captcha. Try again later."
             } catch (e: Throwable) {
                 logger.error("Failed to save your typing indicator", e)
                 e.message ?: "Could not save your typing indicator."
             }
             Utils.mainThread.post {
                 saving = false
+                val pending = challenge
+                if (pending != null) {
+                    render()
+                    if (alive) solveCaptcha(remove, pending)
+                    return@post
+                }
                 if (error == null) {
                     if (remove) apply(null)
                     Utils.showToast(if (remove) "Custom typing indicator removed" else "Typing indicator saved")
@@ -295,9 +317,44 @@ class TypingIndicatorPage : SettingsPage() {
         }
     }
 
-    private fun patch(body: JSONObject) {
+    /** Discord wants a captcha for this change: show Discord's own hCaptcha flow, then save again with the token. */
+    private fun solveCaptcha(remove: Boolean, challenge: JSONObject) {
+        val siteKey = challenge.optString("captcha_sitekey")
+        val rqdata = challenge.optString("captcha_rqdata").takeIf { it.isNotEmpty() }
+        val rqtoken = challenge.optString("captcha_rqtoken").takeIf { it.isNotEmpty() }
+        val sessionId = challenge.optString("captcha_session_id").takeIf { it.isNotEmpty() }
+        try {
+            CaptchaHelper.INSTANCE.captchaRqtoken = rqtoken
+            val request = CaptchaHelper.CaptchaRequest.HCaptcha(siteKey, Utils.appActivity, rqdata)
+            CaptchaHelper.INSTANCE.tryShowCaptcha(request).subscribe(
+                RxUtils.createActionSubscriber(
+                    { token: String ->
+                        Utils.mainThread.post { if (alive) save(remove, CaptchaSolution(token, rqtoken, sessionId)) }
+                    },
+                    { error: Throwable ->
+                        logger.error("Captcha failed", error)
+                        Utils.mainThread.post { Utils.showToast("Captcha not completed, typing indicator not saved") }
+                    },
+                ),
+            )
+        } catch (error: Throwable) {
+            logger.error("Could not show captcha", error)
+            showError("Discord asked for a captcha, but it couldn't be shown.")
+        }
+    }
+
+    private fun patch(body: JSONObject, captcha: CaptchaSolution?) {
+        captcha?.let {
+            body.put("captcha_key", it.key)
+            it.rqtoken?.let { token -> body.put("captcha_rqtoken", token) }
+        }
         Http.Request.newDiscordRNRequest("/users/@me", "PATCH").use { request ->
             request.setRequestTimeout(REQUEST_TIMEOUT).setHeader("Content-Type", "application/json")
+            captcha?.let {
+                request.setHeader("X-Captcha-Key", it.key)
+                it.rqtoken?.let { token -> request.setHeader("X-Captcha-Rqtoken", token) }
+                it.sessionId?.let { id -> request.setHeader("X-Captcha-Session-Id", id) }
+            }
             request.executeWithBody(body.toString()).use { response ->
                 if (response.ok()) return
                 // Response.text() refuses non-2xx responses, so read Discord's error body directly.
@@ -307,6 +364,14 @@ class TypingIndicatorPage : SettingsPage() {
                     null
                 }
                 logger.warn("PATCH /users/@me failed with HTTP ${response.statusCode}: $text")
+                val challenge = try {
+                    JSONObject(text ?: "")
+                } catch (_: Throwable) {
+                    null
+                }
+                if (challenge != null && challenge.optString("captcha_sitekey").isNotEmpty()) {
+                    throw CaptchaRequired(challenge)
+                }
                 throw IllegalStateException(errorMessage(text) ?: "HTTP ${response.statusCode}")
             }
         }
@@ -379,7 +444,12 @@ class TypingIndicatorPage : SettingsPage() {
         return trailing
     }
 
+    private class CaptchaRequired(val body: JSONObject) : Exception("Captcha required")
+
+    private class CaptchaSolution(val key: String, val rqtoken: String?, val sessionId: String?)
+
     private companion object {
         const val REQUEST_TIMEOUT = 15_000
+        const val STYLE_FIELD = "typing_indicator_style"
     }
 }
