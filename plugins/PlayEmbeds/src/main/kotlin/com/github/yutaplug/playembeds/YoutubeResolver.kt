@@ -5,6 +5,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.SystemClock
 import com.aliucord.Http
 import org.json.JSONArray
 import org.json.JSONObject
@@ -12,6 +13,18 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+
+internal enum class LoadStage { RESOLVING, DOWNLOADING, MUXING }
+
+/** Written by the resolver's worker threads, read on the main thread for the loading popup. */
+internal class LoadProgress {
+    @Volatile var stage = LoadStage.RESOLVING
+    @Volatile var totalBytes = 0L
+    @Volatile var stageStartMs = SystemClock.elapsedRealtime()
+    val downloadedBytes = AtomicLong()
+}
 
 /**
  * Resolves YouTube videos through the InnerTube player API.
@@ -37,6 +50,12 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
 
     private class Stream(val url: String, val length: Long, val width: Int, val height: Int)
 
+    private val loads = ConcurrentHashMap<String, LoadProgress>()
+
+    /** Throughput of the last finished load, so the next estimate can start right away. */
+    @Volatile private var lastDownloadBytesPerSec = 0L
+    @Volatile private var lastMuxBytesPerSec = 0L
+
     init {
         clearCache()
     }
@@ -56,21 +75,54 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
 
     override fun onClose() = clearCache()
 
-    override fun load(key: String): Pair<ResolvedMedia, Long>? {
-        for (client in CLIENTS) {
-            val data = try {
-                player(client, key)
-            } catch (_: Throwable) {
-                null
-            } ?: continue
-            val result = try {
-                streamFrom(data)
-            } catch (_: Throwable) {
-                null
+    /** The running load for [url], or null when it's queued, finished or not started. */
+    fun progress(url: String): LoadProgress? = key(url)?.let { loads[it] }
+
+    /** Milliseconds left for [tracker], or null when there's nothing to base an estimate on yet. */
+    fun estimateMs(tracker: LoadProgress): Long? {
+        val now = SystemClock.elapsedRealtime()
+        val total = tracker.totalBytes
+        val muxRate = lastMuxBytesPerSec
+        val muxMs = if (muxRate > 0 && total > 0) total * 1_000L / muxRate else null
+        return when (tracker.stage) {
+            LoadStage.RESOLVING -> null
+            LoadStage.DOWNLOADING -> {
+                val done = tracker.downloadedBytes.get()
+                val elapsed = now - tracker.stageStartMs
+                val rate = if (elapsed >= MIN_RATE_SAMPLE_MS && done > 0) {
+                    done * 1_000L / elapsed
+                } else {
+                    lastDownloadBytesPerSec
+                }
+                if (rate <= 0) return null
+                (total - done).coerceAtLeast(0L) * 1_000L / rate + (muxMs ?: 0L)
             }
-            if (result != null) return result
+            LoadStage.MUXING -> muxMs?.let { (it - (now - tracker.stageStartMs)).coerceAtLeast(0L) }
         }
-        return null
+    }
+
+    override fun load(key: String): Pair<ResolvedMedia, Long>? {
+        val tracker = LoadProgress()
+        loads[key] = tracker
+        try {
+            for (client in CLIENTS) {
+                tracker.stage = LoadStage.RESOLVING
+                val data = try {
+                    player(client, key)
+                } catch (_: Throwable) {
+                    null
+                } ?: continue
+                val result = try {
+                    streamFrom(data, tracker)
+                } catch (_: Throwable) {
+                    null
+                }
+                if (result != null) return result
+            }
+            return null
+        } finally {
+            loads.remove(key)
+        }
     }
 
     private fun player(client: Client, key: String): JSONObject? {
@@ -108,7 +160,7 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         return data
     }
 
-    private fun streamFrom(data: JSONObject): Pair<ResolvedMedia, Long>? {
+    private fun streamFrom(data: JSONObject, tracker: LoadProgress): Pair<ResolvedMedia, Long>? {
         val streaming = data.optJSONObject("streamingData") ?: return null
         val expiresSeconds = streaming.optLong("expiresInSeconds", 0L).takeIf { it > 0 } ?: 3_600L
 
@@ -128,7 +180,7 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         val video = videoStream(adaptive, MAX_TOTAL_BYTES - audio.length) ?: return null
         val videoId = data.optJSONObject("videoDetails")?.optString("videoId")?.takeIf { it.isNotEmpty() }
             ?: return null
-        val file = downloadAndMux(videoId, video, audio) ?: return null
+        val file = downloadAndMux(videoId, video, audio, tracker) ?: return null
         return ResolvedMedia(Uri.fromFile(file).toString(), video.width, video.height, audioOnly = false) to
             3_600_000L
     }
@@ -181,7 +233,7 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         return Stream(url, length, format.optInt("width", 16), format.optInt("height", 9))
     }
 
-    private fun downloadAndMux(videoId: String, video: Stream, audio: Stream): File? {
+    private fun downloadAndMux(videoId: String, video: Stream, audio: Stream, tracker: LoadProgress): File? {
         cacheDir.mkdirs()
         val safeId = videoId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
         val target = File(cacheDir, "yt_$safeId$VIDEO_SUFFIX")
@@ -189,21 +241,32 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         val videoFile = File(cacheDir, "yt_$safeId.video.part")
         val audioFile = File(cacheDir, "yt_$safeId.audio.part")
         val muxFile = File(cacheDir, "yt_$safeId.mux.part")
+        val totalBytes = video.length + audio.length
         try {
+            tracker.totalBytes = totalBytes
+            tracker.downloadedBytes.set(0L)
+            val downloadStart = SystemClock.elapsedRealtime()
+            tracker.stageStartMs = downloadStart
+            tracker.stage = LoadStage.DOWNLOADING
             // Download audio on a second thread while this one fetches video.
             var audioError: Throwable? = null
             val audioThread = Thread {
                 try {
-                    download(audio, audioFile)
+                    download(audio, audioFile, tracker.downloadedBytes)
                 } catch (error: Throwable) {
                     audioError = error
                 }
             }
             audioThread.start()
-            download(video, videoFile)
+            download(video, videoFile, tracker.downloadedBytes)
             audioThread.join()
             audioError?.let { throw it }
+            val muxStart = SystemClock.elapsedRealtime()
+            lastDownloadBytesPerSec = totalBytes * 1_000L / (muxStart - downloadStart).coerceAtLeast(1L)
+            tracker.stageStartMs = muxStart
+            tracker.stage = LoadStage.MUXING
             mux(videoFile, audioFile, muxFile)
+            lastMuxBytesPerSec = totalBytes * 1_000L / (SystemClock.elapsedRealtime() - muxStart).coerceAtLeast(1L)
             if (!muxFile.renameTo(target)) return null
             trimCache()
             return target
@@ -217,7 +280,8 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
     }
 
     /** Fetch [stream] in ranges; an open-ended request is throttled to playback speed. */
-    private fun download(stream: Stream, file: File) {
+    private fun download(stream: Stream, file: File, downloaded: AtomicLong) {
+        val buffer = ByteArray(COPY_BUFFER_BYTES)
         FileOutputStream(file).use { out ->
             var start = 0L
             while (start < stream.length) {
@@ -226,7 +290,14 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
                     request.setRequestTimeout(TIMEOUT_MS)
                     request.execute().use { response ->
                         if (!response.ok()) throw IOException("HTTP ${response.statusCode}")
-                        response.pipe(out)
+                        response.stream().use { input ->
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                out.write(buffer, 0, read)
+                                downloaded.addAndGet(read.toLong())
+                            }
+                        }
                     }
                 }
                 start = end + 1
@@ -334,6 +405,8 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         const val MAX_TOTAL_BYTES = 150L * 1024L * 1024L
         const val CHUNK_BYTES = 4L * 1024L * 1024L
         const val MIN_BUFFER_BYTES = 1024 * 1024
+        const val COPY_BUFFER_BYTES = 64 * 1024
+        const val MIN_RATE_SAMPLE_MS = 1_000L
         const val MAX_CACHED_FILES = 3
         const val VIDEO_SUFFIX = ".mp4"
 

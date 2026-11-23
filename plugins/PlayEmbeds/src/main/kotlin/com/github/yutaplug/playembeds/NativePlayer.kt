@@ -52,6 +52,16 @@ internal object NativePlayers {
         player.d(1f)
     }
 
+    /** `SimpleExoPlayer.setPlayWhenReady(false)`, obfuscated as `k2.u(boolean)`. */
+    fun pause(player: AppMediaPlayer) {
+        try {
+            val exo: Any = player.f
+            exo.javaClass.getMethod("u", Boolean::class.javaPrimitiveType).invoke(exo, false)
+        } catch (_: Throwable) {
+            // Released, or the method moved; leave playback alone.
+        }
+    }
+
     fun release(player: AppMediaPlayer) {
         try {
             player.c()

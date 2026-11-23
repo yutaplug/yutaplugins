@@ -9,10 +9,14 @@ import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PorterDuff
+import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
@@ -20,6 +24,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.TextView
 import androidx.constraintlayout.widget.Barrier
 import androidx.constraintlayout.widget.ConstraintLayout
 import com.aliucord.Utils
@@ -30,6 +35,7 @@ import com.aliucord.patcher.PreHook
 import com.discord.api.message.embed.MessageEmbed
 import com.discord.player.AppMediaPlayer
 import com.discord.player.MediaSource
+import com.discord.utilities.color.ColorCompat
 import com.discord.utilities.embed.EmbedResourceUtils
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemEmbed
@@ -453,7 +459,14 @@ class PlayEmbeds : Plugin() {
 
         val rowKey = embedRowKeys[container]
         val containerRef = WeakReference(container)
-        showLoading(container)
+        val youtubeResolver = youtube
+        if (embed.provider == HostedProvider.YOUTUBE && youtubeResolver != null &&
+            youtubeResolver.cached(embed.url) == null
+        ) {
+            showYoutubeLoading(container, embed.url, youtubeResolver)
+        } else {
+            showLoading(container)
+        }
         resolver.resolve(embed.url) { media ->
             val target = containerRef.get() ?: return@resolve
             hideLoading(target)
@@ -525,12 +538,28 @@ class PlayEmbeds : Plugin() {
                 if (provider != null) openExternally(target.context, identity)
             }
         }
-        // Like Discord's own inline media, stop once the row leaves the screen
+        // The chat list can keep a row attached after it scrolls out of view, so
+        // pause as soon as the player is (almost) off screen. It isn't resumed
+        // automatically; scrolling back shows it paused where it stopped.
+        val rootRef = WeakReference(state.root)
+        var wasOnScreen = true
+        val scrollCheck = ViewTreeObserver.OnScrollChangedListener {
+            val root = rootRef.get() ?: return@OnScrollChangedListener
+            if (fullscreenPlayers.containsKey(root)) return@OnScrollChangedListener
+            val onScreen = isOnScreen(root)
+            if (wasOnScreen && !onScreen) playerRef.get()?.let(NativePlayers::pause)
+            wasOnScreen = onScreen
+        }
+        if (state.root.isAttachedToWindow) state.root.viewTreeObserver.addOnScrollChangedListener(scrollCheck)
+        // Like Discord's own inline media, stop once the row is detached
         // (or the chat closes). The delay ignores brief detaches during relayout.
         state.root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-            override fun onViewAttachedToWindow(view: View) {}
+            override fun onViewAttachedToWindow(view: View) {
+                view.viewTreeObserver.addOnScrollChangedListener(scrollCheck)
+            }
 
             override fun onViewDetachedFromWindow(view: View) {
+                view.viewTreeObserver.removeOnScrollChangedListener(scrollCheck)
                 val viewRef = WeakReference(view)
                 Utils.mainThread.postDelayed({
                     val root = viewRef.get() ?: return@postDelayed
@@ -840,25 +869,141 @@ class PlayEmbeds : Plugin() {
             alpha = 0.6f
             elevation = dp(context, 2).toFloat()
         }
-        val params = when {
-            parent is ConstraintLayout && anchor != null && anchor.id != View.NO_ID ->
-                ConstraintLayout.LayoutParams(size, size).apply {
-                    startToStart = anchor.id
-                    endToEnd = anchor.id
-                    topToTop = anchor.id
-                    bottomToBottom = anchor.id
-                }
-            parent is FrameLayout -> FrameLayout.LayoutParams(size, size, Gravity.CENTER)
-            else -> ViewGroup.LayoutParams(size, size)
-        }
-        parent.addView(indicator, params)
+        parent.addView(indicator, centeredParams(parent, anchor, size, size))
         indicator.bringToFront()
         loadingIndicators[container] = indicator
+    }
+
+    /** Layout params that center a view of [width]x[height] over [anchor] (or [parent] without one). */
+    private fun centeredParams(parent: ViewGroup, anchor: View?, width: Int, height: Int): ViewGroup.LayoutParams =
+        when {
+            parent is ConstraintLayout -> ConstraintLayout.LayoutParams(width, height).apply {
+                val target = anchor?.id?.takeIf { it != View.NO_ID } ?: ConstraintLayout.LayoutParams.PARENT_ID
+                startToStart = target
+                endToEnd = target
+                topToTop = target
+                bottomToBottom = target
+            }
+            parent is FrameLayout -> FrameLayout.LayoutParams(width, height, Gravity.CENTER)
+            else -> ViewGroup.LayoutParams(width, height)
+        }
+
+    /**
+     * A popup over the YouTube preview while the video is fetched, built from
+     * Discord's upload progress row (view_upload_progress): the current step,
+     * a progress bar and, once it can be estimated, the time left.
+     */
+    private fun showYoutubeLoading(container: ViewGroup, url: String, resolver: YoutubeResolver) {
+        val context = container.context
+        val layoutId = Utils.getResId("view_upload_progress", "layout")
+        if (layoutId <= 0) {
+            showLoading(container)
+            return
+        }
+        val card = FrameLayout(context).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(context, 8).toFloat()
+                setColor(themedColor(context, "colorBackgroundFloating", Color.DKGRAY))
+            }
+            elevation = dp(context, 4).toFloat()
+            setPadding(dp(context, 12), dp(context, 8), dp(context, 12), 0)
+            // Taps on the popup shouldn't reach the preview underneath.
+            isClickable = true
+        }
+        val content = try {
+            LayoutInflater.from(context).inflate(layoutId, card, false)
+        } catch (_: Throwable) {
+            showLoading(container)
+            return
+        }
+        content.findViewById<View>(id("progress_file_image"))?.visibility = View.GONE
+        content.findViewById<TextView>(id("progress_text"))
+            ?.setTextColor(themedColor(context, "colorHeaderPrimary", Color.WHITE))
+        content.findViewById<TextView>(id("progress_subtext"))
+            ?.setTextColor(themedColor(context, "colorTextMuted", Color.LTGRAY))
+        card.addView(content)
+
+        // Center over a large preview; a small thumbnail can't hold it, so use the whole card then.
+        val preview = previewView(container)
+        val maxWidth = dp(context, 260)
+        val margin = dp(context, 16)
+        val largePreview = preview != null && preview.width - margin >= dp(context, 160)
+        val anchor = if (largePreview) preview else null
+        val parent = anchor?.parent as? ViewGroup ?: container
+        val width = if (anchor != null) {
+            minOf(maxWidth, anchor.width - margin)
+        } else {
+            minOf(maxWidth, (container.width - margin).coerceAtLeast(dp(context, 160)))
+        }
+        parent.addView(card, centeredParams(parent, anchor, width, WRAP))
+        card.bringToFront()
+        loadingIndicators[container] = card
+
+        val cardRef = WeakReference(card)
+        val tick = object : Runnable {
+            override fun run() {
+                val view = cardRef.get() ?: return
+                if (view.parent == null) return
+                updateYoutubeLoading(view, resolver.progress(url), resolver)
+                Utils.mainThread.postDelayed(this, LOADING_TICK_MS)
+            }
+        }
+        tick.run()
+    }
+
+    private fun updateYoutubeLoading(card: View, tracker: LoadProgress?, resolver: YoutubeResolver) {
+        val stage = tracker?.stage
+        val total = tracker?.totalBytes ?: 0L
+        val percent = if (tracker != null && stage == LoadStage.DOWNLOADING && total > 0) {
+            (tracker.downloadedBytes.get() * 100L / total).toInt().coerceIn(0, 100)
+        } else {
+            null
+        }
+        card.findViewById<TextView>(id("progress_text"))?.text = when (stage) {
+            null -> "Loading video"
+            LoadStage.RESOLVING -> "Finding video"
+            LoadStage.DOWNLOADING -> if (percent != null) "Downloading video · $percent%" else "Downloading video"
+            LoadStage.MUXING -> "Preparing video"
+        }
+        val remaining = tracker?.let(resolver::estimateMs)
+        card.findViewById<TextView>(id("progress_subtext"))?.text =
+            if (remaining != null) formatRemaining(remaining) else ""
+        card.findViewById<ProgressBar>(id("progress_bar"))?.let { bar ->
+            if (percent != null) {
+                if (bar.isIndeterminate) bar.isIndeterminate = false
+                bar.progress = percent
+            } else if (!bar.isIndeterminate) {
+                bar.isIndeterminate = true
+            }
+        }
+    }
+
+    private fun formatRemaining(ms: Long): String {
+        val seconds = ((ms + 999L) / 1_000L).coerceAtLeast(1L)
+        return if (seconds < 60L) "~${seconds}s left" else "~${(seconds + 30L) / 60L} min left"
+    }
+
+    private fun themedColor(context: Context, attrName: String, fallback: Int): Int {
+        val attrId = Utils.getResId(attrName, "attr")
+        if (attrId <= 0) return fallback
+        return try {
+            ColorCompat.getThemedColor(context, attrId)
+        } catch (_: Throwable) {
+            fallback
+        }
     }
 
     private fun hideLoading(container: ViewGroup) {
         val indicator = loadingIndicators.remove(container) ?: return
         (indicator.parent as? ViewGroup)?.removeView(indicator)
+    }
+
+    /** At least [MIN_VISIBLE_FRACTION] of [view]'s height is inside the chat list's visible area. */
+    private fun isOnScreen(view: View): Boolean {
+        if (!view.isAttachedToWindow || !view.isShown || view.height <= 0) return false
+        val visible = Rect()
+        if (!view.getGlobalVisibleRect(visible)) return false
+        return visible.height() >= view.height * MIN_VISIBLE_FRACTION
     }
 
     /** The player is in its embed, or temporarily moved into the fullscreen overlay. */
@@ -1048,5 +1193,7 @@ class PlayEmbeds : Plugin() {
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         const val DETACH_RELEASE_DELAY_MS = 1_000L
+        const val MIN_VISIBLE_FRACTION = 0.25f
+        const val LOADING_TICK_MS = 500L
     }
 }
