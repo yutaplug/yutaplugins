@@ -1,9 +1,12 @@
-version = "1.0.12"
+version = "1.0.13"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.13
+        * The screen no longer dims or locks while a video or audio is playing
+
         # 1.0.12
         * The quality menu and the download permission prompt no longer stop opening after you open and close another screen, like settings or an image
 

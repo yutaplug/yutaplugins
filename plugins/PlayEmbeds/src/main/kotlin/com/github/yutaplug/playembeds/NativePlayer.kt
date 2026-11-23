@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.net.Uri
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.View
 import android.view.ViewParent
 import android.widget.FrameLayout
 import com.discord.player.AppMediaPlayer
@@ -18,6 +19,9 @@ import java.lang.reflect.Method
 internal object NativePlayers {
     private const val FEATURE_TAG = "PlayEmbeds"
     private const val SHOW_BUFFERING_WHEN_PLAYING = 1
+    private const val STATE_BUFFERING = 2
+    private const val STATE_READY = 3
+    private const val SCREEN_CHECK_MS = 1000L
 
     private var factory: Method? = null
 
@@ -39,6 +43,48 @@ internal object NativePlayers {
         setUseController(true)
         setControllerAutoShow(true)
         setShowBuffering(SHOW_BUFFERING_WHEN_PLAYING)
+        keepScreenOnWhilePlaying(this)
+    }
+
+    /**
+     * Keeps the screen from dimming or locking while this view's player is
+     * playing (or buffering to play), like Discord's own video viewer. Android
+     * only honors it while the view is attached and visible, so it follows the
+     * view into fullscreen and ends once the row is scrolled away or recycled.
+     */
+    private fun keepScreenOnWhilePlaying(view: PlayerView) {
+        val check = object : Runnable {
+            override fun run() {
+                val awake = wantsScreenOn(view.player)
+                if (view.keepScreenOn != awake) view.keepScreenOn = awake
+                view.postDelayed(this, SCREEN_CHECK_MS)
+            }
+        }
+        view.addOnAttachStateChangeListener(
+            object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) {
+                    v.removeCallbacks(check)
+                    v.post(check)
+                }
+
+                override fun onViewDetachedFromWindow(v: View) {
+                    v.removeCallbacks(check)
+                    v.keepScreenOn = false
+                }
+            },
+        )
+    }
+
+    /** `Player.getPlayWhenReady()` (`y1.j()`) while the playback state (`y1.y()`) is buffering or ready. */
+    private fun wantsScreenOn(player: Any?): Boolean = try {
+        if (player == null || player.javaClass.getMethod("j").invoke(player) != true) {
+            false
+        } else {
+            val state = player.javaClass.getMethod("y").invoke(player) as? Int
+            state == STATE_BUFFERING || state == STATE_READY
+        }
+    } catch (_: Throwable) {
+        false
     }
 
     /** A control bar that stays visible, for audio shown over its artwork. */
