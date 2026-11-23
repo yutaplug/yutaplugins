@@ -60,6 +60,22 @@ internal object NativePlayers {
         player.d(1f)
     }
 
+    /** Shows [player]'s current playback in [playerView] without reloading it, as `AppMediaPlayer.a` binds views. */
+    fun bind(player: AppMediaPlayer, playerView: PlayerView, controlView: PlayerControlView?) {
+        playerView.setPlayer(player.f)
+        controlView?.setPlayer(player.f)
+    }
+
+    /** `SimpleExoPlayer.setPlayWhenReady(true)`, obfuscated as `k2.u(boolean)`. */
+    fun resume(player: AppMediaPlayer) {
+        try {
+            val exo: Any = player.f
+            exo.javaClass.getMethod("u", Boolean::class.javaPrimitiveType).invoke(exo, true)
+        } catch (_: Throwable) {
+            // Released, or the method moved.
+        }
+    }
+
     /** `Player.getCurrentPosition()`, obfuscated as `y1.T()`. */
     fun position(player: AppMediaPlayer): Long = try {
         val exo: Any = player.f

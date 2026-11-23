@@ -94,6 +94,9 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
 
     private val loads = ConcurrentHashMap<String, LoadProgress>()
     private val responses = ConcurrentHashMap<String, FutureTask<PlayerResponse?>>()
+
+    /** The last refusal reason from YouTube's player API, by cache key (without quality). */
+    private val refusals = ConcurrentHashMap<String, String>()
     private var streamServer: StreamServer? = null
 
     /** Throughput of the last finished load, so the next estimate can start right away. */
@@ -143,6 +146,12 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
 
     /** The running load for [url] at [quality], or null when it's queued, finished or not started. */
     fun progress(url: String, quality: Int): LoadProgress? = qualityKey(url, quality)?.let { loads[it] }
+
+    /**
+     * YouTube's reason for refusing [url] the last time it was asked (such as its
+     * bot check), or null when it didn't refuse or gave no reason.
+     */
+    fun refusal(url: String): String? = key(url)?.let { refusals[it] }
 
     private fun qualityKey(url: String, quality: Int): String? = key(url)?.let { "$it|$quality" }
 
@@ -301,7 +310,12 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
                 JSONObject(response.text())
             }
         }
-        if (data.optJSONObject("playabilityStatus")?.optString("status") != "OK") return null
+        val playability = data.optJSONObject("playabilityStatus")
+        if (playability?.optString("status") != "OK") {
+            playability?.optString("reason")?.takeIf { it.trim().isNotEmpty() }?.let { refusals[key] = it }
+            return null
+        }
+        refusals.remove(key)
         if (data.optJSONObject("videoDetails")?.optBoolean("isLive") == true) return null
         return data
     }

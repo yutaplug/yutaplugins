@@ -1,6 +1,7 @@
 package com.github.yutaplug.playembeds
 
 import android.app.Activity
+import android.app.Application
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ContextWrapper
@@ -12,6 +13,7 @@ import android.graphics.PorterDuff
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Bundle
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -35,6 +37,7 @@ import com.aliucord.fragments.SelectDialog
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.discord.api.message.embed.MessageEmbed
+import com.discord.app.AppActivity
 import com.discord.player.AppMediaPlayer
 import com.discord.player.MediaSource
 import com.discord.utilities.color.ColorCompat
@@ -45,6 +48,7 @@ import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.EmbedEntry
 import com.discord.widgets.media.WidgetMedia
 import com.google.android.exoplayer2.PlaybackException
+import com.google.android.exoplayer2.ui.PlayerControlView
 import com.google.android.exoplayer2.ui.PlayerView
 import de.robv.android.xposed.XposedBridge
 import java.io.File
@@ -75,9 +79,16 @@ class PlayEmbeds : Plugin() {
     private var youtube: YoutubeResolver? = null
     private var soundCloud: SoundCloudResolver? = null
     private var spotify: SpotifyResolver? = null
+    private var downloader: MediaDownloader? = null
+
+    /** The video in a rotated fullscreen, and one that left it and waits for its embed row. */
+    private var rotated: RotatedSession? = null
+    private var returning: RotatedSession? = null
+    private var application: Application? = null
 
     internal val replaceWholeCard get() = settings.getBool(KEY_WHOLE_CARD, false)
-    internal val youtubeQuality get() = settings.getInt(KEY_YOUTUBE_QUALITY, YoutubeResolver.AUTO_QUALITY)
+    internal val rotateFullscreen get() = settings.getBool(KEY_ROTATE_FULLSCREEN, false)
+    internal val youtubeQuality get()= settings.getInt(KEY_YOUTUBE_QUALITY, YoutubeResolver.AUTO_QUALITY)
 
     init {
         settingsTab = SettingsTab(PlayEmbedsSettings::class.java, SettingsTab.Type.PAGE).withArgs(this)
@@ -88,11 +99,15 @@ class PlayEmbeds : Plugin() {
         youtube = YoutubeResolver(File(context.cacheDir, "playembeds-youtube"))
         soundCloud = SoundCloudResolver(File(context.cacheDir, "playembeds"))
         spotify = SpotifyResolver()
+        downloader = MediaDownloader(context.applicationContext)
         NativePlayers.init()
         allowLoopbackCleartext()
         patchEmbedRows()
         patchNativeHostedLaunches()
         patchPlayerErrors()
+        application = (context.applicationContext as? Application)?.also {
+            it.registerActivityLifecycleCallbacks(rotationCallbacks)
+        }
     }
 
     /**
@@ -170,7 +185,10 @@ class PlayEmbeds : Plugin() {
                 val entry = frame.args.getOrNull(1) as? EmbedEntry ?: return@Hook
                 configuredEmbeds[item.itemView] = entry.embed
                 embedContainers(item.itemView).forEach { container ->
-                    embedRowKeys[container] = entry.message.id to entry.embedIndex
+                    val rowKey = entry.message.id to entry.embedIndex
+                    embedRowKeys[container] = rowKey
+                    // A video back from a rotated fullscreen goes into its rebuilt row once that's laid out.
+                    if (returning?.rowKey == rowKey) container.post { returnInto(container) }
                     players[container]?.let { state ->
                         state.previousVisibility.forEach { (view, visibility) ->
                             if (state.forceGone) {
@@ -185,11 +203,11 @@ class PlayEmbeds : Plugin() {
                 }
                 val adapter = getAdapter.invoke(null, item) as WidgetChatListAdapter
                 val handler = adapter.eventHandler
-                if (handler.javaClass.name == "com.discord.widgets.search.results.WidgetSearchResults\$SearchResultAdapterEventHandler") {
+                if (handler.javaClass.name == SEARCH_EVENT_HANDLER) {
+                    // Playable embeds play in the search results; taps on anything else jump to the message.
                     embedContainers(item.itemView).forEach { container ->
                         searchEmbedClicks[container] = SearchEmbedClick(handler, entry)
                     }
-                    return@Hook
                 }
                 val link = EmbedUrls.embedLink(entry.embed)
                 if (link == null) {
@@ -245,10 +263,6 @@ class PlayEmbeds : Plugin() {
             PreHook { frame ->
                 val view = frame.args.getOrNull(0) as? View ?: return@PreHook
                 val container = findHostedContainer(view)
-                if (handleSearchEmbedClick(container)) {
-                    frame.setResult(null)
-                    return@PreHook
-                }
                 val embed = container?.let { hostedEmbeds[it] }
                 if (container != null && embed != null && EmbedUrls.genericVideoUrl(embed) != null) {
                     if (playInlineVideo(container, embed)) {
@@ -256,11 +270,13 @@ class PlayEmbeds : Plugin() {
                         return@PreHook
                     }
                 }
-                val url = mediaSourceUrl(frame.thisObject) ?: return@PreHook
-                if (EmbedUrls.isMediaLink(url)) return@PreHook
-                val hosted = EmbedUrls.hostedEmbed(url) ?: return@PreHook
-                if (!playHosted(view, hosted)) return@PreHook
-                frame.setResult(null)
+                val url = mediaSourceUrl(frame.thisObject)
+                // Discord plays direct media links itself, in chat and in search.
+                if (url != null && EmbedUrls.isMediaLink(url)) return@PreHook
+                val hosted = url?.let(EmbedUrls::hostedEmbed)
+                if ((hosted != null && playHosted(view, hosted)) || handleSearchEmbedClick(container)) {
+                    frame.setResult(null)
+                }
             },
         )
 
@@ -285,20 +301,16 @@ class PlayEmbeds : Plugin() {
                     ?: viewGroupField(frame.thisObject)
                     ?: return@PreHook
                 val container = findHostedContainer(source)
-                if (handleSearchEmbedClick(container)) {
-                    frame.setResult(null)
-                    return@PreHook
-                }
-                if (EmbedUrls.genericVideoUrl(embed) != null) {
-                    val target = container ?: return@PreHook
-                    if (playInlineVideo(target, embed)) {
+                if (container != null && EmbedUrls.genericVideoUrl(embed) != null) {
+                    if (playInlineVideo(container, embed)) {
                         frame.setResult(null)
                         return@PreHook
                     }
                 }
-                val hosted = EmbedUrls.hostedEmbed(embed) ?: return@PreHook
-                if (!playHosted(source, hosted)) return@PreHook
-                frame.setResult(null)
+                val hosted = EmbedUrls.hostedEmbed(embed)
+                if ((hosted != null && playHosted(source, hosted)) || handleSearchEmbedClick(container)) {
+                    frame.setResult(null)
+                }
             },
         )
     }
@@ -411,6 +423,14 @@ class PlayEmbeds : Plugin() {
         }
     }
 
+    private fun showYoutubeError(url: String) {
+        val reason = youtube?.refusal(url)
+        Utils.showToast(
+            if (reason != null) "YouTube blocked playback: $reason" else "Couldn't play this YouTube video",
+            true,
+        )
+    }
+
     private fun openExternally(context: Context, url: String) {
         try {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -503,7 +523,13 @@ class PlayEmbeds : Plugin() {
             val target = containerRef.get() ?: return@done
             hideLoading(target)
             if (!target.isAttachedToWindow || embedRowKeys[target] != rowKey) return@done
-            if (media == null || !attachPlayer(target, embed.url, media, embed.provider)) {
+            if (media == null && embed.provider == HostedProvider.YOUTUBE) {
+                // Opening the app hid why it failed (usually YouTube's bot check); say so instead.
+                showYoutubeError(embed.url)
+                return@done
+            }
+            val title = embed.title ?: embed.sourceEmbed?.j()
+            if (media == null || !attachPlayer(target, embed.url, media, embed.provider, title)) {
                 openExternally(target.context, embed.url)
             }
         }
@@ -539,7 +565,8 @@ class PlayEmbeds : Plugin() {
         val thumbnail = embed.h()
         val width = video?.d()?.takeIf { it > 0 } ?: thumbnail?.d()?.takeIf { it > 0 } ?: 16
         val height = video?.a()?.takeIf { it > 0 } ?: thumbnail?.a()?.takeIf { it > 0 } ?: 9
-        val attached = attachPlayer(container, videoUrl, ResolvedMedia(videoUrl, width, height, false), null)
+        val media = ResolvedMedia(videoUrl, width, height, false)
+        val attached = attachPlayer(container, videoUrl, media, null, embed.j())
         if (attached) {
             // A whole-card player lives in a wrapper that took over the card's place.
             val wrapper = (container.parent as? ViewGroup)
@@ -554,26 +581,41 @@ class PlayEmbeds : Plugin() {
         identity: String,
         media: ResolvedMedia,
         provider: HostedProvider?,
+        title: String?,
+        /** A player that's already playing [media] (back from a rotated fullscreen), shown without reloading. */
+        existing: AppMediaPlayer? = null,
     ): Boolean {
         removeSpotifyPlayButton(container)
-        val player = NativePlayers.create(container.context) ?: return false
+        val player = existing ?: NativePlayers.create(container.context) ?: return false
+        val reuse = existing != null
         val wholeCard = replaceWholeCard && container.id == id("chat_list_item_embed_container_card")
         val state = when {
-            media.audioOnly -> attachAudioPlayer(container, player, identity, media)
+            media.audioOnly -> attachAudioPlayer(container, player, identity, media, reuse)
             wholeCard ->
-                attachWholeCardVideo(container, player, identity, media, fitVideo = true)
-                    ?: attachPreviewVideo(container, player, identity, media)
+                attachWholeCardVideo(container, player, identity, media, fitVideo = true, reuse = reuse)
+                    ?: attachPreviewVideo(container, player, identity, media, reuse)
             // Otherwise the whole card is replaced only when there's no large preview to play in.
             provider == HostedProvider.YOUTUBE ->
-                attachPreviewVideo(container, player, identity, media)
-                    ?: attachWholeCardVideo(container, player, identity, media, fitVideo = false)
-            else -> attachPreviewVideo(container, player, identity, media)
+                attachPreviewVideo(container, player, identity, media, reuse)
+                    ?: attachWholeCardVideo(container, player, identity, media, fitVideo = false, reuse = reuse)
+            else -> attachPreviewVideo(container, player, identity, media, reuse)
         }
         if (state == null) {
             NativePlayers.release(player)
             return false
         }
-        if (provider == HostedProvider.YOUTUBE && !media.audioOnly) addQualityButton(state, identity, media)
+        state.media = media
+        state.provider = provider
+        state.title = title
+        val quality = if (provider == HostedProvider.YOUTUBE && !media.audioOnly) {
+            addQualityButton(state, identity, media)
+        } else {
+            null
+        }
+        // After a quality switch the download saves the quality that's playing.
+        addDownloadButton((state.root as? ViewGroup)?.getChildAt(0), title, media.audioOnly) {
+            quality?.media?.uri ?: media.uri
+        }
         val playerContainer = state.replacement?.wrapper ?: container
         // `players` holds its values weakly; the view's tag is the strong reference that
         // keeps the state alive exactly as long as the player view exists. Without it the
@@ -589,8 +631,12 @@ class PlayEmbeds : Plugin() {
             val current = playerRef.get()
             if (target != null && current != null && players[target]?.player === current) {
                 removeNativePlayer(target)
-                Utils.showToast("Couldn't play this embed", true)
-                if (provider != null) openExternally(target.context, identity)
+                if (provider == HostedProvider.YOUTUBE) {
+                    showYoutubeError(identity)
+                } else {
+                    Utils.showToast("Couldn't play this embed", true)
+                    if (provider != null) openExternally(target.context, identity)
+                }
             }
         }
         // The chat list can keep a row attached after it scrolls out of view, so
@@ -639,6 +685,7 @@ class PlayEmbeds : Plugin() {
         identity: String,
         media: ResolvedMedia,
         fitVideo: Boolean,
+        reuse: Boolean = false,
     ): NativePlayerState? {
         val replacement = wrapEmbedForHostedPlayer(container) ?: return null
         val context = container.context
@@ -646,7 +693,7 @@ class PlayEmbeds : Plugin() {
         val root = TouchGuardLayout(context).apply {
             addView(playerView, FrameLayout.LayoutParams(MATCH, MATCH))
         }
-        addFullscreenButton(playerView, root)
+        addFullscreenButton(playerView, root, landscape = media.width >= media.height)
         val previousVisibility = ArrayList<Pair<View, Int>>()
         val params = if (fitVideo) {
             val size = fittedVideoSize(context, media, replacement.originalWidth)
@@ -660,7 +707,7 @@ class PlayEmbeds : Plugin() {
         }
         replacement.wrapper.addView(root, params)
         root.bringToFront()
-        NativePlayers.play(player, media.uri, playerView, null)
+        startPlayback(player, media, playerView, null, reuse)
         return NativePlayerState(
             player,
             root,
@@ -672,6 +719,17 @@ class PlayEmbeds : Plugin() {
             previousMinimumWidth = replacement.wrapper.minimumWidth,
             replacement = replacement,
         )
+    }
+
+    /** Start [media] in [player], or with [reuse] just show the player's current playback in the views. */
+    private fun startPlayback(
+        player: AppMediaPlayer,
+        media: ResolvedMedia,
+        view: PlayerView,
+        controls: PlayerControlView?,
+        reuse: Boolean,
+    ) {
+        if (reuse) NativePlayers.bind(player, view, controls) else NativePlayers.play(player, media.uri, view, controls)
     }
 
     /** The video's aspect ratio at up to [cardWidth] wide, capped at Discord's embed image height. */
@@ -696,6 +754,7 @@ class PlayEmbeds : Plugin() {
         player: AppMediaPlayer,
         identity: String,
         media: ResolvedMedia,
+        reuse: Boolean = false,
     ): NativePlayerState? {
         val imageContainer = container.findViewById<View>(id("embed_image_container")) as? ViewGroup
         val inlineMedia = container.findViewById<View>(id("embed_inline_media")) as? ViewGroup
@@ -743,11 +802,11 @@ class PlayEmbeds : Plugin() {
         val root = TouchGuardLayout(parent.context).apply {
             addView(playerView, FrameLayout.LayoutParams(MATCH, MATCH))
         }
-        addFullscreenButton(playerView, root)
+        addFullscreenButton(playerView, root, landscape = media.width >= media.height)
         previousVisibility.forEach { (child, _) -> child.visibility = View.GONE }
         parent.addView(root, FrameLayout.LayoutParams(width, height))
         root.bringToFront()
-        NativePlayers.play(player, media.uri, playerView, null)
+        startPlayback(player, media, playerView, null, reuse)
         return NativePlayerState(
             player,
             root,
@@ -769,6 +828,7 @@ class PlayEmbeds : Plugin() {
         player: AppMediaPlayer,
         identity: String,
         media: ResolvedMedia,
+        reuse: Boolean = false,
     ): NativePlayerState? {
         val context = container.context
         val preview = previewView(container)
@@ -791,7 +851,7 @@ class PlayEmbeds : Plugin() {
             }
             previewParent.addView(root, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
             root.bringToFront()
-            NativePlayers.play(player, media.uri, hiddenView, controlBar)
+            startPlayback(player, media, hiddenView, controlBar, reuse)
             return NativePlayerState(
                 player,
                 root,
@@ -833,7 +893,7 @@ class PlayEmbeds : Plugin() {
         }
         cardLayout.addView(root, params)
         root.bringToFront()
-        NativePlayers.play(player, media.uri, hiddenView, controlBar)
+        startPlayback(player, media, hiddenView, controlBar, reuse)
         return NativePlayerState(
             player,
             root,
@@ -911,11 +971,16 @@ class PlayEmbeds : Plugin() {
     }
 
     private fun removeNativePlayer(container: ViewGroup) {
-        val state = players.remove(container) ?: return
-        state.root.tag = null
-        exitFullscreen(state.root)
+        val state = detachNativePlayer(container) ?: return
         errorCallbacks.remove(state.player.g)
         NativePlayers.release(state.player)
+    }
+
+    /** Takes the player out of [container] and restores the embed, without releasing the player. */
+    private fun detachNativePlayer(container: ViewGroup): NativePlayerState? {
+        val state = players.remove(container) ?: return null
+        state.root.tag = null
+        exitFullscreen(state.root)
         (state.root.parent as? ViewGroup)?.removeView(state.root)
         state.extraViews.forEach { (it.parent as? ViewGroup)?.removeView(it) }
         state.parent.minimumWidth = state.previousMinimumWidth
@@ -939,6 +1004,7 @@ class PlayEmbeds : Plugin() {
         } else {
             container.requestLayout()
         }
+        return state
     }
 
     /** A spinner styled like Discord's inline_media_loading_indicator, over the preview. */
@@ -1056,10 +1122,10 @@ class PlayEmbeds : Plugin() {
      * like its duration. Tapping it lists the video's qualities; picking one
      * loads it and continues from the same position.
      */
-    private fun addQualityButton(state: NativePlayerState, url: String, media: ResolvedMedia) {
-        val playerView = (state.root as? ViewGroup)?.getChildAt(0) as? PlayerView ?: return
-        val duration = playerView.findViewById<TextView>(id("exo_duration")) ?: return
-        val bar = duration.parent as? LinearLayout ?: return
+    private fun addQualityButton(state: NativePlayerState, url: String, media: ResolvedMedia): QualityControl? {
+        val playerView = (state.root as? ViewGroup)?.getChildAt(0) as? PlayerView ?: return null
+        val duration = playerView.findViewById<TextView>(id("exo_duration")) ?: return null
+        val bar = duration.parent as? LinearLayout ?: return null
         val context = playerView.context
         val label = TextView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_PX, duration.textSize)
@@ -1082,6 +1148,45 @@ class PlayEmbeds : Plugin() {
             bar.indexOfChild(duration) + 1,
             LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(context, 12) },
         )
+        return control
+    }
+
+    /**
+     * A download button in the player's control bar, just before the fullscreen
+     * button, styled like it. It saves the stream that's playing to Downloads.
+     */
+    private fun addDownloadButton(controls: View?, title: String?, audioOnly: Boolean, uri: () -> String) {
+        if (controls == null || !MediaDownloader.canDownload(uri())) return
+        addBarButton(
+            controls,
+            "ic_file_download_white_24dp",
+            if (audioOnly) "Download audio" else "Download video",
+        ) {
+            downloader?.download(uri(), title, audioOnly)
+        }
+    }
+
+    /**
+     * An icon button in [controls]' control bar (the row holding the duration),
+     * styled like ExoPlayer's own: before the fullscreen button, or last.
+     */
+    private fun addBarButton(controls: View, iconName: String, description: String, onClick: () -> Unit): ImageButton? {
+        val duration = controls.findViewById<View>(id("exo_duration")) ?: return null
+        val bar = duration.parent as? LinearLayout ?: return null
+        val context = controls.context
+        val styleId = Utils.getResId("ExoMediaButton", "style")
+        val button = if (styleId > 0) ImageButton(context, null, 0, styleId) else ImageButton(context)
+        button.scaleType = ImageView.ScaleType.FIT_CENTER
+        button.setPadding(0, 0, 0, 0)
+        val iconId = Utils.getResId(iconName, "drawable")
+        if (iconId > 0) button.setImageResource(iconId)
+        button.contentDescription = description
+        button.setOnClickListener { onClick() }
+        val size = dp(context, 24)
+        val fullscreen = bar.findViewWithTag<View>(FULLSCREEN_BUTTON_TAG)
+        val index = if (fullscreen != null) bar.indexOfChild(fullscreen) else bar.childCount
+        bar.addView(button, index, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
+        return button
     }
 
     private class QualityControl(
@@ -1169,6 +1274,7 @@ class PlayEmbeds : Plugin() {
         val playing = NativePlayers.isPlaying(player)
         NativePlayers.play(player, media.uri, control.playerView, null, position, playing)
         control.media = media
+        control.state.media = media
         control.updateLabel()
         youtubeQualityChoices[control.url] = media.quality
     }
@@ -1239,7 +1345,7 @@ class PlayEmbeds : Plugin() {
         state.root.parent === state.parent || fullscreenPlayers.containsKey(state.root)
 
     /** Adds a fullscreen toggle to the end of Discord's control bar (after the duration). */
-    private fun addFullscreenButton(playerView: View, root: View) {
+    private fun addFullscreenButton(playerView: View, root: View, landscape: Boolean) {
         val duration = playerView.findViewById<View>(id("exo_duration")) ?: return
         val bar = duration.parent as? LinearLayout ?: return
         val context = playerView.context
@@ -1247,9 +1353,10 @@ class PlayEmbeds : Plugin() {
         val button = if (styleId > 0) ImageButton(context, null, 0, styleId) else ImageButton(context)
         button.scaleType = ImageView.ScaleType.FIT_CENTER
         button.setPadding(0, 0, 0, 0)
+        button.tag = FULLSCREEN_BUTTON_TAG
         setFullscreenIcon(button, fullscreen = false)
         button.setOnClickListener {
-            if (fullscreenPlayers.containsKey(root)) exitFullscreen(root) else enterFullscreen(root, button)
+            if (fullscreenPlayers.containsKey(root)) exitFullscreen(root) else enterFullscreen(root, button, landscape)
         }
         val size = dp(context, 24)
         bar.addView(button, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
@@ -1268,13 +1375,17 @@ class PlayEmbeds : Plugin() {
      * Moves the playing view (not a new player) into a black overlay over the
      * whole window, so playback continues without a restart. Discord's activity
      * doesn't handle rotation itself and would be recreated, destroying the
-     * player, so the current orientation is locked while fullscreen.
+     * player, so the current orientation is locked while fullscreen. With the
+     * rotate setting, a [landscape] video on a portrait screen goes into a
+     * [RotatedSession] instead, which lets the screen really rotate.
      */
     @Suppress("DEPRECATION")
-    private fun enterFullscreen(root: View, button: ImageButton) {
+    private fun enterFullscreen(root: View, button: ImageButton, landscape: Boolean) {
         if (fullscreenPlayers.containsKey(root)) return
         val activity = activityFrom(root.context) ?: return
         val decor = activity.window.decorView as? ViewGroup ?: return
+        val portraitScreen = decor.width > 0 && decor.width < decor.height
+        if (landscape && rotateFullscreen && portraitScreen && enterRotatedFullscreen(root, activity)) return
         val parent = root.parent as? ViewGroup ?: return
         val index = parent.indexOfChild(root)
         val params = root.layoutParams ?: return
@@ -1299,13 +1410,195 @@ class PlayEmbeds : Plugin() {
         fullscreenPlayers[root] = state
 
         activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+        hideSystemBars(activity, decor, state.previousSystemUiVisibility)
+        overlay.requestFocus()
+        setFullscreenIcon(button, fullscreen = true)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun hideSystemBars(activity: Activity, decor: View, previousSystemUiVisibility: Int) {
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        decor.systemUiVisibility = state.previousSystemUiVisibility or
+        decor.systemUiVisibility = previousSystemUiVisibility or
             View.SYSTEM_UI_FLAG_FULLSCREEN or
             View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+    }
+
+    @Suppress("DEPRECATION")
+    private fun restoreSystemBars(activity: Activity, previousSystemUiVisibility: Int, wasFullscreen: Boolean) {
+        activity.window.decorView.systemUiVisibility = previousSystemUiVisibility
+        if (!wasFullscreen) activity.window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+    }
+
+    /**
+     * Fullscreen with the screen really turned to landscape. The player leaves its
+     * embed (which is restored) and keeps running on its own in [rotated]; it's
+     * shown in an overlay now and again in every activity Discord rebuilds while
+     * the screen rotates (see [rotationCallbacks]). False if it can't be done.
+     */
+    private fun enterRotatedFullscreen(root: View, activity: Activity): Boolean {
+        val container = players.keys.firstOrNull { players[it]?.root === root } ?: return false
+        val state = players[container] ?: return false
+        val media = state.media ?: return false
+        val oldView = (root as? ViewGroup)?.getChildAt(0) as? PlayerView ?: return false
+        endRotated()
+        val session = RotatedSession(
+            state.player,
+            state.url,
+            state.provider,
+            state.title,
+            media,
+            embedRowKeys[container],
+            activity.requestedOrientation,
+        )
+        // Detaching (not removing) keeps the player playing; the embed shows its preview again.
+        detachNativePlayer(container)
+        val sessionRef = WeakReference(session)
+        errorCallbacks[state.player.g] = {
+            val current = sessionRef.get()
+            if (current != null && rotated === current) {
+                endRotated()
+                if (current.provider == HostedProvider.YOUTUBE) {
+                    showYoutubeError(current.identity)
+                } else {
+                    Utils.showToast("Couldn't play this embed", true)
+                }
+            }
+        }
+        rotated = session
+        session.playerView = oldView
+        showRotated(session, activity)
+        activity.requestedOrientation = RotatedSession.LANDSCAPE
+        return true
+    }
+
+    /** Shows [session]'s player in a fullscreen overlay in [activity]. */
+    @Suppress("DEPRECATION")
+    private fun showRotated(session: RotatedSession, activity: Activity) {
+        val decor = activity.window.decorView as? ViewGroup ?: return
+        val overlay = FullscreenOverlay(activity) { exitRotatedFullscreen() }
+        val view = NativePlayers.videoView(activity)
+        overlay.addView(view, FrameLayout.LayoutParams(MATCH, MATCH))
+        session.playerView?.setPlayer(null)
+        NativePlayers.bind(session.player, view, null)
+        session.playerView = view
+        session.activity = activity
+        session.overlay = overlay
+        session.previousSystemUiVisibility = decor.systemUiVisibility
+        session.wasFullscreen = activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_FULLSCREEN != 0
+        addDownloadButton(view, session.title, audioOnly = false) { session.media.uri }
+        addBarButton(view, "exo_icon_fullscreen_exit", "Exit fullscreen") { exitRotatedFullscreen() }
+        decor.addView(overlay, FrameLayout.LayoutParams(MATCH, MATCH))
+        (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(decor.windowToken, 0)
+        hideSystemBars(activity, decor, session.previousSystemUiVisibility)
         overlay.requestFocus()
-        setFullscreenIcon(button, fullscreen = true)
+    }
+
+    /**
+     * Leaves a rotated fullscreen: the screen goes back to how it was, and the
+     * paused player waits to be put back in its embed once the chat is rebuilt.
+     */
+    private fun exitRotatedFullscreen() {
+        val session = rotated ?: return
+        rotated = null
+        session.wasPlaying = NativePlayers.isPlaying(session.player)
+        NativePlayers.pause(session.player)
+        hideRotated(session, restoreOrientation = true)
+        errorCallbacks.remove(session.player.g)
+        val rowKey = session.rowKey
+        if (rowKey == null) {
+            NativePlayers.release(session.player)
+            return
+        }
+        returning = session
+        // Without a rebuild (the phone is still sideways) the embed rows already exist;
+        // after one, onConfigure finds the new row first and these are detached.
+        Utils.mainThread.postDelayed({
+            if (returning !== session) return@postDelayed
+            embedRowKeys.entries
+                .firstOrNull { (container, key) -> key == rowKey && container.isAttachedToWindow }
+                ?.key
+                ?.let(::returnInto)
+        }, RETURN_RETRY_DELAY_MS)
+        Utils.mainThread.postDelayed({
+            if (returning !== session) return@postDelayed
+            returning = null
+            NativePlayers.release(session.player)
+        }, RETURN_TIMEOUT_MS)
+    }
+
+    /** Puts a player back from a rotated fullscreen into [container], its embed, if it's waiting for it. */
+    private fun returnInto(container: ViewGroup) {
+        val session = returning ?: return
+        if (!container.isAttachedToWindow || embedRowKeys[container] != session.rowKey) return
+        if (players[container] != null) return
+        returning = null
+        val attached = attachPlayer(
+            container,
+            session.identity,
+            session.media,
+            session.provider,
+            session.title,
+            existing = session.player,
+        )
+        if (attached && session.wasPlaying) NativePlayers.resume(session.player)
+    }
+
+    private fun hideRotated(session: RotatedSession, restoreOrientation: Boolean) {
+        val overlay = session.overlay
+        (overlay?.parent as? ViewGroup)?.removeView(overlay)
+        session.overlay = null
+        session.playerView?.setPlayer(null)
+        session.playerView = null
+        val activity = session.activity ?: return
+        restoreSystemBars(activity, session.previousSystemUiVisibility, session.wasFullscreen)
+        if (restoreOrientation) activity.requestedOrientation = session.previousOrientation
+    }
+
+    /** Closes any rotated fullscreen and drops a player waiting to return, releasing them. */
+    private fun endRotated() {
+        rotated?.let { session ->
+            rotated = null
+            hideRotated(session, restoreOrientation = true)
+            errorCallbacks.remove(session.player.g)
+            NativePlayers.release(session.player)
+        }
+        returning?.let { session ->
+            returning = null
+            NativePlayers.release(session.player)
+        }
+    }
+
+    /**
+     * Follows a [RotatedSession] across the activities Discord rebuilds while the
+     * screen rotates: the old one's overlay goes with it, the new one is kept in
+     * landscape from its creation and gets a new overlay once it's resumed.
+     */
+    private val rotationCallbacks = object : Application.ActivityLifecycleCallbacks {
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            val session = rotated ?: return
+            if (session.activity == null && activity is AppActivity) activity.requestedOrientation = RotatedSession.LANDSCAPE
+        }
+
+        override fun onActivityResumed(activity: Activity) {
+            val session = rotated ?: return
+            if (session.activity == null && activity is AppActivity) showRotated(session, activity)
+        }
+
+        override fun onActivityDestroyed(activity: Activity) {
+            val session = rotated ?: return
+            if (session.activity !== activity) return
+            session.activity = null
+            session.overlay = null
+            // Closed for good rather than rebuilt for the rotation.
+            if (!activity.isChangingConfigurations) endRotated()
+        }
+
+        override fun onActivityStarted(activity: Activity) {}
+        override fun onActivityPaused(activity: Activity) {}
+        override fun onActivityStopped(activity: Activity) {}
+        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
     }
 
     @Suppress("DEPRECATION")
@@ -1314,8 +1607,7 @@ class PlayEmbeds : Plugin() {
         val activity = state.activity
         state.overlay.removeView(root)
         (state.overlay.parent as? ViewGroup)?.removeView(state.overlay)
-        activity.window.decorView.systemUiVisibility = state.previousSystemUiVisibility
-        if (!state.wasFullscreen) activity.window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        restoreSystemBars(activity, state.previousSystemUiVisibility, state.wasFullscreen)
         activity.requestedOrientation = state.previousOrientation
         val index = state.index.coerceIn(0, state.parent.childCount)
         state.parent.addView(root, index, state.layoutParams)
@@ -1393,6 +1685,9 @@ class PlayEmbeds : Plugin() {
     }
 
     override fun stop(context: Context) {
+        application?.unregisterActivityLifecycleCallbacks(rotationCallbacks)
+        application = null
+        endRotated()
         ArrayList(fullscreenPlayers.keys).forEach(::exitFullscreen)
         ArrayList(players.keys).forEach(::removeNativePlayer)
         ArrayList(loadingIndicators.keys).forEach(::hideLoading)
@@ -1402,6 +1697,8 @@ class PlayEmbeds : Plugin() {
         youtube?.close()
         soundCloud?.close()
         spotify?.close()
+        downloader?.close()
+        downloader = null
         youtube = null
         soundCloud = null
         spotify = null
@@ -1420,6 +1717,7 @@ class PlayEmbeds : Plugin() {
 
     internal companion object {
         const val KEY_WHOLE_CARD = "replaceWholeCard"
+        const val KEY_ROTATE_FULLSCREEN = "rotateFullscreen"
         const val KEY_YOUTUBE_QUALITY = "youtubeQuality"
 
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
@@ -1427,6 +1725,11 @@ class PlayEmbeds : Plugin() {
         private const val DETACH_RELEASE_DELAY_MS = 1_000L
         private const val MIN_VISIBLE_FRACTION = 0.25f
         private const val LOADING_TICK_MS = 500L
+        private const val FULLSCREEN_BUTTON_TAG = "PlayEmbedsFullscreen"
+        private const val RETURN_RETRY_DELAY_MS = 1_000L
+        private const val RETURN_TIMEOUT_MS = 15_000L
+        private const val SEARCH_EVENT_HANDLER =
+            "com.discord.widgets.search.results.WidgetSearchResults\$SearchResultAdapterEventHandler"
 
         /** Where Android checks a host's cleartext permission (the policy, and the config it asks). */
         private val CLEARTEXT_POLICY_CLASSES = listOf(

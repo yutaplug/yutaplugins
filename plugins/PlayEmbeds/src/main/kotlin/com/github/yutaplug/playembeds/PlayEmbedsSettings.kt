@@ -29,6 +29,18 @@ class PlayEmbedsSettings(private val plugin: PlayEmbeds) : SettingsPage() {
                 setOnCheckedListener { plugin.settings.setBool(PlayEmbeds.KEY_WHOLE_CARD, it) }
             },
         )
+        add(
+            Utils.createCheckedSetting(
+                requireContext(),
+                CheckedSetting.ViewType.SWITCH,
+                "Rotate fullscreen to landscape",
+                "Rotate the screen to landscape when you open a landscape video in fullscreen. " +
+                    "Discord reloads the screen when it rotates, so it blinks on the way in and out.",
+            ).apply {
+                isChecked = plugin.rotateFullscreen
+                setOnCheckedListener { plugin.settings.setBool(PlayEmbeds.KEY_ROTATE_FULLSCREEN, it) }
+            },
+        )
 
         section("YouTube")
         val qualityRow = action("Default quality") { row -> pickQuality(row) }

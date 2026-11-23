@@ -1,11 +1,13 @@
 package com.github.yutaplug.playembeds
 
 import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import com.discord.player.AppMediaPlayer
+import com.google.android.exoplayer2.ui.PlayerView
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.discord.widgets.chat.list.entries.EmbedEntry
 import java.lang.ref.WeakReference
@@ -38,7 +40,12 @@ internal data class NativePlayerState(
     val extraViews: List<View>,
     val previousMinimumWidth: Int,
     val replacement: HostedEmbedReplacement? = null,
-)
+) {
+    /** What's playing (updated by a YouTube quality switch), its provider and the embed title. */
+    var media: ResolvedMedia? = null
+    var provider: HostedProvider? = null
+    var title: String? = null
+}
 
 /** Where a fullscreen player came from, and the window state to restore. */
 internal class FullscreenState(
@@ -52,6 +59,36 @@ internal class FullscreenState(
     val wasFullscreen: Boolean,
     val previousOrientation: Int,
 )
+
+/**
+ * A video shown fullscreen with the screen really turned to landscape. Discord
+ * rebuilds its activity when the screen rotates, so the session keeps [player]
+ * running on its own and shows it in a new overlay in each rebuilt activity.
+ * [rowKey] (message id, embed index) finds the embed to return it to afterwards.
+ */
+internal class RotatedSession(
+    val player: AppMediaPlayer,
+    val identity: String,
+    val provider: HostedProvider?,
+    val title: String?,
+    val media: ResolvedMedia,
+    val rowKey: Pair<Long, Int>?,
+    /** The orientation the activity asked for before fullscreen, restored on exit. */
+    val previousOrientation: Int,
+) {
+    var activity: Activity? = null
+    var overlay: View? = null
+    var playerView: PlayerView? = null
+    var previousSystemUiVisibility = 0
+    var wasFullscreen = false
+
+    /** Whether it was playing when fullscreen closed, to carry on once it's back in its embed. */
+    var wasPlaying = true
+
+    companion object {
+        const val LANDSCAPE = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+    }
+}
 
 internal data class HostedEmbedReplacement(
     val wrapper: FrameLayout,

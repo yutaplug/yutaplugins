@@ -1,9 +1,15 @@
-version = "1.0.10"
+version = "1.0.11"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.11
+        * Embeds now play in search results too; tapping anything else still jumps to the message
+        * Download button in the player saves the video or audio to Downloads
+        * New setting to rotate the screen to landscape in fullscreen
+        * When YouTube refuses a video, show why instead of opening the YouTube app
+
         # 1.0.10
         * YouTube videos now start almost instantly: they stream while playing instead of downloading first
         * Choose the quality in the YouTube player, and a default quality in the plugin settings
