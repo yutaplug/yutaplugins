@@ -177,7 +177,7 @@ class TypingIndicatorPage : SettingsPage() {
 
     private fun pickEmoji() {
         EmojiPickerNavigator.launchBottomSheet(
-            Utils.appActivity.supportFragmentManager,
+            parentFragmentManager,
             object : EmojiPickerListener {
                 override fun onEmojiPicked(emoji: Emoji) {
                     val picked = when (emoji) {
@@ -201,7 +201,7 @@ class TypingIndicatorPage : SettingsPage() {
                 suggestion = which
                 render()
             }
-        }.show(Utils.appActivity.supportFragmentManager, "CustomTypingIndicatorText")
+        }.show(parentFragmentManager, "CustomTypingIndicatorText")
     }
 
     private fun pickAnimation() {
@@ -212,7 +212,7 @@ class TypingIndicatorPage : SettingsPage() {
                 animation = TypingStyle.ANIMATIONS[which]
                 render()
             }
-        }.show(Utils.appActivity.supportFragmentManager, "CustomTypingIndicatorAnimation")
+        }.show(parentFragmentManager, "CustomTypingIndicatorAnimation")
     }
 
     private fun apply(style: TypingStyle?) {
@@ -264,7 +264,7 @@ class TypingIndicatorPage : SettingsPage() {
             .setOnOkListener {
                 dialog.dismiss()
                 save(true)
-            }.show(Utils.appActivity.supportFragmentManager, "CustomTypingIndicatorRemove")
+            }.show(parentFragmentManager, "CustomTypingIndicatorRemove")
     }
 
     private fun save(remove: Boolean, captcha: CaptchaSolution? = null) {
@@ -325,7 +325,7 @@ class TypingIndicatorPage : SettingsPage() {
         val sessionId = challenge.optString("captcha_session_id").takeIf { it.isNotEmpty() }
         try {
             CaptchaHelper.INSTANCE.captchaRqtoken = rqtoken
-            val request = CaptchaHelper.CaptchaRequest.HCaptcha(siteKey, Utils.appActivity, rqdata)
+            val request = CaptchaHelper.CaptchaRequest.HCaptcha(siteKey, activity ?: Utils.appActivity, rqdata)
             CaptchaHelper.INSTANCE.tryShowCaptcha(request).subscribe(
                 RxUtils.createActionSubscriber(
                     { token: String ->
@@ -395,12 +395,14 @@ class TypingIndicatorPage : SettingsPage() {
     }
 
     private fun showError(message: String, title: String = "Couldn't save typing indicator") {
+        // Saving finishes in the background, possibly after the page was closed.
+        if (!isAdded) return
         val dialog = ConfirmDialog()
         dialog
             .setTitle(title)
             .setDescription(message)
             .setOnOkListener { dialog.dismiss() }
-            .show(Utils.appActivity.supportFragmentManager, "CustomTypingIndicatorError")
+            .show(parentFragmentManager, "CustomTypingIndicatorError")
     }
 
     private fun add(view: View) {

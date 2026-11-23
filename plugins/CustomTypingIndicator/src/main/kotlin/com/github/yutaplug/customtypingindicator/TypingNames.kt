@@ -2,6 +2,7 @@ package com.github.yutaplug.customtypingindicator
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
@@ -17,6 +18,7 @@ import android.text.style.ReplacementSpan
 import android.view.MotionEvent
 import android.view.View
 import android.widget.TextView
+import androidx.fragment.app.FragmentActivity
 import com.aliucord.Logger
 import com.aliucord.Utils
 import com.discord.models.member.GuildMember
@@ -159,10 +161,14 @@ internal object TypingNames {
     private class ProfileSpan(private val userId: Long, private val channelId: Long?, private val guildId: Long) :
         ClickableSpan() {
         override fun onClick(widget: View) {
+            // The tapped screen: Aliucord's appActivity can be a screen that was already closed.
+            var context: Context? = widget.context
+            while (context is ContextWrapper && context !is FragmentActivity) context = context.baseContext
+            val activity = context as? FragmentActivity ?: Utils.appActivity
             WidgetUserSheet.show(
                 userId,
                 channelId,
-                Utils.appActivity.supportFragmentManager,
+                activity.supportFragmentManager,
                 guildId.takeIf { it != 0L },
             )
         }
