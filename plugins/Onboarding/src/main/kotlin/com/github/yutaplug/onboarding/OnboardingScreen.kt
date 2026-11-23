@@ -29,6 +29,8 @@ import android.util.TypedValue
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.appcompat.widget.Toolbar
 import androidx.core.widget.NestedScrollView
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
 import com.discord.views.SearchInputView
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.button.MaterialButton
@@ -57,6 +59,10 @@ internal class OnboardingScreen(
     private val onClosed: () -> Unit,
 ) {
     private enum class Tab { CUSTOMIZE, BROWSE }
+
+    /** This screen's own dialogs: Aliucord's appActivity can be a screen that was already closed. */
+    private val fragments: FragmentManager
+        get() = (activity as? FragmentActivity)?.supportFragmentManager ?: Utils.appActivity.supportFragmentManager
 
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
@@ -424,7 +430,7 @@ internal class OnboardingScreen(
                     selected += prompt.options[which].id
                     render()
                 }
-            }.show(Utils.appActivity.supportFragmentManager, "OnboardingDropdown")
+            }.show(fragments, "OnboardingDropdown")
             return
         }
         val choices = BooleanArray(prompt.options.size) { prompt.options[it].id in selected }
@@ -463,7 +469,7 @@ internal class OnboardingScreen(
             layoutParams = LinearLayout.LayoutParams(-1, dp(44)).apply { setMargins(dp(16), dp(8), dp(16), dp(16)) }
         }
         sheet = ChoicesSheet(prompt.title, listOf(list, done))
-        sheet.show(Utils.appActivity.supportFragmentManager, "OnboardingDropdown")
+        sheet.show(fragments, "OnboardingDropdown")
     }
 
     private fun renderBrowse(data: OnboardingConfig) {
@@ -726,7 +732,7 @@ internal class OnboardingScreen(
             .setTitle("Could not save onboarding choices")
             .setDescription("$details\n\n$state")
             .setOnOkListener { error.dismiss() }
-            .show(Utils.appActivity.supportFragmentManager, "OnboardingSaveError")
+            .show(fragments, "OnboardingSaveError")
     }
 
     private fun renderError(error: Throwable) {
@@ -773,7 +779,7 @@ internal class OnboardingScreen(
                 .setOnOkListener {
                     confirm.dismiss()
                     dismiss()
-                }.show(Utils.appActivity.supportFragmentManager, "OnboardingDiscard")
+                }.show(fragments, "OnboardingDiscard")
         } else dismiss()
     }
 
