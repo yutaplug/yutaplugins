@@ -1,8 +1,14 @@
-version = "1.0.7"
+version = "1.0.8"
 description = "Backport super reactions."
 aliucord {
     changelog.set(
         """
+        # 1.0.8
+        * Replace the context menu button with a Super Reaction toggle next to the emoji picker search bar
+        * Read super reactions from messages Discord already loads, so far fewer requests are made
+        * Style super reaction pills like Discord, with a flat emoji-colored tint
+        * Show separate super reaction tabs in the reactions sheet
+        * Fix normal reaction counts sometimes keeping a super reaction's color
         # 1.0.6
         * Fully rewrite the plugin in Kotlin
         * Improve emoji-colored shine, selection, and pending feedback

@@ -1,28 +1,28 @@
 package com.github.yutaplug.superreactions
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.core.widget.TextViewCompat
+import androidx.core.content.ContextCompat
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.aliucord.utils.GsonUtils
-import com.aliucord.utils.GsonUtils.fromJson
 import com.aliucord.utils.GsonUtils.toJson
 import com.discord.api.message.reaction.MessageReaction
 import com.discord.api.message.reaction.MessageReactionEmoji
@@ -30,108 +30,132 @@ import com.discord.api.message.reaction.MessageReactionUpdate
 import com.discord.api.premium.PremiumTier
 import com.discord.models.deserialization.gson.InboundGatewayGsonParser
 import com.discord.models.domain.emoji.Emoji
+import com.discord.models.domain.emoji.ModelEmojiCustom
 import com.discord.models.user.CoreUser
 import com.discord.models.user.User
+import com.discord.restapi.BreadcrumbInterceptor
 import com.discord.stores.StoreMessageReactions
 import com.discord.stores.StoreMessages
 import com.discord.stores.StoreStream
 import com.discord.utilities.mg_recycler.MGRecyclerDataPayload
 import com.discord.utilities.user.UserUtils
 import com.discord.views.ReactionView
-import com.discord.widgets.chat.input.emoji.EmojiPickerContextType
-import com.discord.widgets.chat.input.emoji.EmojiPickerListener
-import com.discord.widgets.chat.input.emoji.EmojiPickerNavigator
+import com.discord.widgets.chat.input.emoji.WidgetEmojiPicker
+import com.discord.widgets.chat.input.emoji.WidgetEmojiPickerSheet
 import com.discord.widgets.chat.list.actions.WidgetChatListActions
-import com.discord.widgets.chat.list.WidgetChatList
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterEventsHandler
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemReactions
 import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.ReactionsEntry
-import com.discord.widgets.chat.list.model.WidgetChatListModel
 import com.discord.widgets.chat.managereactions.ManageReactionsEmojisAdapter
 import com.discord.widgets.chat.managereactions.ManageReactionsModel
 import com.discord.widgets.chat.managereactions.ManageReactionsResultsAdapter
 import com.discord.widgets.chat.managereactions.WidgetManageReactions
 import com.google.gson.stream.JsonReader
+import okhttp3.Interceptor
+import okhttp3.Response
+import org.json.JSONArray
 import java.io.StringReader
 import java.lang.ref.WeakReference
-import java.util.IdentityHashMap
+import java.nio.charset.StandardCharsets
 import java.util.WeakHashMap
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.roundToInt
+import java.util.regex.Pattern
 
 @AliucordPlugin
 @Suppress("unused")
 class SuperReactions : Plugin() {
-    private val superReactionButtons = WeakHashMap<WidgetChatListActions, TextView>()
-    private val visibleReactionItems = WeakHashMap<WidgetChatListAdapterItemReactions, Long>()
-    private val visibleReactionEntries = WeakHashMap<WidgetChatListAdapterItemReactions, ReactionsEntry>()
-    private val visibleReactionPositions = WeakHashMap<WidgetChatListAdapterItemReactions, Int>()
-    private val reactionStyles = WeakHashMap<ReactionView, ReactionStyle>()
-    private val reactionBindings = WeakHashMap<ReactionView, ReactionBinding>()
-    private val activeManageReactions = WeakHashMap<WidgetManageReactions, ManageReactionTarget>()
-    private val activeManageEmojiAdapters =
-        WeakHashMap<ManageReactionsEmojisAdapter, WeakReference<WidgetManageReactions>>()
-    private val manageReactionWidgetTypes = WeakHashMap<WidgetManageReactions, Boolean>()
-    private val reactionChannels = ConcurrentHashMap<Long, Long>()
-    private val superReactionCounts = ConcurrentHashMap<Long, MutableMap<String, Int>>()
-    private val normalReactionCounts = ConcurrentHashMap<Long, MutableMap<String, Int>>()
-    private val superReactionColors = ConcurrentHashMap<Long, MutableMap<String, Int>>()
-    private val expandedReactionTypes = ConcurrentHashMap<Long, IdentityHashMap<MessageReaction, Boolean>>()
-    private val manageReactionTypes = ConcurrentHashMap<String, Boolean>()
-    private val manageReactionItemTypes = WeakIdentityMap<ManageReactionsEmojisAdapter.ReactionEmojiItem, Boolean>()
-    private val gatewayReactionTypes = WeakIdentityMap<MessageReactionUpdate, Boolean>()
-    private val superReactionFetchTimes = ConcurrentHashMap<Long, Long>()
-    private val superReactionFetches = ConcurrentHashMap.newKeySet<Long>()
-    private val channelBatchFetches = ConcurrentHashMap.newKeySet<Long>()
-    private val batchPendingMessages = ConcurrentHashMap.newKeySet<Long>()
-    private val superReactionInvalidationVersions = ConcurrentHashMap<Long, Long>()
-    private val localMutationVersions = ConcurrentHashMap<Long, Long>()
-    private val metadataAttempts = ConcurrentHashMap<Long, Long>()
-    private val metadataRefreshes = mutableMapOf<Long, Runnable>()
-    private val metadataWaiters = mutableMapOf<Long, MutableList<(Boolean) -> Unit>>()
-    private val pendingReactionActions = ConcurrentHashMap.newKeySet<String>()
-    private val locallySentSuperReactions = ConcurrentHashMap.newKeySet<String>()
-    private val ownedSuperReactions = ConcurrentHashMap.newKeySet<String>()
-    private val pendingSuperReactionRemovals = ConcurrentHashMap.newKeySet<String>()
-    private val completedSuperReactionRemovals = ConcurrentHashMap.newKeySet<String>()
-    private val completedRemovalTokens = ConcurrentHashMap<String, Any>()
-    private val burstReactionUsers = ConcurrentHashMap<String, List<User>>()
-    private val normalReactionItems = ConcurrentHashMap<String, List<MGRecyclerDataPayload>>()
-    private val burstUserFetches = ConcurrentHashMap.newKeySet<String>()
+    private val store = BurstStore()
+    private var api: BurstApi? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val nativeReactionUpdateMethod by lazy {
-        WidgetChatListAdapterEventsHandler.UserReactionHandler::class.java.getDeclaredMethod(
-            "requestReactionUpdate",
-            WidgetChatListAdapterEventsHandler.UserReactionHandler.UpdateRequest::class.java,
-        ).apply { isAccessible = true }
-    }
-    private var requests: DiscordRequestQueue? = null
-    private var ownedReactionPreferences: SharedPreferences? = null
-    private var ownedReactionPreferencesKey: String? = null
 
-    @Volatile private var running = false
+    /** Burst pills this plugin created; normal and burst models can be value-equal. */
+    private val burstPills = WeakIdentityMap<MessageReaction, Boolean>()
+    private val gatewayEvents = WeakIdentityMap<MessageReactionUpdate, GatewayBurst>()
+
+    // Main-thread state.
+    private val rows = WeakHashMap<WidgetChatListAdapterItemReactions, Row>()
+    private val nativeBackgrounds = WeakHashMap<ReactionView, Drawable?>()
+    private val pillBackgrounds = WeakHashMap<ReactionView, GradientDrawable>()
+    private val nativeCounterColors = WeakHashMap<ReactionView, Pair<ColorStateList?, ColorStateList?>>()
+    private val snapshotQueue = HashMap<Long, MutableSet<Long>>()
+    private val snapshotAttempts = HashMap<Long, Int>()
+    private val inFlight = HashSet<String>()
+    private var superMode = false
+    private var pickerButton: WeakReference<ImageView>? = null
+
+    // Reactions sheet (long-press on a pill).
+    private val manageStates = WeakHashMap<WidgetManageReactions, ManageState>()
+    private val manageAdapters = WeakHashMap<ManageReactionsEmojisAdapter, WeakReference<WidgetManageReactions>>()
+    private val burstTabs = WeakIdentityMap<ManageReactionsEmojisAdapter.ReactionEmojiItem, Boolean>()
+    private val burstUsers = HashMap<String, List<User>>()
+    private val burstUserFetches = HashSet<String>()
+    private var pendingManageBurst: Pair<Long, String>? = null
+
+    /** Local add/remove requests, so the gateway echo isn't applied twice. Guarded by itself. */
+    private val ops = HashMap<String, Op>()
+
+    private class Row(val position: Int, val entry: ReactionsEntry)
+    private class GatewayBurst(val burst: Boolean, val color: Int?)
+    private enum class Op { SENT, ECHOED, APPLIED }
+
+    private class ManageState(val channelId: Long, val messageId: Long) {
+        /** The emoji whose super reaction tab is selected, or null for its normal tab. */
+        var burstKey: String? = null
+        var awaiting: String? = null
+        var model: ManageReactionsModel? = null
+    }
 
     override fun start(context: Context) {
-        requests = DiscordRequestQueue()
-        running = true
-        ownedSuperReactions.clear()
-        val userId = getCurrentUserId()
-        val preferences = context.getSharedPreferences("SuperReactions", Context.MODE_PRIVATE)
-        val preferencesKey = OWNED_REACTIONS_PREFERENCES + if (userId == 0L) "unknown" else userId.toString()
-        ownedReactionPreferences = preferences
-        ownedReactionPreferencesKey = preferencesKey
-        preferences.getStringSet(preferencesKey, null)?.let { ownedSuperReactions.addAll(it) }
+        api = BurstApi()
+        patchRestCapture()
         patchGateway()
-        patchMessageActions()
-        patchChatList()
-        patchReactionViews()
-        patchReactionToggles()
+        patchReactionRows()
+        patchReactionActions()
+        patchEmojiPicker()
         patchManageReactions()
     }
 
+    // region Data: REST payloads and gateway events
+
+    /**
+     * Discord already loads message history over REST, and those payloads carry
+     * count_details, me_burst and burst_colors that its models discard. Reading
+     * them from the response (without consuming it) needs no extra requests.
+     */
+    private fun patchRestCapture() {
+        patcher.patch(
+            BreadcrumbInterceptor::class.java,
+            "intercept",
+            arrayOf(Interceptor.Chain::class.java),
+            Hook { frame ->
+                val response = frame.result as? Response ?: return@Hook
+                try {
+                    captureMessages(response)
+                } catch (error: Throwable) {
+                    logger.error("Could not read reaction details", error)
+                }
+            },
+        )
+    }
+
+    private fun captureMessages(response: Response) {
+        if (response.m != 200 || response.j.c != "GET") return
+        val path = Uri.parse(response.j.b.toString()).path ?: return
+        if (!MESSAGES_PATH.matcher(path).matches()) return
+        val source = response.p?.c() ?: return
+        // okio: request(Long.MAX_VALUE) buffers the whole body; reading a clone of
+        // the buffer leaves it intact for Discord's own parser.
+        source.j(Long.MAX_VALUE)
+        val buffer = source.g()
+        val copy = BUFFER_CLONE.invoke(buffer) as g0.e
+        val body = copy.M(StandardCharsets.UTF_8)
+        // Parse even lists without reactions: it marks those messages as known.
+        val changed = store.ingestMessages(JSONArray(body))
+        if (changed.isNotEmpty()) mainHandler.post { refreshRows(changed) }
+    }
+
     private fun patchGateway() {
-        // Preserve the burst flag before the legacy model discards it, using Discord's adapter for its other fields.
+        // The legacy MessageReactionUpdate model drops `burst` and `burst_colors`; keep them.
         patcher.patch(
             InboundGatewayGsonParser::class.java,
             "fromJson",
@@ -139,25 +163,27 @@ class SuperReactions : Plugin() {
             PreHook { frame ->
                 if (frame.args[1] != MessageReactionUpdate::class.java) return@PreHook
                 val raw = GsonUtils.gson.d<Map<*, *>>(frame.args[0] as JsonReader, Map::class.java)
-                val update = InboundGatewayGsonParser.INSTANCE.getGatewayGsonInstance().d<MessageReactionUpdate>(
-                    JsonReader(StringReader(GsonUtils.gson.toJson(raw))),
-                    MessageReactionUpdate::class.java,
-                )
-                if (raw != null &&
-                    update != null
-                ) {
-                    ReactionMetadata.eventType(raw)?.let { gatewayReactionTypes.put(update, it) }
+                val update = raw?.let {
+                    InboundGatewayGsonParser.INSTANCE.getGatewayGsonInstance().d<MessageReactionUpdate>(
+                        JsonReader(StringReader(GsonUtils.gson.toJson(it))),
+                        MessageReactionUpdate::class.java,
+                    )
+                }
+                if (raw != null && update != null) {
+                    val burst = (raw["burst"] as? Boolean) ?: ((raw["type"] as? Number)?.toInt() == 1)
+                    gatewayEvents.put(update, GatewayBurst(burst, BurstStore.pickColor(raw["burst_colors"] as? List<*>)))
                 }
                 frame.result = update
             },
         )
+        // Burst users don't belong in Discord's normal reaction user lists.
         for (method in listOf("handleReactionAdd", "handleReactionRemove")) {
             patcher.patch(
                 StoreMessageReactions::class.java,
                 method,
                 arrayOf(MessageReactionUpdate::class.java),
                 PreHook { frame ->
-                    if (gatewayReactionTypes[frame.args[0] as MessageReactionUpdate] == true) frame.result = null
+                    if (gatewayEvents[frame.args[0] as MessageReactionUpdate]?.burst == true) frame.result = null
                 },
             )
         }
@@ -165,141 +191,83 @@ class SuperReactions : Plugin() {
             StoreMessages::class.java,
             "handleReactionUpdate",
             arrayOf(List::class.java, BOOLEAN),
-            PreHook { frame ->
-                val updates = frame.args[0] as? List<*> ?: return@PreHook
-                val userId = getCurrentUserId()
-                if (userId == 0L) return@PreHook
-                val isAdd = frame.args[1] == true
-                var changed = false
-                val rewritten = mutableListOf<Any?>()
-                for (raw in updates) {
-                    val update = raw as? MessageReactionUpdate
-                    val key = update?.b()?.c()
-                    if (update == null || key == null || update.d() != userId) {
-                        rewritten.add(raw)
-                        continue
-                    }
-                    val burst = gatewayReactionTypes[update]
-                    if (burst == false || (isAdd && burst != true)) {
-                        rewritten.add(raw)
-                        continue
-                    }
-                    if (isAdd) {
-                        markOwnedSuperReaction(update.c(), key)
-                    } else {
-                        if (isCompletedSuperReactionRemoval(update.c(), key)) {
-                            changed = true
-                            continue
+            PreHook { frame -> frame.args[0] = applyBurstUpdates(frame.args[0] as? List<*>, frame.args[1] == true) },
+        )
+        patcher.patch(
+            StoreMessages::class.java,
+            "handleReactionsRemoveAll",
+            arrayOf(MessageReactionUpdate::class.java),
+            Hook { frame -> store.clear((frame.args[0] as MessageReactionUpdate).c()) },
+        )
+        patcher.patch(
+            StoreMessages::class.java,
+            "handleReactionsRemoveEmoji",
+            arrayOf(MessageReactionUpdate::class.java),
+            Hook { frame ->
+                val update = frame.args[0] as MessageReactionUpdate
+                store.clearEmoji(update.c(), update.b()?.c())
+            },
+        )
+    }
+
+    /**
+     * Records burst events and lets Discord count them in the reaction's total.
+     * Our own burst events get another user id so Discord doesn't mark the normal
+     * reaction as ours, and echoes of a change already applied locally are dropped.
+     */
+    private fun applyBurstUpdates(updates: List<*>?, add: Boolean): List<*>? {
+        updates ?: return null
+        val me = currentUserId()
+        var changed = false
+        val result = ArrayList<Any?>(updates.size)
+        for (raw in updates) {
+            val update = raw as? MessageReactionUpdate
+            val event = update?.let { gatewayEvents[it] }
+            if (update == null || event?.burst != true) {
+                result.add(raw)
+                continue
+            }
+            val key = update.b()?.c()
+            val mine = me != 0L && update.d() == me
+            if (mine) {
+                val opKey = opKey(update.c(), key, add)
+                val alreadyApplied = synchronized(ops) {
+                    when (ops[opKey]) {
+                        Op.APPLIED -> {
+                            ops.remove(opKey)
+                            true
                         }
-                        if (burst != true && !isPendingSuperReactionRemoval(update.c(), key)) {
-                            rewritten.add(raw)
-                            continue
+                        Op.SENT -> {
+                            ops[opKey] = Op.ECHOED
+                            false
                         }
-                        completeSuperReactionRemoval(update.c(), key)
-                        removeLocalSuperReaction(update.c(), key)
+                        else -> false
                     }
-                    localMutationVersions.merge(update.c(), 1L, Long::plus)
-                    // A non-self update changes the aggregate without changing the legacy normal `me` bit.
-                    rewritten.add(
-                        MessageReactionUpdate(
-                            if (userId ==
-                                1L
-                            ) {
-                                2L
-                            } else {
-                                1L
-                            },
-                            update.a(),
-                            update.c(),
-                            update.b(),
-                        ),
-                    )
+                }
+                if (alreadyApplied) {
+                    // Applied locally without colors; the echo carries them.
+                    store.recolor(update.c(), key, event.color)
                     changed = true
+                    continue
                 }
-                if (changed) frame.args[0] = rewritten
-            },
-        )
-        patcher.patch(
-            StoreMessages::class.java,
-            "handleReactionUpdate",
-            arrayOf(List::class.java, BOOLEAN),
-            Hook { frame ->
-                (frame.args[0] as? List<*>)?.filterIsInstance<MessageReactionUpdate>()?.forEach {
-                    val key = it.b()?.c()
-                    if (gatewayReactionTypes[it] == true || isSuperReaction(it.c(), key) ||
-                        isOwnSuperReaction(it.c(), key)
-                    ) invalidateSuperReactionCache(it.c(), it.a())
-                }
-            },
-        )
-        for (method in listOf("handleReactionsRemoveAll", "handleReactionsRemoveEmoji")) {
-            patcher.patch(
-                StoreMessages::class.java,
-                method,
-                arrayOf(MessageReactionUpdate::class.java),
-                Hook { frame ->
-                    val update = frame.args[0] as MessageReactionUpdate
-                    invalidateSuperReactionCache(update.c(), update.a())
-                },
-            )
+            }
+            store.apply(update.c(), key, add, mine, event.color)
+            invalidateBurstUsers(update.c())
+            if (mine) {
+                result.add(MessageReactionUpdate(otherUserId(me), update.a(), update.c(), update.b()))
+                changed = true
+            } else {
+                result.add(raw)
+            }
         }
+        return if (changed) result else updates
     }
 
-    private fun patchMessageActions() {
-        patcher.patch(
-            WidgetChatListActions::class.java,
-            "onViewCreated",
-            arrayOf(View::class.java, Bundle::class.java),
-            Hook { frame ->
-                addSuperReactionButton(frame.thisObject as WidgetChatListActions, frame.args[0] as View)
-            },
-        )
-        patcher.patch(
-            WidgetChatListActions::class.java,
-            "configureUI",
-            arrayOf(WidgetChatListActions.Model::class.java),
-            Hook { frame ->
-                val button = superReactionButtons[frame.thisObject as WidgetChatListActions] ?: return@Hook
-                val model = frame.args[0] as? WidgetChatListActions.Model ?: return@Hook
-                button.visibility =
-                    if (model.manageMessageContext.canAddReactions &&
-                        !model.message.isLocal &&
-                        hasNitro()
-                    ) {
-                        View.VISIBLE
-                    } else {
-                        View.GONE
-                    }
-            },
-        )
-    }
+    // endregion
 
-    private fun patchChatList() {
-        // A channel model contains its initially loaded messages before every individual
-        // reaction row is bound. Warm those snapshots here so normal reaction toggles do
-        // not need to stop and classify the pill after it becomes visible.
-        patcher.patch(
-            WidgetChatList::class.java,
-            "configureUI",
-            arrayOf(WidgetChatListModel::class.java),
-            PreHook { frame ->
-                val model = frame.args[0] as? WidgetChatListModel ?: return@PreHook
-                val channelId = model.channelId
-                if (channelId == 0L) return@PreHook
-                prefetchChannelSuperReactionMetadata(channelId, model.list.filterIsInstance<ReactionsEntry>())
-            },
-        )
-    }
+    // region Reaction pills
 
-    private fun patchReactionViews() {
-        patcher.patch(
-            WidgetChatListAdapterItemReactions::class.java,
-            "displayReactions",
-            arrayOf(Collection::class.java, LONG, BOOLEAN, BOOLEAN, BOOLEAN),
-            PreHook { frame ->
-                frame.args[0] = expandReactions(frame.args[0] as? Collection<*>, frame.args[1] as Long)
-            },
-        )
+    private fun patchReactionRows() {
         patcher.patch(
             WidgetChatListAdapterItemReactions::class.java,
             "onConfigure",
@@ -307,17 +275,23 @@ class SuperReactions : Plugin() {
             Hook { frame ->
                 val item = frame.thisObject as WidgetChatListAdapterItemReactions
                 val entry = frame.args[1] as? ReactionsEntry ?: return@Hook
-                val message = entry.message ?: return@Hook
-                synchronized(visibleReactionItems) {
-                    visibleReactionItems[item] = message.id
-                    visibleReactionEntries[item] = entry
-                    visibleReactionPositions[item] = frame.args[0] as Int
+                rows[item] = Row(frame.args[0] as Int, entry)
+                val message = entry.message
+                if (!store.hasSnapshot(message.id) && message.reactionsMap.isNotEmpty()) {
+                    requestSnapshot(message.channelId, message.id)
                 }
-                reactionChannels[message.id] = message.channelId
-                applySuperReactionStyles(item, message.id)
-                if (message.id !in batchPendingMessages) {
-                    fetchSuperReactionMetadata(message.channelId, message.id)
-                }
+            },
+        )
+        // Split each reaction into a super pill (first) and a normal pill, like Discord does.
+        patcher.patch(
+            WidgetChatListAdapterItemReactions::class.java,
+            "displayReactions",
+            arrayOf(Collection::class.java, LONG, BOOLEAN, BOOLEAN, BOOLEAN),
+            PreHook { frame ->
+                val messageId = frame.args[1] as Long
+                if (!store.hasAny(messageId)) return@PreHook
+                val reactions = frame.args[0] as? Collection<*> ?: return@PreHook
+                frame.args[0] = splitReactions(reactions, messageId)
             },
         )
         patcher.patch(
@@ -325,1073 +299,79 @@ class SuperReactions : Plugin() {
             "a",
             arrayOf(MessageReaction::class.java, LONG, BOOLEAN),
             Hook { frame ->
-                val reaction = frame.args[0] as? MessageReaction ?: return@Hook
-                val key = reaction.b()?.c() ?: return@Hook
-                val messageId = frame.args[1] as Long
-                val count = getSuperReactionCount(messageId, key)
-                val type = getExpandedReactionType(messageId, reaction)
-                val isSuper = type ?: ((count ?: 0) > 0)
                 val view = frame.thisObject as ReactionView
-                val style = reactionStyles.getOrPut(view) { ReactionStyle(view) }
-                reactionBindings[view] = ReactionBinding(messageId, reaction, type)
-                setReactionMeState(view, messageId, reaction, isSuper)
-                styleReactionView(view, messageId, key, isSuper, count)
-            },
-        )
-    }
-
-    private fun patchReactionToggles() {
-        patcher.patch(
-            WidgetChatListAdapterEventsHandler.UserReactionHandler::class.java,
-            "toggleReaction",
-            arrayOf(LONG, LONG, LONG, MessageReaction::class.java),
-            PreHook { frame ->
-                val reaction = frame.args[3] as? MessageReaction ?: return@PreHook
-                val emoji = reaction.b() ?: return@PreHook
-                val key = emoji.c()
-                val channelId = frame.args[1] as Long
-                val messageId = frame.args[2] as Long
-                if (actionKey(messageId, key) in pendingReactionActions ||
-                    isPendingSuperReactionRemoval(messageId, key)
-                ) {
-                    frame.result = null
-                    return@PreHook
-                }
-                val type = getExpandedReactionType(messageId, reaction)
-                val isSuper = type ?: isSuperReaction(messageId, key)
-                if (type == false || (type == null && !isSuper)) {
-                    // Discord's toggleReaction queues taps behind a 250 ms throttle.
-                    // Its own update method still performs the optimistic store update,
-                    // REST request, and rollback, but starts immediately.
-                    clearCompletedSuperReactionRemoval(messageId, key)
-                    if (requestNormalReactionImmediately(
-                            frame.thisObject as WidgetChatListAdapterEventsHandler.UserReactionHandler,
-                            frame.args[0] as Long,
-                            channelId,
-                            messageId,
-                            reaction,
-                        )
-                    ) frame.result = null
-                } else if (!isMetadataCurrent(messageId)) {
-                    frame.result = null
-                    resolveReactionAndToggle(channelId, messageId, reaction, type)
-                } else if (isSuper) {
-                    frame.result = null
-                    if (isOwnSuperReaction(messageId, key)) {
-                        removeSuperReaction(channelId, messageId, emoji)
-                    } else {
-                        sendSuperReaction(channelId, messageId, emoji)
-                    }
+                val reaction = frame.args[0] as MessageReaction
+                if (burstPills[reaction] == true) {
+                    styleBurstPill(view, store.get(frame.args[1] as Long, reaction.b()?.c()))
                 } else {
-                    clearCompletedSuperReactionRemoval(messageId, key)
-                }
-            },
-        )
-        patcher.patch(
-            StoreMessageReactions::class.java,
-            "deleteEmoji",
-            arrayOf(LONG, LONG, MessageReactionEmoji::class.java, LONG),
-            PreHook { frame ->
-                val channelId = frame.args[0] as Long
-                val messageId = frame.args[1] as Long
-                val emoji = frame.args[2] as? MessageReactionEmoji ?: return@PreHook
-                val key = emoji.c()
-                val type =
-                    manageReactionTypes[manageReactionKey(channelId, messageId, key)] ?: isSuperReaction(messageId, key)
-                if (type && frame.args[3] == getCurrentUserId() && isOwnSuperReaction(messageId, key)) {
-                    frame.result = null
-                    removeSuperReaction(channelId, messageId, emoji)
+                    restorePill(view)
                 }
             },
         )
     }
 
-    private fun requestNormalReactionImmediately(
-        handler: WidgetChatListAdapterEventsHandler.UserReactionHandler,
-        userId: Long,
-        channelId: Long,
-        messageId: Long,
-        reaction: MessageReaction,
-    ): Boolean = try {
-        nativeReactionUpdateMethod.invoke(
-            handler,
-            WidgetChatListAdapterEventsHandler.UserReactionHandler.UpdateRequest(
-                userId, channelId, messageId, reaction,
-            ),
-        )
-        true
-    } catch (error: Throwable) {
-        logger.error("Could not start normal reaction immediately", error)
-        false
-    }
-
-    private fun patchManageReactions() {
-        patcher.patch(
-            WidgetManageReactions.Companion::class.java,
-            "create",
-            arrayOf(LONG, LONG, Context::class.java, MessageReaction::class.java),
-            Hook { frame ->
-                val reaction = frame.args[3] as? MessageReaction ?: return@Hook
-                val key = reaction.b()?.c() ?: return@Hook
-                val messageId = frame.args[1] as Long
-                getExpandedReactionType(messageId, reaction)?.let {
-                    manageReactionTypes[manageReactionKey(frame.args[0] as Long, messageId, key)] = it
-                }
-            },
-        )
-        patcher.patch(
-            ManageReactionsEmojisAdapter.ReactionEmojiItem::class.java,
-            "getKey",
-            emptyArray(),
-            Hook { frame ->
-                val item = frame.thisObject as ManageReactionsEmojisAdapter.ReactionEmojiItem
-                val type = getManageReactionItemType(item) ?: return@Hook
-                val key = item.reaction.b()?.c() ?: return@Hook
-                frame.result = key + if (type) ":super" else ":normal"
-            },
-        )
-        patcher.patch(
-            ManageReactionsEmojisAdapter.ReactionEmojiViewHolder::class.java,
-            "onConfigure",
-            arrayOf(INT, ManageReactionsEmojisAdapter.ReactionEmojiItem::class.java),
-            Hook { frame ->
-                val holder = frame.thisObject as ManageReactionsEmojisAdapter.ReactionEmojiViewHolder
-                val item = frame.args[1] as? ManageReactionsEmojisAdapter.ReactionEmojiItem ?: return@Hook
-                val type = getManageReactionItemType(item) ?: return@Hook
-                val emoji = item.reaction.b() ?: return@Hook
-                val adapter = holder.adapter
-                val widget = getManageReactionWidget(adapter) ?: return@Hook
-                val listener = adapter.onEmojiSelectedListener ?: return@Hook
-                val intent = widget.mostRecentIntent
-                val channelId = intent.getLongExtra(EXTRA_CHANNEL_ID, 0L)
-                val messageId = intent.getLongExtra(EXTRA_MESSAGE_ID, 0L)
-                val key = emoji.c()
-                holder.itemView.setOnClickListener {
-                    synchronized(manageReactionWidgetTypes) { manageReactionWidgetTypes[widget] = type }
-                    manageReactionTypes[manageReactionKey(channelId, messageId, key)] = type
-                    selectManageReaction(widget, channelId, messageId, emoji, type)
-                    listener(key)
-                }
-            },
-        )
-        patcher.patch(
-            WidgetManageReactions::class.java,
-            "onViewBound",
-            arrayOf(View::class.java),
-            Hook { frame ->
-                registerManageReactionAdapter(frame.thisObject as WidgetManageReactions)
-            },
-        )
-        patcher.patch(
-            WidgetManageReactions::class.java,
-            "configureUI",
-            arrayOf(ManageReactionsModel::class.java),
-            PreHook { frame ->
-                val widget = frame.thisObject as WidgetManageReactions
-                val model = frame.args[0] as? ManageReactionsModel
-                registerManageReactions(widget, model)
-                if (model == null) return@PreHook
-                val target = getManageReactionTarget(widget) ?: return@PreHook
-                val reactions = expandManageReactionItems(model.reactionItems, target)
-                normalReactionItems[normalCacheKey(target)] = model.userItems.toList()
-                val users = if (target.superReaction) {
-                    burstReactionUsers[target.cacheKey()]?.let { createManageReactionItems(target, it) }
-                        ?: emptyList()
-                } else {
-                    model.userItems
-                }
-                frame.args[0] = ManageReactionsModel(reactions, users)
-            },
-        )
-    }
-
-    private fun addSuperReactionButton(actions: WidgetChatListActions, root: View) {
-        if (actions in superReactionButtons) return
-        val container = root.findViewById<View>(Utils.getResId(ACTIONS_CONTAINER_ID, "id")) as? LinearLayout ?: return
-        root.findViewById<View>(Utils.getResId(ADD_REACTION_LIST_ID, "id")) ?: return
-        val template = root.findViewById<View>(Utils.getResId(MANAGE_REACTIONS_ID, "id")) as? TextView ?: return
-        val button = TextView(root.context).apply {
-            text = "Super React"
-            gravity = Gravity.CENTER_VERTICAL
-            setTextColor(template.textColors)
-            setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, template.textSize)
-            typeface = template.typeface
-            includeFontPadding = template.includeFontPadding
-            compoundDrawablePadding = template.compoundDrawablePadding
-            setPadding(template.paddingLeft, template.paddingTop, template.paddingRight, template.paddingBottom)
-            cloneDrawable(template.compoundDrawablesRelative[0])?.let {
-                setCompoundDrawablesRelativeWithIntrinsicBounds(it, null, null, null)
-                TextViewCompat.setCompoundDrawableTintList(this, TextViewCompat.getCompoundDrawableTintList(template))
+    private fun splitReactions(reactions: Collection<*>, messageId: Long): List<MessageReaction> {
+        val result = ArrayList<MessageReaction>(reactions.size + 4)
+        for (raw in reactions) {
+            val reaction = raw as? MessageReaction ?: continue
+            val burst = store.get(messageId, reaction.b()?.c())
+            if (burst == null || burst.count <= 0) {
+                result.add(reaction)
+                continue
             }
-            cloneDrawable(template.background)?.let { background = it }
-            contentDescription = "Super React"
-            visibility = View.GONE
-        }
-        val reference = WeakReference(actions)
-        button.setOnClickListener { reference.get()?.let(::openSuperReactionPicker) }
-        val params = template.layoutParams?.let { LinearLayout.LayoutParams(it) }
-            ?: LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        container.addView(button, params)
-        superReactionButtons[actions] = button
-    }
-
-    private fun cloneDrawable(drawable: Drawable?): Drawable? =
-        drawable?.let { (it.constantState?.newDrawable() ?: it).mutate() }
-
-    private fun request(
-        route: String,
-        method: String,
-        priority: Int,
-        success: (DiscordRequestQueue.Response) -> Unit,
-        failure: (Throwable) -> Unit,
-    ) {
-        val queue = requests ?: return
-        if (!running) return
-        queue.enqueue(route, method, priority, { response ->
-            mainHandler.post {
-                if (running && requests === queue) success(response)
-            }
-        }, { error ->
-            mainHandler.post {
-                if (running && requests === queue) failure(error)
-            }
-        })
-    }
-
-    private fun httpError(response: DiscordRequestQueue.Response) = IllegalStateException("HTTP ${response.status}")
-
-    private fun showRequestError(action: String, error: Throwable) {
-        logger.error("Could not $action", error)
-        Utils.showToast(
-            if (error.message?.contains("rate limited") == true) {
-                "Discord is rate limited. Please try again shortly."
-            } else {
-                "Could not $action"
-            },
-        )
-    }
-
-    private fun actionKey(messageId: Long, key: String?) =
-        localReactionKey(messageId, normalizeReactionKey(displayReactionKey(key)))
-
-    private fun beginReactionAction(messageId: Long, key: String?): Boolean {
-        if (!running || key == null || isPendingSuperReactionRemoval(messageId, key)) return false
-        if (!pendingReactionActions.add(actionKey(messageId, key))) return false
-        superReactionInvalidationVersions.merge(messageId, 1L, Long::plus)
-        applyVisibleReactionStyles(messageId)
-        return true
-    }
-
-    private fun finishReactionAction(messageId: Long, key: String?) {
-        pendingReactionActions.remove(actionKey(messageId, key))
-        applyVisibleReactionStyles(messageId)
-    }
-
-    private fun hasNitro(): Boolean = try {
-        UserUtils.INSTANCE.isPremium(StoreStream.getUsers().me)
-    } catch (_: Throwable) {
-        false
-    }
-
-    private fun registerManageReactions(widget: WidgetManageReactions, model: ManageReactionsModel?) {
-        if (model == null) {
-            synchronized(activeManageReactions) { activeManageReactions.remove(widget) }
-            return
-        }
-        val intent = widget.mostRecentIntent
-        val channelId = intent.getLongExtra(EXTRA_CHANNEL_ID, 0L)
-        val messageId = intent.getLongExtra(EXTRA_MESSAGE_ID, 0L)
-        if (channelId == 0L || messageId == 0L) return
-        registerManageReactionAdapter(widget)
-        val selected = model.reactionItems.firstOrNull { it.isSelected && it.reaction.b() != null }
-        var emoji = selected?.reaction?.b()
-        var key = emoji?.c()
-        var type = selected?.let(::getManageReactionItemType)
-        if (key == null) {
-            key = intent.getStringExtra(MANAGE_REACTIONS_EMOJI_ARGUMENT)
-            emoji = model.reactionItems.firstOrNull { key != null && it.reaction.b()?.c() == key }?.reaction?.b()
-        }
-        if (emoji == null || key == null) return
-        if (type == null) type = synchronized(manageReactionWidgetTypes) { manageReactionWidgetTypes[widget] }
-        if (type == null) type = manageReactionTypes[manageReactionKey(channelId, messageId, key)]
-        val target = ManageReactionTarget(channelId, messageId, key, emoji, type ?: isSuperReaction(messageId, key))
-        synchronized(activeManageReactions) { activeManageReactions[widget] = target }
-        if (target.superReaction) fetchBurstReactionUsers(target)
-        fetchSuperReactionMetadata(channelId, messageId)
-    }
-
-    private fun normalCacheKey(target: ManageReactionTarget) = "${target.messageId}:${target.reactionKey}:normal"
-
-    private fun manageReactionKey(channelId: Long, messageId: Long, key: String?) = "$channelId:$messageId:$key"
-
-    private fun selectManageReaction(
-        widget: WidgetManageReactions,
-        channelId: Long,
-        messageId: Long,
-        emoji: MessageReactionEmoji,
-        isSuper: Boolean,
-    ) {
-        val key = emoji.c()
-        manageReactionTypes[manageReactionKey(channelId, messageId, key)] = isSuper
-        synchronized(manageReactionWidgetTypes) { manageReactionWidgetTypes[widget] = isSuper }
-        val target = ManageReactionTarget(channelId, messageId, key, emoji, isSuper)
-        synchronized(activeManageReactions) { activeManageReactions[widget] = target }
-        refreshManageReactionTabs(widget, target)
-        if (isSuper) {
-            setManageReactionResults(widget, emptyList())
-            fetchBurstReactionUsers(target)
-        } else {
-            setManageReactionResults(widget, normalReactionItems[normalCacheKey(target)]?.toList() ?: emptyList())
-        }
-    }
-
-    private fun getWidgetAdapter(widget: WidgetManageReactions, field: String): Any? =
-        WidgetManageReactions::class.java.getDeclaredField(field).apply { isAccessible = true }.get(widget)
-
-    private fun registerManageReactionAdapter(widget: WidgetManageReactions) {
-        try {
-            val adapter = getWidgetAdapter(widget, "emojisAdapter") as? ManageReactionsEmojisAdapter ?: return
-            synchronized(activeManageEmojiAdapters) { activeManageEmojiAdapters[adapter] = WeakReference(widget) }
-        } catch (_: Throwable) {
-            // Keep this hook optional for older client variants.
-        }
-    }
-
-    private fun getManageReactionWidget(adapter: ManageReactionsEmojisAdapter): WidgetManageReactions? {
-        synchronized(activeManageEmojiAdapters) { activeManageEmojiAdapters[adapter]?.get()?.let { return it } }
-        synchronized(activeManageReactions) {
-            for (widget in activeManageReactions.keys) {
-                try {
-                    if (getWidgetAdapter(widget, "emojisAdapter") === adapter) return widget
-                } catch (
-                    _: Throwable,
-                ) {
-                    return null
-                }
-            }
-        }
-        return null
-    }
-
-    private fun getManageReactionItemType(item: ManageReactionsEmojisAdapter.ReactionEmojiItem) =
-        manageReactionItemTypes[item]
-
-    private fun expandManageReactionItems(
-        source: List<ManageReactionsEmojisAdapter.ReactionEmojiItem>,
-        target: ManageReactionTarget,
-    ): List<ManageReactionsEmojisAdapter.ReactionEmojiItem> {
-        val selectedTypes = mutableMapOf<String, Boolean>()
-        for (item in source) {
-            if (!item.isSelected) continue
-            val key = item.reaction.b()?.c() ?: continue
-            selectedTypes[key] = if (target.reactionKey == key) {
-                target.superReaction
-            } else {
-                getManageReactionItemType(item)
-                    ?: manageReactionTypes[manageReactionKey(target.channelId, target.messageId, key)]
-                    ?: false
-            }
-        }
-        selectedTypes.putIfAbsent(target.reactionKey, target.superReaction)
-        val result = mutableListOf<ManageReactionsEmojisAdapter.ReactionEmojiItem>()
-        val seen = mutableSetOf<String>()
-
-        fun add(count: Int, emoji: MessageReactionEmoji, me: Boolean, selected: Boolean, superReaction: Boolean) {
-            val item = ManageReactionsEmojisAdapter.ReactionEmojiItem(MessageReaction(count, emoji, me), selected)
-            manageReactionItemTypes.put(item, superReaction)
-            result.add(item)
-        }
-        for (item in source) {
-            val reaction = item.reaction
-            val emoji = reaction.b() ?: continue
-            val key = emoji.c()
-            if (!seen.add(key)) continue
-            var bursts = getSuperReactionCount(target.messageId, key)
-            var normal = getNormalReactionCount(target.messageId, key)
-            if (normal == null && bursts != null && bursts > 0 && reaction.a() > bursts) normal = reaction.a() - bursts
-            // Keep a selected burst tab while the first metadata lookup is pending.
-            if (!isMetadataCurrent(target.messageId) &&
-                target.superReaction &&
-                target.reactionKey == key &&
-                (bursts ?: 0) <= 0
-            ) {
-                bursts = 1
-            }
-            if ((bursts ?: 0) <= 0 && (normal == 0 || (normal == null && isMetadataCurrent(target.messageId)))) continue
-            val selected = key in selectedTypes
-            val selectedSuper = selectedTypes[key] == true
-            if (bursts != null && bursts > 0) {
-                add(bursts, emoji, false, selectedSuper, true)
-                if (normal != null && normal > 0) add(normal, emoji, reaction.c(), selected && !selectedSuper, false)
-            } else {
-                add(normal ?: reaction.a(), emoji, reaction.c(), selected && !selectedSuper, false)
-            }
+            val pill = MessageReaction(burst.count, reaction.b(), false)
+            burstPills.put(pill, true)
+            result.add(pill)
+            // Discord's count is the total of both kinds.
+            val normal = maxOf(reaction.a() - burst.count, if (reaction.c()) 1 else 0)
+            if (normal > 0) result.add(MessageReaction(normal, reaction.b(), reaction.c()))
         }
         return result
     }
 
-    private fun isSuperReaction(messageId: Long, key: String?) = (getSuperReactionCount(messageId, key) ?: 0) > 0
-
-    private fun resolveReactionAndToggle(
-        channelId: Long,
-        messageId: Long,
-        reaction: MessageReaction,
-        preferredType: Boolean?,
-    ) {
-        val emoji = reaction.b() ?: return
-        if (channelId == 0L || messageId == 0L) return
-        val key = emoji.c()
-        if (!beginReactionAction(messageId, key)) return
-        Utils.showToast("Loading reaction…")
-        // One lookup resolves every emoji, including ownership beyond the first 100 users.
-        fetchSuperReactionMetadata(channelId, messageId) { success ->
-            if (!success) {
-                finishReactionAction(messageId, key)
-                Utils.showToast("Could not load this reaction. Please try again.")
-                return@fetchSuperReactionMetadata
-            }
-            if (preferredType ?: isSuperReaction(messageId, key)) {
-                when {
-                    isOwnSuperReaction(messageId, key) -> {
-                        performRemoveSuperReaction(channelId, messageId, emoji)
-                    }
-
-                    hasNitro() -> {
-                        performSendSuperReaction(channelId, messageId, getReactionApiKey(emoji), 0)
-                    }
-
-                    else -> {
-                        finishReactionAction(messageId, key)
-                        Utils.showToast("Nitro is required to add a Super Reaction")
-                    }
-                }
-            } else {
-                sendNormalReaction(channelId, messageId, emoji, reaction.c())
-            }
+    /** A flat tint of the emoji's color, outlined when it's yours. No shine, like Discord. */
+    private fun styleBurstPill(view: ReactionView, burst: Burst?) {
+        if (!nativeBackgrounds.containsKey(view)) {
+            nativeBackgrounds[view] = view.background
+            nativeCounterColors[view] = counter(view, COUNTER_1)?.textColors to counter(view, COUNTER_2)?.textColors
         }
-    }
-
-    private fun sendNormalReaction(channelId: Long, messageId: Long, emoji: MessageReactionEmoji, remove: Boolean) {
-        val apiKey = getReactionApiKey(emoji)
-        if (apiKey.isEmpty()) {
-            finishReactionAction(messageId, emoji.c())
-            return
+        val density = view.resources.displayMetrics.density
+        val color = burst?.color ?: DEFAULT_BURST_COLOR
+        val mine = burst?.me == true
+        val background = pillBackgrounds.getOrPut(view) {
+            GradientDrawable().apply { cornerRadius = 6 * density }
         }
-        clearCompletedSuperReactionRemoval(messageId, emoji.c())
-        request(
-            reactionRoute(
-                channelId,
-                messageId,
-                apiKey,
-            ) +
-                "/@me",
-            if (remove) "DELETE" else "PUT",
-            DiscordRequestQueue.ACTION,
-            { response ->
-                finishReactionAction(messageId, emoji.c())
-                if (!response.ok()) {
-                    showRequestError("update reaction", httpError(response))
-                } else {
-                    localMutationVersions.merge(messageId, 1L, Long::plus)
-                    invalidateSuperReactionCache(messageId, channelId)
-                }
-            },
-            { error ->
-                finishReactionAction(messageId, emoji.c())
-                showRequestError("update reaction", error)
-            },
-        )
+        background.setColor(withAlpha(color, if (mine) 0x4D else 0x33))
+        if (mine) background.setStroke(maxOf(1, density.toInt()), color) else background.setStroke(0, 0)
+        if (view.background !== background) setBackgroundKeepingPadding(view, background)
+        view.isActivated = false
+        view.isSelected = false
+        val text = blend(color, Color.WHITE, 0.4f)
+        counter(view, COUNTER_1)?.setTextColor(text)
+        counter(view, COUNTER_2)?.setTextColor(text)
+        view.contentDescription = if (mine) "Super reaction, reacted by you" else "Super reaction"
     }
 
-    private fun fetchBurstReactionUsers(target: ManageReactionTarget) {
-        val cacheKey = target.cacheKey()
-        burstReactionUsers[cacheKey]?.let {
-            updateManageReactionResults(target, it)
-            return
-        }
-        if (!running || !burstUserFetches.add(cacheKey)) return
-        val version = superReactionInvalidationVersions[target.messageId] ?: 0L
-        request(
-            reactionRoute(target.channelId, target.messageId, getReactionApiKey(target.emoji)) + "?limit=100&type=1",
-            "GET",
-            DiscordRequestQueue.USERS,
-            { response ->
-                burstUserFetches.remove(cacheKey)
-                if (!response.ok()) {
-                    logger.error("Could not load Super Reaction users", httpError(response))
-                    return@request
-                }
-                try {
-                    val users = parseBurstReactionUsers(response.body)
-                    val dirty = version != (superReactionInvalidationVersions[target.messageId] ?: 0L)
-                    if (!dirty) burstReactionUsers[cacheKey] = users
-                    updateManageReactionResults(target, users)
-                    if (dirty) {
-                        mainHandler.postDelayed({
-                            if (running &&
-                                synchronized(activeManageReactions) { activeManageReactions.containsValue(target) }
-                            ) {
-                                fetchBurstReactionUsers(target)
-                            }
-                        }, METADATA_MIN_INTERVAL_MS)
-                    }
-                } catch (error: Throwable) {
-                    logger.error("Could not read Super Reaction users", error)
-                }
-            },
-            { error ->
-                burstUserFetches.remove(cacheKey)
-                logger.error("Could not load Super Reaction users", error)
-            },
-        )
+    private fun restorePill(view: ReactionView) {
+        if (!nativeBackgrounds.containsKey(view)) return
+        val native = nativeBackgrounds[view]
+        if (view.background !== native) setBackgroundKeepingPadding(view, native)
+        restoreCounterColors(view)
+        view.contentDescription = null
     }
 
-    private fun reactionRoute(channelId: Long, messageId: Long, apiKey: String) =
-        "/channels/$channelId/messages/$messageId/reactions/${Uri.encode(apiKey)}"
-
-    private fun getReactionApiKey(emoji: MessageReactionEmoji): String =
-        if (emoji.e() && emoji.b() != null) "${emoji.d() ?: ""}:${emoji.b()}" else emoji.d() ?: emoji.c()
-
-    private fun parseBurstReactionUsers(body: String): List<User> {
-        val raw: List<*>? = GsonUtils.gson.fromJson(body, List::class.java)
-        return raw?.mapNotNull { (it as? Map<*, *>)?.let(::createCoreUser) } ?: emptyList()
+    /**
+     * Recycled views keep the burst tint on their counters: ReactionView only resets
+     * them when it has its own color lists, which pills in reaction rows don't.
+     */
+    private fun restoreCounterColors(view: ReactionView) {
+        val (first, second) = nativeCounterColors[view] ?: return
+        val own = if (view.reaction?.c() == true) view.n else view.m
+        (own ?: first)?.let { counter(view, COUNTER_1)?.setTextColor(it) }
+        (own ?: second)?.let { counter(view, COUNTER_2)?.setTextColor(it) }
     }
 
-    private fun createCoreUser(raw: Map<*, *>): User? {
-        val id = longValue(raw["id"]) ?: return null
-        return CoreUser(
-            id,
-            raw["username"]?.toString()?.takeIf { it.isNotEmpty() } ?: "Unknown user",
-            raw["avatar"]?.toString(),
-            raw["banner"]?.toString(),
-            raw["bot"] == true,
-            raw["system"] == true,
-            intValue(raw["discriminator"]),
-            PremiumTier.NONE,
-            intValue(raw["flags"]),
-            intValue(raw["public_flags"]),
-            raw["bio"]?.toString(),
-            raw["banner_color"]?.toString(),
-        )
-    }
-
-    private fun longValue(value: Any?): Long? = (value as? Number)?.toLong() ?: value?.toString()?.toLongOrNull()
-
-    private fun intValue(value: Any?): Int = (value as? Number)?.toInt() ?: value?.toString()?.toIntOrNull() ?: 0
-
-    private fun updateManageReactionResults(target: ManageReactionTarget, users: List<User>) {
-        synchronized(activeManageReactions) {
-            activeManageReactions
-                .filterValues {
-                    it == target
-                }.keys
-                .forEach { setManageReactionResults(it, createManageReactionItems(target, users)) }
-        }
-    }
-
-    private fun createManageReactionItems(
-        target: ManageReactionTarget,
-        users: List<User>,
-    ): List<MGRecyclerDataPayload> = users.map {
-        ManageReactionsResultsAdapter.ReactionUserItem(
-            it,
-            target.channelId,
-            target.messageId,
-            target.emoji,
-            StoreStream.getUsers().me.id == it.id,
-            null,
-        )
-    }
-
-    private fun getManageReactionTarget(widget: WidgetManageReactions) = synchronized(activeManageReactions) {
-        activeManageReactions[widget]
-    }
-
-    private fun setManageReactionResults(widget: WidgetManageReactions, items: List<MGRecyclerDataPayload>) {
-        try {
-            (getWidgetAdapter(widget, "resultsAdapter") as? ManageReactionsResultsAdapter)?.setData(items)
-        } catch (
-            error: Throwable,
-        ) {
-            logger.error("Could not update Super Reaction users", error)
-        }
-    }
-
-    private fun isMetadataCurrent(messageId: Long) = superReactionFetchTimes[messageId]?.let {
-        SystemClock.elapsedRealtime() - it < SUPER_REACTION_CACHE_TTL
-    } ?: false
-
-    /** Load the channel's current message window, including burst reaction details. */
-    private fun prefetchChannelSuperReactionMetadata(channelId: Long, entries: List<ReactionsEntry>) {
-        if (!running || channelId == 0L || entries.isEmpty()) return
-        val messageIds = entries.mapNotNull { it.message?.id }.filter { it != 0L }.distinct().sorted()
-        messageIds.forEach { reactionChannels[it] = channelId }
-        val missing = messageIds.filterNot(::isMetadataCurrent)
-        if (missing.isEmpty() || !channelBatchFetches.add(channelId)) return
-        batchPendingMessages.addAll(missing)
-        val versions = missing.associateWith {
-            Pair(localMutationVersions[it] ?: 0L, superReactionInvalidationVersions[it] ?: 0L)
-        }
-        val anchor = messageIds[messageIds.size / 2]
-        request(
-            "/channels/$channelId/messages?around=$anchor&limit=50",
-            "GET",
-            DiscordRequestQueue.METADATA,
-            { response ->
-                channelBatchFetches.remove(channelId)
-                if (!response.ok()) {
-                    completeChannelBatch(channelId, missing, versions, emptyMap())
-                    return@request
-                }
-                try {
-                    val messages = GsonUtils.gson.fromJson(response.body, List::class.java)
-                        .filterIsInstance<Map<*, *>>()
-                        .associateBy { it["id"]?.toString() }
-                    completeChannelBatch(channelId, missing, versions, messages)
-                } catch (error: Throwable) {
-                    logger.error("Could not read channel Super Reaction metadata", error)
-                    completeChannelBatch(channelId, missing, versions, emptyMap())
-                }
-            },
-            { error ->
-                channelBatchFetches.remove(channelId)
-                logger.error("Could not load channel Super Reaction metadata", error)
-                completeChannelBatch(channelId, missing, versions, emptyMap())
-            },
-        )
-    }
-
-    private fun completeChannelBatch(
-        channelId: Long,
-        messageIds: List<Long>,
-        versions: Map<Long, Pair<Long, Long>>,
-        messages: Map<String?, Map<*, *>>,
-    ) {
-        messageIds.forEach { messageId ->
-            batchPendingMessages.remove(messageId)
-            val message = messages[messageId.toString()]
-            val reactions = message?.get("reactions") as? List<*>
-            val hasDetails = reactions != null && reactions.all {
-                val reaction = it as? Map<*, *>
-                reaction?.get("count_details") is Map<*, *> || reaction?.containsKey("burst_count") == true
-            }
-            val unchanged = versions[messageId] == Pair(
-                localMutationVersions[messageId] ?: 0L,
-                superReactionInvalidationVersions[messageId] ?: 0L,
-            )
-            if (message != null && hasDetails && unchanged) {
-                try {
-                    val hadBurst = superReactionCounts[messageId]?.values?.any { it > 0 } == true
-                    val bursts = parseSuperReactionCounts(messageId, GsonUtils.gson.toJson(message))
-                    superReactionCounts[messageId] = ConcurrentHashMap(bursts)
-                    superReactionFetchTimes[messageId] = SystemClock.elapsedRealtime()
-                    if (hadBurst || bursts.values.any { it > 0 }) refreshSuperReactionStyles(messageId)
-                    refreshManageReactionUsers(messageId)
-                    completeMetadataWaiters(messageId, true)
-                    return@forEach
-                } catch (error: Throwable) {
-                    logger.error("Could not read Super Reaction details", error)
-                }
-            }
-            // A message outside this window, or lacking burst fields, needs its own lookup.
-            fetchSuperReactionMetadata(channelId, messageId)
-        }
-    }
-
-    private fun fetchSuperReactionMetadata(channelId: Long, messageId: Long, callback: ((Boolean) -> Unit)? = null) {
-        if (!running || channelId == 0L || messageId == 0L) {
-            callback?.invoke(false)
-            return
-        }
-        val now = SystemClock.elapsedRealtime()
-        if (isMetadataCurrent(messageId) && superReactionCounts.containsKey(messageId)) {
-            callback?.invoke(true)
-            return
-        }
-        callback?.let { metadataWaiters.getOrPut(messageId) { mutableListOf() }.add(it) }
-        val route = "/channels/$channelId/messages?around=$messageId&limit=1"
-        if (messageId in superReactionFetches) {
-            if (callback != null) requests?.prioritize(route, "GET")
-            return
-        }
-        val nextAttempt = metadataAttempts[messageId] ?: 0L
-        if (now < nextAttempt) {
-            scheduleMetadataRefresh(channelId, messageId, nextAttempt - now)
-            return
-        }
-        superReactionFetches.add(messageId)
-        metadataAttempts[messageId] = now + METADATA_MIN_INTERVAL_MS
-        val version = superReactionInvalidationVersions[messageId] ?: 0L
-        val mutationVersion = localMutationVersions[messageId] ?: 0L
-        request(
-            route,
-            "GET",
-            if (messageId in
-                metadataWaiters
-            ) {
-                DiscordRequestQueue.ACTION
-            } else {
-                DiscordRequestQueue.METADATA
-            },
-            { response ->
-                superReactionFetches.remove(messageId)
-                if (!response.ok()) {
-                    metadataFailed(channelId, messageId, httpError(response))
-                    return@request
-                }
-                if (mutationVersion != (localMutationVersions[messageId] ?: 0L)) {
-                    scheduleMetadataRefresh(channelId, messageId, METADATA_REFRESH_DELAY_MS)
-                    return@request
-                }
-                val dirty = version != (superReactionInvalidationVersions[messageId] ?: 0L)
-                try {
-                    val body = extractMessageFromList(response.body, messageId) ?: error("Message was not returned")
-                    val hadBurst = superReactionCounts[messageId]?.values?.any { it > 0 } == true
-                    val bursts = parseSuperReactionCounts(messageId, body)
-                    superReactionCounts[messageId] = ConcurrentHashMap(bursts)
-                    superReactionFetchTimes[messageId] = SystemClock.elapsedRealtime()
-                    if (hadBurst || bursts.values.any { it > 0 }) refreshSuperReactionStyles(messageId)
-                    refreshManageReactionUsers(messageId)
-                    completeMetadataWaiters(messageId, true)
-                    // Publish useful snapshots during continuous activity, then follow up.
-                    if (dirty) {
-                        superReactionFetchTimes.remove(messageId)
-                        scheduleMetadataRefresh(channelId, messageId, METADATA_REFRESH_DELAY_MS)
-                    }
-                } catch (error: Throwable) {
-                    metadataFailed(channelId, messageId, error)
-                }
-            },
-            { error ->
-                superReactionFetches.remove(messageId)
-                metadataFailed(channelId, messageId, error)
-            },
-        )
-    }
-
-    private fun metadataFailed(channelId: Long, messageId: Long, error: Throwable) {
-        metadataAttempts[messageId] = SystemClock.elapsedRealtime() + METADATA_FAILURE_DELAY_MS
-        logger.error("Could not load Super Reaction metadata", error)
-        completeMetadataWaiters(messageId, false)
-        scheduleMetadataRefresh(channelId, messageId, METADATA_FAILURE_DELAY_MS)
-    }
-
-    private fun completeMetadataWaiters(messageId: Long, success: Boolean) {
-        metadataWaiters.remove(messageId)?.forEach { it(success) }
-    }
-
-    private fun scheduleMetadataRefresh(channelId: Long, messageId: Long, delay: Long) {
-        metadataRefreshes.remove(messageId)?.let(mainHandler::removeCallbacks)
-        val refresh = Runnable {
-            metadataRefreshes.remove(messageId)
-            if (running &&
-                (messageId in metadataWaiters || isMessageVisible(messageId))
-            ) {
-                fetchSuperReactionMetadata(channelId, messageId)
-            }
-        }
-        metadataRefreshes[messageId] = refresh
-        mainHandler.postDelayed(refresh, delay)
-    }
-
-    private fun isMessageVisible(messageId: Long): Boolean {
-        synchronized(visibleReactionItems) {
-            if (visibleReactionItems.any { (item, id) ->
-                    id == messageId && item.itemView.isAttachedToWindow
-                }
-            ) {
-                return true
-            }
-        }
-        return synchronized(activeManageReactions) { activeManageReactions.values.any { it.messageId == messageId } }
-    }
-
-    private fun extractMessageFromList(body: String, messageId: Long): String? {
-        val decoded = GsonUtils.gson.fromJson(body, Any::class.java)
-        if (decoded is Map<*, *>) return body
-        val messages = decoded as? List<*> ?: return null
-        return messages
-            .filterIsInstance<Map<*, *>>()
-            .firstOrNull {
-                it["id"]?.toString() == messageId.toString()
-            }?.let { GsonUtils.gson.toJson(it) }
-    }
-
-    private fun parseSuperReactionCounts(messageId: Long, body: String): Map<String, Int> {
-        val metadata = ReactionMetadata.parse(GsonUtils.gson.fromJson(body, Map::class.java))
-        val colors = ConcurrentHashMap<String, Int>()
-        metadata.colors.forEach { (key, raw) ->
-            parseBurstColor(raw)?.let {
-                colors[key] = it
-                colors[normalizeReactionKey(key)!!] = it
-            }
-        }
-        val ownKeys = metadata.owned.flatMap { reactionStateKeys(messageId, it) }.toSet()
-        normalReactionCounts[messageId] = ConcurrentHashMap(metadata.normal)
-        superReactionColors[messageId] = colors
-        val prefix = "$messageId:"
-        var changed = false
-        ownedSuperReactions.filter { it.startsWith(prefix) && it !in ownKeys }.forEach {
-            if (ownedSuperReactions.remove(it)) {
-                changed =
-                    true
-            }
-        }
-        if (ownedSuperReactions.addAll(ownKeys)) changed = true
-        locallySentSuperReactions.removeIf { it.startsWith(prefix) }
-        if (changed) persistOwnedSuperReactions()
-        return metadata.bursts
-    }
-
-    private fun expandReactions(reactions: Collection<*>?, messageId: Long): List<MessageReaction> {
-        val expanded = mutableListOf<MessageReaction>()
-        val types = IdentityHashMap<MessageReaction, Boolean>()
-        if (reactions == null) return expanded
-        for (reaction in reactions.filterIsInstance<MessageReaction>()) {
-            val emoji = reaction.b()
-            val key = emoji?.c()
-            val burstCount = getSuperReactionCount(messageId, key)
-            val normalCount = getNormalReactionCount(messageId, key)
-            if (burstCount != null && burstCount > 0) {
-                val burst = MessageReaction(burstCount, emoji, false)
-                expanded.add(burst)
-                types[burst] = true
-                val normals = if (reaction.a() >= burstCount) {
-                    reaction.a() - burstCount
-                } else {
-                    normalCount ?: 0
-                }
-                if (normals > 0) {
-                    val normal = MessageReaction(normals, emoji, reaction.c())
-                    expanded.add(normal)
-                    types[normal] = false
-                }
-            } else {
-                // Discord updates this reaction and its `me` bit optimistically. The
-                // snapshot's normal count can already be stale after a tap.
-                expanded.add(reaction)
-                if (isMetadataCurrent(messageId)) types[reaction] = false
-            }
-        }
-        expandedReactionTypes[messageId] = types
-        return expanded
-    }
-
-    private fun parseBurstColor(raw: Any?): Int? {
-        val colors = raw as? List<*> ?: return null
-        var best: Int? = null
-        var bestScore = -1f
-        // Match Discord's choice of the most vivid of the first three palette entries.
-        for (value in colors.take(3)) {
-            if (value == null) continue
-            try {
-                val color = Color.parseColor(value.toString())
-                val hsv = FloatArray(3)
-                Color.colorToHSV(color, hsv)
-                val score = hsv[1] + hsv[2]
-                if (score > bestScore) {
-                    bestScore = score
-                    best = Color.rgb(Color.red(color), Color.green(color), Color.blue(color))
-                }
-            } catch (_: Throwable) {
-                // Use the next valid palette entry.
-            }
-        }
-        return best
-    }
-
-    private fun cachedCount(counts: Map<String, Int>?, key: String?): Int? =
-        if (key == null) null else counts?.get(key) ?: counts?.get(normalizeReactionKey(key))
-
-    private fun getSuperReactionCount(messageId: Long, key: String?): Int? {
-        if (key == null) return null
-        // Prefer the server total to the local send fallback so a count never resets to one.
-        return cachedCount(superReactionCounts[messageId], key)
-            ?: if (reactionStateKeys(messageId, key).any { it in locallySentSuperReactions }) 1 else null
-    }
-
-    private fun getNormalReactionCount(messageId: Long, key: String?) =
-        cachedCount(normalReactionCounts[messageId], key)
-
-    private fun getExpandedReactionType(messageId: Long, reaction: MessageReaction): Boolean? {
-        expandedReactionTypes[messageId]?.get(reaction)?.let { return it }
-        // Each visible view retains its type when another holder rebinds the same message.
-        return reactionBindings.entries
-            .firstOrNull { (view, binding) ->
-                binding.messageId == messageId && binding.reaction === reaction && view.visibility == View.VISIBLE
-            }?.value
-            ?.type
-    }
-
-    private fun getSuperReactionColor(messageId: Long, key: String?) =
-        cachedCount(superReactionColors[messageId], key) ?: SUPER_REACTION_COLOR
-
-    private fun markOwnedSuperReaction(messageId: Long, key: String?) {
-        if (key == null) return
-        ownedSuperReactions.add(localReactionKey(messageId, key))
-        ownedSuperReactions.add(localReactionKey(messageId, normalizeReactionKey(key)))
-        persistOwnedSuperReactions()
-    }
-
-    private fun persistOwnedSuperReactions() {
-        val preferences = ownedReactionPreferences ?: return
-        val key = ownedReactionPreferencesKey ?: return
-        preferences.edit().putStringSet(key, HashSet(ownedSuperReactions)).apply()
-    }
-
-    private fun isOwnSuperReaction(messageId: Long, key: String?) = key != null &&
-        listOf(localReactionKey(messageId, key), localReactionKey(messageId, normalizeReactionKey(key))).any {
-            it in ownedSuperReactions || it in locallySentSuperReactions
-        }
-
-    private fun getCurrentUserId(): Long = try {
-        StoreStream.getUsers().me.id
-    } catch (_: Throwable) {
-        0L
-    }
-
-    private fun localReactionKey(messageId: Long, key: String?) = "$messageId:$key"
-
-    private fun displayReactionKey(key: String?): String? {
-        if (key == null) return null
-        val separator = key.lastIndexOf(':')
-        if (separator > 0 && separator < key.length - 1) {
-            val id = key.substring(separator + 1)
-            if (id.toLongOrNull() != null) return id
-        }
-        return key
-    }
-
-    private fun normalizeReactionKey(key: String?) = key?.replace("\uFE0F", "")
-
-    private fun invalidateSuperReactionCache(messageId: Long, channelId: Long) {
-        if (messageId == 0L) return
-        val queue = requests
-        mainHandler.post {
-            if (!running || requests !== queue) return@post
-            if (channelId != 0L) reactionChannels[messageId] = channelId
-            superReactionInvalidationVersions.merge(messageId, 1L, Long::plus)
-            superReactionFetchTimes.remove(messageId)
-            val prefix = "$messageId:"
-            burstReactionUsers.keys.removeIf { it.startsWith(prefix) }
-            normalReactionItems.keys.removeIf { it.startsWith(prefix) }
-            // Keep counts, ownership and bound types until their replacement snapshot arrives.
-            reactionChannels[messageId]?.let { scheduleMetadataRefresh(it, messageId, METADATA_REFRESH_DELAY_MS) }
-        }
-    }
-
-    private fun refreshSuperReactionStyles(messageId: Long) {
-        synchronized(visibleReactionItems) {
-            // Snapshot entries because onConfigure updates this weak map again.
-            for ((item, id) in visibleReactionItems.toMap()) {
-                if (id != messageId) continue
-                val entry = visibleReactionEntries[item]
-                val position = visibleReactionPositions[item]
-                if (entry != null && position != null) {
-                    item.onConfigure(position, entry)
-                } else {
-                    applySuperReactionStyles(item, messageId)
-                }
-            }
-        }
-    }
-
-    private fun applyVisibleReactionStyles(messageId: Long) {
-        synchronized(visibleReactionItems) {
-            visibleReactionItems.filterValues { it == messageId }.keys.forEach {
-                applySuperReactionStyles(
-                    it,
-                    messageId,
-                )
-            }
-        }
-    }
-
-    private fun refreshManageReactionUsers(messageId: Long) {
-        synchronized(activeManageReactions) {
-            activeManageReactions.filterValues { it.messageId == messageId }.forEach { (widget, target) ->
-                refreshManageReactionTabs(widget, target)
-                if (target.superReaction) fetchBurstReactionUsers(target)
-            }
-        }
-    }
-
-    private fun refreshManageReactionTabs(widget: WidgetManageReactions, target: ManageReactionTarget) {
-        try {
-            val adapter = getWidgetAdapter(widget, "emojisAdapter") as? ManageReactionsEmojisAdapter ?: return
-            val current = adapter.internalData
-            if (current.isNullOrEmpty()) return
-            adapter.setData(expandManageReactionItems(current, target))
-        } catch (error: Throwable) {
-            logger.error("Could not update Super Reaction tabs", error)
-        }
-    }
-
-    private fun applySuperReactionStyles(item: WidgetChatListAdapterItemReactions, messageId: Long) {
-        val views = mutableListOf<ReactionView>()
-        collectReactionViews(item.itemView, views)
-        for (view in views) {
-            val reaction = view.reaction
-            val key = reaction?.b()?.c()
-            val binding = reactionBindings[view] ?: continue
-            if (binding.messageId != messageId || view.visibility != View.VISIBLE) continue
-            val count = getSuperReactionCount(messageId, key)
-            val isSuper = binding.type ?: ((count ?: 0) > 0)
-            setReactionMeState(view, messageId, reaction, isSuper)
-            styleReactionView(view, messageId, key, isSuper, count)
-        }
-    }
-
-    private fun collectReactionViews(view: View, output: MutableList<ReactionView>) {
-        when (view) {
-            is ReactionView -> {
-                output.add(view)
-            }
-
-            is ViewGroup -> {
-                // Avoid constructing a range backed by Discord's obfuscated primitive iterator.
-                var index = 0
-                while (index < view.childCount) collectReactionViews(view.getChildAt(index++), output)
-            }
-        }
-    }
-
-    private fun styleReactionView(
-        view: ReactionView,
-        messageId: Long,
-        key: String?,
-        isSuper: Boolean,
-        burstCount: Int?,
-    ) {
-        val style = reactionStyles[view] ?: return
-        if (!isSuper) {
-            if (view.background === style.shine) setReactionBackground(view, cloneDrawable(style.background))
-            style.restoreTextColors(view)
-            view.contentDescription = style.description
-            return
-        }
-        val color = getSuperReactionColor(messageId, key)
-        val owned = isOwnSuperReaction(messageId, key)
-        val pending =
-            actionKey(messageId, key) in pendingReactionActions || isPendingSuperReactionRemoval(messageId, key)
-        style.shine.update(color, owned, pending)
-        if (view.background !== style.shine) setReactionBackground(view, style.shine)
-        style.tintText(view, color, owned)
-        view.contentDescription = "Super reaction, ${burstCount ?: 1} total" +
-            (if (owned) ", reacted by you" else "") +
-            (if (pending) ", updating" else "")
-    }
-
-    private fun blendColors(color: Int, target: Int, amount: Float): Int {
-        val fraction = amount.coerceIn(0f, 1f)
-        return Color.rgb(
-            (Color.red(color) + (Color.red(target) - Color.red(color)) * fraction).roundToInt(),
-            (Color.green(color) + (Color.green(target) - Color.green(color)) * fraction).roundToInt(),
-            (Color.blue(color) + (Color.blue(target) - Color.blue(color)) * fraction).roundToInt(),
-        )
-    }
-
-    private fun setReactionBackground(view: ReactionView, background: Drawable?) {
+    private fun setBackgroundKeepingPadding(view: View, background: Drawable?) {
         val left = view.paddingLeft
         val top = view.paddingTop
         val right = view.paddingRight
@@ -1400,366 +380,604 @@ class SuperReactions : Plugin() {
         view.setPadding(left, top, right, bottom)
     }
 
-    private fun setReactionMeState(view: ReactionView, messageId: Long, reaction: MessageReaction?, isSuper: Boolean) {
-        val mine = reaction != null && (reaction.c() || (isSuper && isOwnSuperReaction(messageId, reaction.b()?.c())))
-        val nativeSelection = mine && !isSuper
-        view.isActivated = nativeSelection
-        view.isSelected = nativeSelection
-        counter(view, "counter_text_1")?.isActivated = nativeSelection
-        counter(view, "counter_text_2")?.isActivated = nativeSelection
-    }
+    private fun counter(view: ReactionView, name: String): TextView? = view.findViewById(Utils.getResId(name, "id"))
 
-    private fun counter(view: ReactionView, id: String): TextView? = view.findViewById(Utils.getResId(id, "id"))
-
-    private class ManageReactionTarget(
-        val channelId: Long,
-        val messageId: Long,
-        val reactionKey: String,
-        val emoji: MessageReactionEmoji,
-        val superReaction: Boolean,
-    ) {
-        fun cacheKey() = "$messageId:$reactionKey:" + if (superReaction) "super" else "normal"
-
-        override fun equals(other: Any?) = this === other ||
-            (
-                other is ManageReactionTarget &&
-                    channelId == other.channelId &&
-                    messageId == other.messageId &&
-                    reactionKey == other.reactionKey &&
-                    superReaction == other.superReaction
-            )
-
-        override fun hashCode(): Int = 31 *
-            (31 * (31 * channelId.hashCode() + messageId.hashCode()) + reactionKey.hashCode()) +
-            superReaction.hashCode()
-    }
-
-    private data class ReactionBinding(
-        val messageId: Long,
-        val reaction: MessageReaction,
-        val type: Boolean?,
-    )
-
-    private inner class ReactionStyle(view: ReactionView) {
-        val background = cloneDrawable(view.background)
-        val description = view.contentDescription
-        val shine = SuperReactionDrawable(cloneDrawable(background), view.resources.displayMetrics.density)
-        // ReactionView.a() may leave previously tinted TextViews unchanged when this
-        // holder is recycled. Capture the native state only on its first binding.
-        private val firstColor: ColorStateList? = counter(view, "counter_text_1")?.textColors
-        private val secondColor: ColorStateList? = counter(view, "counter_text_2")?.textColors
-
-        fun restoreTextColors(view: ReactionView) {
-            firstColor?.let { counter(view, "counter_text_1")?.setTextColor(it) }
-            secondColor?.let { counter(view, "counter_text_2")?.setTextColor(it) }
-        }
-
-        fun tintText(view: ReactionView, color: Int, owned: Boolean) {
-            val amount = if (owned) 0.35f else 0.2f
-            firstColor?.let {
-                counter(
-                    view,
-                    "counter_text_1",
-                )?.setTextColor(blendColors(it.defaultColor, color, amount))
-            }
-            secondColor?.let {
-                counter(
-                    view,
-                    "counter_text_2",
-                )?.setTextColor(blendColors(it.defaultColor, color, amount))
+    /** Re-binds visible reaction rows of [messageIds] so their pills reflect new data. */
+    private fun refreshRows(messageIds: Collection<Long>) {
+        if (messageIds.isEmpty()) return
+        for ((item, row) in rows.entries.toList()) {
+            if (row.entry.message.id in messageIds && item.itemView.isAttachedToWindow) {
+                item.onConfigure(row.position, row.entry)
             }
         }
     }
 
-    private fun openSuperReactionPicker(actions: WidgetChatListActions) {
-        val manager = try {
-            actions.parentFragmentManager
-        } catch (error: Throwable) {
-            logger.error("Could not open the Super Reaction picker", error)
-            return
+    /**
+     * Messages shown from Discord's cache were never loaded over REST in this
+     * session. Fetch the visible window once (batched per channel) for those.
+     */
+    private fun requestSnapshot(channelId: Long, messageId: Long) {
+        val attempts = snapshotAttempts[messageId] ?: 0
+        if (attempts >= MAX_SNAPSHOT_ATTEMPTS) return
+        snapshotAttempts[messageId] = attempts + 1
+        val queue = snapshotQueue.getOrPut(channelId) { HashSet() }
+        val schedule = queue.isEmpty()
+        queue.add(messageId)
+        if (schedule) mainHandler.postDelayed({ flushSnapshots(channelId) }, SNAPSHOT_DEBOUNCE_MS)
+    }
+
+    private fun flushSnapshots(channelId: Long) {
+        val ids = snapshotQueue.remove(channelId)?.filter { !store.hasSnapshot(it) }?.sorted() ?: return
+        if (ids.isEmpty()) return
+        api?.messagesAround(channelId, ids[ids.size / 2]) { result ->
+            if (!result.ok) return@messagesAround
+            val changed = try {
+                store.ingestMessages(JSONArray(result.body))
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            refreshRows(changed)
         }
-        EmojiPickerNavigator.launchBottomSheet(
-            manager,
-            object : EmojiPickerListener {
-                override fun onEmojiPicked(emoji: Emoji) {
-                    sendSuperReaction(actions, emoji)
+    }
+
+    // endregion
+
+    // region Adding and removing super reactions
+
+    private fun patchReactionActions() {
+        // Tapping a super pill toggles your super reaction instead of a normal one.
+        patcher.patch(
+            WidgetChatListAdapterEventsHandler.UserReactionHandler::class.java,
+            "toggleReaction",
+            arrayOf(LONG, LONG, LONG, MessageReaction::class.java),
+            PreHook { frame ->
+                val reaction = frame.args[3] as? MessageReaction ?: return@PreHook
+                if (burstPills[reaction] != true) return@PreHook
+                frame.result = null
+                val emoji = reaction.b() ?: return@PreHook
+                val channelId = frame.args[1] as Long
+                val messageId = frame.args[2] as Long
+                if (store.get(messageId, emoji.c())?.me == true) {
+                    sendBurst(channelId, messageId, emoji, add = false)
+                } else {
+                    sendBurst(channelId, messageId, emoji, add = true)
                 }
             },
-            EmojiPickerContextType.Chat.INSTANCE,
-            null,
+        )
+        // Emoji picker opened from the "+" at the end of a reaction row.
+        patcher.patch(
+            WidgetChatListAdapterEventsHandler.UserReactionHandler::class.java,
+            "addNewReaction",
+            arrayOf(Emoji::class.java, LONG, LONG),
+            PreHook { frame ->
+                if (!isSuperPickerActive()) return@PreHook
+                frame.result = null
+                pickedBurst(frame.args[1] as Long, frame.args[2] as Long, frame.args[0] as Emoji)
+            },
+        )
+        // Emoji picker opened from the message actions sheet.
+        patcher.patch(
+            WidgetChatListActions::class.java,
+            "addReaction",
+            arrayOf(Emoji::class.java),
+            PreHook { frame ->
+                if (!isSuperPickerActive()) return@PreHook
+                val actions = frame.thisObject as WidgetChatListActions
+                val channelId = longField(actions, "channelId") ?: return@PreHook
+                val messageId = longField(actions, "messageId") ?: return@PreHook
+                frame.result = null
+                pickedBurst(channelId, messageId, frame.args[0] as Emoji)
+                actions.dismiss()
+            },
+        )
+        // Removing yourself from a super reaction tab in the reactions sheet.
+        patcher.patch(
+            StoreMessageReactions::class.java,
+            "deleteEmoji",
+            arrayOf(LONG, LONG, MessageReactionEmoji::class.java, LONG),
+            PreHook { frame ->
+                val channelId = frame.args[0] as Long
+                val messageId = frame.args[1] as Long
+                val emoji = frame.args[2] as? MessageReactionEmoji ?: return@PreHook
+                if (frame.args[3] != currentUserId()) return@PreHook
+                val key = BurstStore.normalize(emoji.c())
+                val onBurstTab = manageStates.values.any { it.messageId == messageId && it.burstKey == key }
+                if (!onBurstTab) return@PreHook
+                frame.result = null
+                mainHandler.post { sendBurst(channelId, messageId, emoji, add = false) }
+            },
         )
     }
 
-    private fun sendSuperReaction(actions: WidgetChatListActions, emoji: Emoji) {
-        if (!hasNitro()) return
-        val arguments = actions.arguments ?: return
-        val channelId = arguments.getLong(CHANNEL_ID_ARGUMENT, 0L)
-        val messageId = arguments.getLong(MESSAGE_ID_ARGUMENT, 0L)
-        val key = emoji.reactionKey
-        if (channelId == 0L || messageId == 0L || key.isNullOrEmpty()) return
-        actions.dismiss()
-        sendSuperReaction(channelId, messageId, key)
-    }
-
-    private fun sendSuperReaction(channelId: Long, messageId: Long, emoji: MessageReactionEmoji) =
-        sendSuperReaction(channelId, messageId, getReactionApiKey(emoji))
-
-    private fun sendSuperReaction(channelId: Long, messageId: Long, key: String) {
-        if (channelId == 0L || messageId == 0L || key.isEmpty()) return
-        if (!hasNitro()) {
-            Utils.showToast("Nitro is required to add a Super Reaction")
-            return
+    private fun pickedBurst(channelId: Long, messageId: Long, emoji: Emoji) {
+        val key = emoji.reactionKey ?: return
+        val custom = emoji as? ModelEmojiCustom
+        val reactionEmoji = if (custom != null) {
+            MessageReactionEmoji(custom.id.toString(), custom.name, custom.isAnimated)
+        } else {
+            MessageReactionEmoji(null, key, false)
         }
-        if (!beginReactionAction(messageId, key)) return
-        if (isOwnSuperReaction(messageId, displayReactionKey(key))) {
-            finishReactionAction(messageId, key)
+        if (store.get(messageId, reactionEmoji.c())?.me == true) {
             Utils.showToast("You already super reacted with this emoji")
             return
         }
-        performSendSuperReaction(channelId, messageId, key, 0)
+        sendBurst(channelId, messageId, reactionEmoji, add = true)
     }
 
-    private fun performSendSuperReaction(channelId: Long, messageId: Long, key: String, variant: Int) {
-        val targets = arrayOf(
-            "/@me?location=Message%20Inline%20Button&type=1",
-            "/1/@me?location=Message%20Inline%20Button&burst=true",
-            "/@me?burst=true",
-        )
-        request(
-            reactionRoute(
-                channelId,
-                messageId,
-                key,
-            ) +
-                targets[variant],
-            "PUT",
-            DiscordRequestQueue.ACTION,
-            { response ->
-                if (!response.ok()) {
-                    // Try compatibility routes only when the endpoint itself is unsupported.
-                    if (response.status in listOf(404, 405) && variant + 1 < targets.size) {
-                        performSendSuperReaction(channelId, messageId, key, variant + 1)
-                        return@request
-                    }
-                    finishReactionAction(messageId, key)
-                    showRequestError("send Super Reaction", httpError(response))
-                    return@request
-                }
-                clearCompletedSuperReactionRemoval(messageId, key)
-                locallySentSuperReactions.addAll(reactionStateKeys(messageId, key))
-                val displayKey = displayReactionKey(key)
-                markOwnedSuperReaction(messageId, displayKey)
-                localMutationVersions.merge(messageId, 1L, Long::plus)
-                finishReactionAction(messageId, key)
-                invalidateSuperReactionCache(messageId, channelId)
-                Utils.showToast("Super reaction sent")
-            },
-            { error ->
-                finishReactionAction(messageId, key)
-                showRequestError("send Super Reaction", error)
-            },
-        )
-    }
-
-    private fun removeSuperReaction(channelId: Long, messageId: Long, emoji: MessageReactionEmoji) {
-        if (channelId == 0L || messageId == 0L || !beginReactionAction(messageId, emoji.c())) return
-        performRemoveSuperReaction(channelId, messageId, emoji)
-    }
-
-    private fun performRemoveSuperReaction(channelId: Long, messageId: Long, emoji: MessageReactionEmoji) {
-        val apiKey = getReactionApiKey(emoji)
-        val key = emoji.c()
-        if (apiKey.isEmpty()) {
-            finishReactionAction(messageId, key)
+    private fun sendBurst(channelId: Long, messageId: Long, emoji: MessageReactionEmoji, add: Boolean) {
+        val api = api ?: return
+        if (add && !hasNitro()) {
+            Utils.showToast("Super Reactions need Nitro")
             return
         }
-        pendingSuperReactionRemovals.addAll(reactionStateKeys(messageId, key))
-        applyVisibleReactionStyles(messageId)
-        request(
-            reactionRoute(channelId, messageId, apiKey) + "/1/@me?location=Message%20Inline%20Button&burst=true",
-            "DELETE",
-            DiscordRequestQueue.ACTION,
-            { response ->
-                if (!response.ok()) {
-                    clearPendingSuperReactionRemoval(messageId, key)
-                    finishReactionAction(messageId, key)
-                    showRequestError("remove Super Reaction", httpError(response))
-                    return@request
+        val key = emoji.c()
+        val busyKey = "$messageId:${BurstStore.normalize(key)}"
+        if (!inFlight.add(busyKey)) return
+        val opKey = opKey(messageId, key, add)
+        synchronized(ops) { ops[opKey] = Op.SENT }
+        val done = { result: BurstApi.Result ->
+            inFlight.remove(busyKey)
+            if (result.ok) {
+                applyLocally(channelId, messageId, emoji, add, opKey)
+            } else {
+                synchronized(ops) { ops.remove(opKey) }
+                Utils.showToast(
+                    when {
+                        result.status == 429 -> "You're reacting too fast, try again in a moment"
+                        add -> "Couldn't add the Super Reaction"
+                        else -> "Couldn't remove the Super Reaction"
+                    },
+                )
+            }
+        }
+        val apiKey = apiKey(emoji)
+        if (add) api.addBurst(channelId, messageId, apiKey, done) else api.removeBurst(channelId, messageId, apiKey, done)
+    }
+
+    /**
+     * Shows a successful change right away instead of waiting for the gateway
+     * echo, which then gets dropped. If the echo already arrived, it was applied.
+     */
+    private fun applyLocally(channelId: Long, messageId: Long, emoji: MessageReactionEmoji, add: Boolean, opKey: String) {
+        val apply = synchronized(ops) {
+            if (ops[opKey] == Op.ECHOED) {
+                ops.remove(opKey)
+                false
+            } else {
+                ops[opKey] = Op.APPLIED
+                true
+            }
+        }
+        if (!apply) return
+        store.apply(messageId, emoji.c(), add, byMe = true, color = null)
+        invalidateBurstUsers(messageId)
+        val update = MessageReactionUpdate(otherUserId(currentUserId()), channelId, messageId, emoji)
+        STORE_COMPANION.dispatcherYesThisIsIntentional.schedule {
+            StoreStream.getMessages().handleReactionUpdate(listOf(update), add)
+        }
+        mainHandler.postDelayed({
+            synchronized(ops) { if (ops[opKey] == Op.APPLIED) ops.remove(opKey) }
+        }, ECHO_TIMEOUT_MS)
+    }
+
+    // endregion
+
+    // region Emoji picker toggle
+
+    /** Adds Discord's super reaction toggle next to the search bar of reaction pickers. */
+    private fun patchEmojiPicker() {
+        val listenerField = WidgetEmojiPicker::class.java.getDeclaredField("emojiPickerListener").apply {
+            isAccessible = true
+        }
+        val sheetDelegateField = WidgetEmojiPickerSheet::class.java.getDeclaredField("emojiPickerListenerDelegate").apply {
+            isAccessible = true
+        }
+        patcher.patch(
+            WidgetEmojiPicker::class.java,
+            "onViewBound",
+            arrayOf(View::class.java),
+            Hook { frame ->
+                val picker = frame.thisObject as WidgetEmojiPicker
+                val root = frame.args[0] as View
+                superMode = false
+                // The sheet sets its listener right after binding the picker view.
+                root.post {
+                    var listener = listenerField.get(picker) ?: return@post
+                    // In the bottom sheet the picker's listener is the sheet, which forwards to its delegate.
+                    if (listener is WidgetEmojiPickerSheet) listener = sheetDelegateField.get(listener) ?: return@post
+                    if (listener.javaClass.name in REACTION_PICKER_LISTENERS && hasNitro()) addSuperButton(root)
                 }
-                removeLocalSuperReaction(messageId, key)
-                localMutationVersions.merge(messageId, 1L, Long::plus)
-                finishReactionAction(messageId, key)
-                invalidateSuperReactionCache(messageId, channelId)
-                scheduleLocalSuperReactionRemovalFallback(channelId, messageId, emoji)
-                Utils.showToast("Super reaction removed")
-            },
-            { error ->
-                clearPendingSuperReactionRemoval(messageId, key)
-                finishReactionAction(messageId, key)
-                showRequestError("remove Super Reaction", error)
             },
         )
     }
 
-    private fun reactionStateKeys(messageId: Long, key: String): List<String> = listOf(
-        localReactionKey(messageId, key),
-        localReactionKey(messageId, normalizeReactionKey(key)),
-        localReactionKey(messageId, displayReactionKey(key)),
-        localReactionKey(messageId, normalizeReactionKey(displayReactionKey(key))),
+    private fun addSuperButton(root: View) {
+        val searchBar = root.findViewById<View>(Utils.getResId("emoji_search_bar", "id")) as? FrameLayout ?: return
+        val toolbar = searchBar.parent as? ViewGroup ?: return
+        if (toolbar is LinearLayout) return
+        val context = root.context
+        val density = context.resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
+
+        val index = toolbar.indexOfChild(searchBar)
+        toolbar.removeView(searchBar)
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        row.addView(
+            searchBar,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(dp(12), dp(12), 0, dp(8))
+            },
+        )
+
+        val smileyId = Utils.getResId("ic_reaction_24dp", "drawable")
+        val smiley = (if (smileyId > 0) ContextCompat.getDrawable(context, smileyId) else null)?.mutate() ?: return
+        val icon = SuperReactIcon(smiley)
+        val backgroundId = Utils.getResId("drawable_bg_corners_4dp", "drawable")
+        val button = ImageView(context).apply {
+            setImageDrawable(icon)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            if (backgroundId > 0) background = ContextCompat.getDrawable(context, backgroundId)?.mutate()
+            isClickable = true
+            isFocusable = true
+        }
+        fun render() {
+            val on = superMode
+            button.background?.setTint(
+                if (on) themeColor(context, "color_brand_560", BRAND) else themeColor(context, "colorBackgroundTertiary", Color.DKGRAY),
+            )
+            icon.setColor(if (on) Color.WHITE else themeColor(context, "colorInteractiveNormal", Color.LTGRAY))
+            button.contentDescription = if (on) "Super Reaction on" else "Super Reaction off"
+        }
+        button.setOnClickListener {
+            superMode = !superMode
+            render()
+        }
+        render()
+        row.addView(
+            button,
+            LinearLayout.LayoutParams(dp(44), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                setMargins(dp(8), dp(12), dp(12), dp(8))
+            },
+        )
+        toolbar.addView(row, index, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        pickerButton = WeakReference(button)
+    }
+
+    /** The toggle only applies while its picker is open, never to later quick reactions. */
+    private fun isSuperPickerActive(): Boolean =
+        superMode && pickerButton?.get()?.isAttachedToWindow == true
+
+    // endregion
+
+    // region Reactions sheet
+
+    private fun patchManageReactions() {
+        // Remember which pill opened the sheet, so a super pill opens its super tab.
+        patcher.patch(
+            WidgetManageReactions.Companion::class.java,
+            "create",
+            arrayOf(LONG, LONG, Context::class.java, MessageReaction::class.java),
+            PreHook { frame ->
+                val reaction = frame.args[3] as? MessageReaction
+                val key = BurstStore.normalize(reaction?.b()?.c())
+                pendingManageBurst = if (reaction != null && key != null && burstPills[reaction] == true) {
+                    (frame.args[1] as Long) to key
+                } else {
+                    null
+                }
+            },
+        )
+        patcher.patch(
+            WidgetManageReactions::class.java,
+            "onViewBound",
+            arrayOf(View::class.java),
+            Hook { frame ->
+                val widget = frame.thisObject as WidgetManageReactions
+                (adapterField(widget, "emojisAdapter") as? ManageReactionsEmojisAdapter)?.let {
+                    manageAdapters[it] = WeakReference(widget)
+                }
+            },
+        )
+        patcher.patch(
+            WidgetManageReactions::class.java,
+            "configureUI",
+            arrayOf(ManageReactionsModel::class.java),
+            PreHook { frame ->
+                val widget = frame.thisObject as WidgetManageReactions
+                val model = frame.args[0] as? ManageReactionsModel ?: return@PreHook
+                val intent = widget.mostRecentIntent
+                val channelId = intent.getLongExtra(EXTRA_CHANNEL_ID, 0L)
+                val messageId = intent.getLongExtra(EXTRA_MESSAGE_ID, 0L)
+                if (channelId == 0L || messageId == 0L) return@PreHook
+                val state = manageStates.getOrPut(widget) {
+                    ManageState(channelId, messageId).also { state ->
+                        pendingManageBurst?.takeIf { it.first == messageId }?.let { state.burstKey = it.second }
+                        pendingManageBurst = null
+                    }
+                }
+                state.model = model
+                frame.args[0] = buildManageModel(widget, state, model)
+            },
+        )
+        // Tabs for one emoji share its key, so clicks are routed by tab kind.
+        patcher.patch(
+            ManageReactionsEmojisAdapter.ReactionEmojiViewHolder::class.java,
+            "onConfigure",
+            arrayOf(INT, ManageReactionsEmojisAdapter.ReactionEmojiItem::class.java),
+            Hook { frame ->
+                val holder = frame.thisObject as ManageReactionsEmojisAdapter.ReactionEmojiViewHolder
+                val item = frame.args[1] as? ManageReactionsEmojisAdapter.ReactionEmojiItem ?: return@Hook
+                val adapter = holder.adapter
+                val widget = manageAdapters[adapter]?.get() ?: return@Hook
+                val emoji = item.reaction.b() ?: return@Hook
+                val key = BurstStore.normalize(emoji.c()) ?: return@Hook
+                val isBurstTab = burstTabs[item] == true
+                holder.itemView.setOnClickListener {
+                    val state = manageStates[widget] ?: return@setOnClickListener
+                    state.burstKey = if (isBurstTab) key else null
+                    if (selectedKey(state.model) == key) {
+                        refreshManage(widget, state)
+                    } else {
+                        state.awaiting = key
+                        adapter.onEmojiSelectedListener?.invoke(emoji.c())
+                    }
+                }
+            },
+        )
+    }
+
+    private fun selectedKey(model: ManageReactionsModel?): String? =
+        BurstStore.normalize(model?.reactionItems?.firstOrNull { it.isSelected }?.reaction?.b()?.c())
+
+    private fun buildManageModel(
+        widget: WidgetManageReactions,
+        state: ManageState,
+        model: ManageReactionsModel,
+    ): ManageReactionsModel {
+        val selected = selectedKey(model)
+        if (state.awaiting != null && state.awaiting == selected) state.awaiting = null
+        if (state.awaiting == null && state.burstKey != null && state.burstKey != selected) state.burstKey = null
+
+        val tabs = ArrayList<ManageReactionsEmojisAdapter.ReactionEmojiItem>(model.reactionItems.size + 4)
+        var selectedEmoji: MessageReactionEmoji? = null
+        for (item in model.reactionItems) {
+            val reaction = item.reaction
+            val emoji = reaction.b() ?: continue
+            val key = BurstStore.normalize(emoji.c())
+            val bursts = store.get(state.messageId, key)?.count ?: 0
+            if (bursts <= 0) {
+                tabs.add(item)
+                continue
+            }
+            val normal = reaction.a() - bursts
+            // A reaction that's only super has no normal tab to select.
+            if (item.isSelected && normal <= 0) state.burstKey = key
+            if (item.isSelected) selectedEmoji = emoji
+            val burstTab = ManageReactionsEmojisAdapter.ReactionEmojiItem(
+                MessageReaction(bursts, emoji, false),
+                item.isSelected && state.burstKey == key,
+            )
+            burstTabs.put(burstTab, true)
+            tabs.add(burstTab)
+            if (normal > 0) {
+                tabs.add(
+                    ManageReactionsEmojisAdapter.ReactionEmojiItem(
+                        MessageReaction(normal, emoji, reaction.c()),
+                        item.isSelected && state.burstKey != key,
+                    ),
+                )
+            }
+        }
+        val burstKey = state.burstKey
+        val users = if (burstKey != null && selectedEmoji != null) {
+            burstUserItems(widget, state, burstKey, selectedEmoji)
+        } else {
+            model.userItems
+        }
+        return ManageReactionsModel(tabs, users)
+    }
+
+    private fun burstUserItems(
+        widget: WidgetManageReactions,
+        state: ManageState,
+        key: String,
+        emoji: MessageReactionEmoji,
+    ): List<MGRecyclerDataPayload> {
+        val cacheKey = "${state.messageId}:$key"
+        val users = burstUsers[cacheKey]
+        if (users == null) {
+            if (burstUserFetches.add(cacheKey)) {
+                val widgetRef = WeakReference(widget)
+                api?.burstUsers(state.channelId, state.messageId, apiKey(emoji)) { result ->
+                    burstUserFetches.remove(cacheKey)
+                    if (!result.ok) return@burstUsers
+                    burstUsers[cacheKey] = parseUsers(result.body)
+                    val target = widgetRef.get() ?: return@burstUsers
+                    manageStates[target]?.takeIf { it.burstKey == key }?.let { refreshManage(target, it) }
+                }
+            }
+            return emptyList()
+        }
+        val me = currentUserId()
+        return users.map {
+            ManageReactionsResultsAdapter.ReactionUserItem(it, state.channelId, state.messageId, emoji, it.id == me, null)
+        }
+    }
+
+    private fun refreshManage(widget: WidgetManageReactions, state: ManageState) {
+        val model = state.model ?: return
+        val built = buildManageModel(widget, state, model)
+        (adapterField(widget, "emojisAdapter") as? ManageReactionsEmojisAdapter)?.setData(built.reactionItems)
+        (adapterField(widget, "resultsAdapter") as? ManageReactionsResultsAdapter)?.setData(built.userItems)
+    }
+
+    private fun invalidateBurstUsers(messageId: Long) {
+        mainHandler.post {
+            val prefix = "$messageId:"
+            val iterator = burstUsers.keys.iterator()
+            while (iterator.hasNext()) if (iterator.next().startsWith(prefix)) iterator.remove()
+            for ((widget, state) in manageStates.entries.toList()) {
+                if (state.messageId == messageId) refreshManage(widget, state)
+            }
+        }
+    }
+
+    private fun parseUsers(body: String): List<User> {
+        val users = ArrayList<User>()
+        val array = try {
+            JSONArray(body)
+        } catch (_: Throwable) {
+            return users
+        }
+        for (index in 0 until array.length()) {
+            val raw = array.optJSONObject(index) ?: continue
+            val id = raw.optString("id").toLongOrNull() ?: continue
+            users.add(
+                CoreUser(
+                    id,
+                    raw.optString("username").takeIf { it.isNotEmpty() } ?: "Unknown user",
+                    raw.optString("avatar").takeIf { it.isNotEmpty() && it != "null" },
+                    raw.optString("banner").takeIf { it.isNotEmpty() && it != "null" },
+                    raw.optBoolean("bot"),
+                    raw.optBoolean("system"),
+                    raw.optString("discriminator").toIntOrNull() ?: 0,
+                    PremiumTier.NONE,
+                    raw.optInt("flags"),
+                    raw.optInt("public_flags"),
+                    null,
+                    null,
+                ),
+            )
+        }
+        return users
+    }
+
+    private fun adapterField(widget: WidgetManageReactions, name: String): Any? = try {
+        WidgetManageReactions::class.java.getDeclaredField(name).apply { isAccessible = true }.get(widget)
+    } catch (_: Throwable) {
+        null
+    }
+
+    // endregion
+
+    // region Helpers
+
+    private fun opKey(messageId: Long, key: String?, add: Boolean) =
+        "$messageId:${BurstStore.normalize(key)}:${if (add) "add" else "remove"}"
+
+    /** The key the REST API expects: `name:id` for custom emojis, the character otherwise. */
+    private fun apiKey(emoji: MessageReactionEmoji): String =
+        if (emoji.e() && emoji.b() != null) "${emoji.d() ?: "_"}:${emoji.b()}" else emoji.d() ?: emoji.c()
+
+    private fun longField(target: Any, name: String): Long? = try {
+        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.getLong(target).takeIf { it != 0L }
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun hasNitro(): Boolean = try {
+        UserUtils.INSTANCE.isPremium(StoreStream.getUsers().me)
+    } catch (_: Throwable) {
+        false
+    }
+
+    private fun currentUserId(): Long = try {
+        StoreStream.getUsers().me.id
+    } catch (_: Throwable) {
+        0L
+    }
+
+    /** Any id that isn't ours, so Discord counts the update without setting `me`. */
+    private fun otherUserId(me: Long) = if (me == 1L) 2L else 1L
+
+    private fun themeColor(context: Context, attr: String, fallback: Int): Int {
+        val id = Utils.getResId(attr, "attr")
+        if (id == 0) return fallback
+        val value = TypedValue()
+        if (!context.theme.resolveAttribute(id, value, true)) return fallback
+        return when {
+            value.type >= TypedValue.TYPE_FIRST_COLOR_INT && value.type <= TypedValue.TYPE_LAST_COLOR_INT -> value.data
+            value.resourceId != 0 -> ContextCompat.getColor(context, value.resourceId)
+            else -> fallback
+        }
+    }
+
+    private fun withAlpha(color: Int, alpha: Int) =
+        Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+
+    private fun blend(color: Int, target: Int, amount: Float): Int = Color.rgb(
+        (Color.red(color) + (Color.red(target) - Color.red(color)) * amount).toInt(),
+        (Color.green(color) + (Color.green(target) - Color.green(color)) * amount).toInt(),
+        (Color.blue(color) + (Color.blue(target) - Color.blue(color)) * amount).toInt(),
     )
 
-    private fun isPendingSuperReactionRemoval(messageId: Long, key: String?) = key != null &&
-        reactionStateKeys(messageId, key).any { it in pendingSuperReactionRemovals }
-
-    private fun isCompletedSuperReactionRemoval(messageId: Long, key: String?) = key != null &&
-        reactionStateKeys(messageId, key).any { it in completedSuperReactionRemovals }
-
-    private fun clearPendingSuperReactionRemoval(messageId: Long, key: String): Boolean {
-        var removed = false
-        reactionStateKeys(messageId, key).forEach { if (pendingSuperReactionRemovals.remove(it)) removed = true }
-        return removed
-    }
-
-    private fun completeSuperReactionRemoval(messageId: Long, key: String) {
-        clearPendingSuperReactionRemoval(messageId, key)
-        completedSuperReactionRemovals.addAll(reactionStateKeys(messageId, key))
-        val action = actionKey(messageId, key)
-        val token = Any()
-        completedRemovalTokens[action] = token
-        mainHandler.postDelayed({
-            if (completedRemovalTokens[action] === token) clearCompletedSuperReactionRemoval(messageId, key)
-        }, LOCAL_REMOVAL_MARKER_TTL_MS)
-    }
-
-    private fun clearCompletedSuperReactionRemoval(messageId: Long, key: String?) {
-        if (key == null) return
-        completedRemovalTokens.remove(actionKey(messageId, key))
-        reactionStateKeys(messageId, key).forEach { completedSuperReactionRemovals.remove(it) }
-    }
-
-    private fun scheduleLocalSuperReactionRemovalFallback(
-        channelId: Long,
-        messageId: Long,
-        emoji: MessageReactionEmoji,
-    ) {
-        mainHandler.postDelayed({
-            val key = emoji.c()
-            if (!clearPendingSuperReactionRemoval(messageId, key)) return@postDelayed
-            completeSuperReactionRemoval(messageId, key)
-            try {
-                // Some old clients never receive the successful DELETE's gateway event.
-                val update = MessageReactionUpdate(
-                    if (getCurrentUserId() ==
-                        1L
-                    ) {
-                        2L
-                    } else {
-                        1L
-                    },
-                    channelId,
-                    messageId,
-                    emoji,
-                )
-                StoreStream.getMessages().handleReactionUpdate(listOf(update), false)
-            } catch (error: Throwable) {
-                logger.error("Could not update removed Super Reaction locally", error)
-            }
-        }, LOCAL_REMOVAL_FALLBACK_DELAY_MS)
-    }
-
-    private fun removeLocalSuperReaction(messageId: Long, key: String) {
-        var changed = false
-        reactionStateKeys(messageId, key).forEach {
-            if (locallySentSuperReactions.remove(it)) changed = true
-            if (ownedSuperReactions.remove(it)) changed = true
-        }
-        if (changed) persistOwnedSuperReactions()
-    }
+    // endregion
 
     override fun stop(context: Context) {
-        running = false
-        requests?.close()
-        requests = null
         patcher.unpatchAll()
+        api?.close()
+        api = null
         mainHandler.removeCallbacksAndMessages(null)
-        reactionStyles.forEach { (view, style) ->
-            setReactionBackground(view, cloneDrawable(style.background))
-            style.restoreTextColors(view)
-            view.contentDescription = style.description
-            setReactionMeState(view, 0L, view.reaction, false)
+        for ((view, native) in nativeBackgrounds.entries.toList()) {
+            setBackgroundKeepingPadding(view, native)
+            restoreCounterColors(view)
+            view.contentDescription = null
         }
-        reactionStyles.clear()
-        reactionBindings.clear()
-        synchronized(superReactionButtons) {
-            superReactionButtons.values.forEach { (it.parent as? ViewGroup)?.removeView(it) }
-            superReactionButtons.clear()
+        nativeBackgrounds.clear()
+        nativeCounterColors.clear()
+        pillBackgrounds.clear()
+        // Collapse split pills back to Discord's single reactions.
+        for ((item, row) in rows.entries.toList()) {
+            if (item.itemView.isAttachedToWindow) item.onConfigure(row.position, row.entry)
         }
-        synchronized(visibleReactionItems) {
-            visibleReactionItems.keys.toList().forEach { item ->
-                val entry = visibleReactionEntries[item]
-                val position = visibleReactionPositions[item]
-                if (entry != null && position != null) item.onConfigure(position, entry)
-            }
-            visibleReactionItems.clear()
-            visibleReactionEntries.clear()
-            visibleReactionPositions.clear()
-        }
-        synchronized(activeManageReactions) { activeManageReactions.clear() }
-        synchronized(activeManageEmojiAdapters) { activeManageEmojiAdapters.clear() }
-        synchronized(manageReactionWidgetTypes) { manageReactionWidgetTypes.clear() }
-        manageReactionItemTypes.clear()
-        gatewayReactionTypes.clear()
-        listOf(
-            manageReactionTypes,
-            reactionChannels,
-            superReactionCounts,
-            normalReactionCounts,
-            superReactionColors,
-            expandedReactionTypes,
-            superReactionFetchTimes,
-            superReactionInvalidationVersions,
-            localMutationVersions,
-            completedRemovalTokens,
-            metadataAttempts,
-            metadataRefreshes,
-            metadataWaiters,
-            burstReactionUsers,
-            normalReactionItems,
-        ).forEach { it.clear() }
-        listOf(
-            superReactionFetches,
-            channelBatchFetches,
-            batchPendingMessages,
-            locallySentSuperReactions,
-            ownedSuperReactions,
-            pendingSuperReactionRemovals,
-            completedSuperReactionRemovals,
-            pendingReactionActions,
-            burstUserFetches,
-        ).forEach { it.clear() }
-        ownedReactionPreferences = null
-        ownedReactionPreferencesKey = null
+        rows.clear()
+        pickerButton?.get()?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        pickerButton = null
+        superMode = false
+        store.clearAll()
+        burstPills.clear()
+        gatewayEvents.clear()
+        burstTabs.clear()
+        snapshotQueue.clear()
+        snapshotAttempts.clear()
+        inFlight.clear()
+        manageStates.clear()
+        manageAdapters.clear()
+        burstUsers.clear()
+        burstUserFetches.clear()
+        pendingManageBurst = null
+        synchronized(ops) { ops.clear() }
     }
 
     private companion object {
         val LONG = Long::class.javaPrimitiveType!!
         val INT = Int::class.javaPrimitiveType!!
         val BOOLEAN = Boolean::class.javaPrimitiveType!!
-        const val CHANNEL_ID_ARGUMENT = "INTENT_EXTRA_MESSAGE_CHANNEL_ID"
-        const val MESSAGE_ID_ARGUMENT = "INTENT_EXTRA_MESSAGE_ID"
-        const val ADD_REACTION_LIST_ID = "dialog_chat_actions_add_reaction_emojis_list"
-        const val ACTIONS_CONTAINER_ID = "dialog_chat_actions_container"
-        const val MANAGE_REACTIONS_ID = "dialog_chat_actions_manage_reactions"
-        const val MANAGE_REACTIONS_EMOJI_ARGUMENT = "com.discord.intent.extra.EXTRA_EMOJI_KEY"
+        const val COUNTER_1 = "counter_text_1"
+        const val COUNTER_2 = "counter_text_2"
         const val EXTRA_CHANNEL_ID = "com.discord.intent.extra.EXTRA_CHANNEL_ID"
         const val EXTRA_MESSAGE_ID = "com.discord.intent.extra.EXTRA_MESSAGE_ID"
-        const val SUPER_REACTION_CACHE_TTL = 5 * 60 * 1000L
-        const val METADATA_REFRESH_DELAY_MS = 400L
-        const val METADATA_MIN_INTERVAL_MS = 1_500L
-        const val METADATA_FAILURE_DELAY_MS = 15_000L
-        const val LOCAL_REMOVAL_FALLBACK_DELAY_MS = 2_000L
-        const val LOCAL_REMOVAL_MARKER_TTL_MS = 10_000L
-        const val OWNED_REACTIONS_PREFERENCES = "owned_super_reactions_"
-        val SUPER_REACTION_COLOR = Color.rgb(255, 196, 61)
+        const val SNAPSHOT_DEBOUNCE_MS = 400L
+        const val MAX_SNAPSHOT_ATTEMPTS = 2
+        const val ECHO_TIMEOUT_MS = 60_000L
+        val BRAND = Color.rgb(88, 101, 242)
+        val DEFAULT_BURST_COLOR = Color.rgb(255, 196, 61)
+        val MESSAGES_PATH: Pattern = Pattern.compile(".*/channels/\\d+/messages")
+
+        /** okio Buffer.clone(); Kotlin resolves `clone()` to the protected Cloneable one. */
+        val BUFFER_CLONE: java.lang.reflect.Method = g0.e::class.java.getMethod("clone")
+
+        /** Kotlin resolves `StoreStream.Companion` to the nested class, not the static field. */
+        val STORE_COMPANION: StoreStream.Companion by lazy {
+            StoreStream::class.java.getField("Companion").get(null) as StoreStream.Companion
+        }
+        val REACTION_PICKER_LISTENERS = setOf(
+            "com.discord.widgets.chat.list.actions.WidgetChatListActions\$onViewCreated\$2\$1",
+            "com.discord.widgets.chat.list.adapter.WidgetChatListAdapterEventsHandler\$onQuickAddReactionClicked\$1\$1",
+        )
     }
 }
