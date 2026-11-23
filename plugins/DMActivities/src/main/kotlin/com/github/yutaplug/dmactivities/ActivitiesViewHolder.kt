@@ -2,6 +2,7 @@ package com.github.yutaplug.dmactivities
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Outline
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -221,7 +222,10 @@ class ActivitiesViewHolder(
             card.contentDescription = listOfNotNull(data.name, subtitle.text?.takeIf { subtitle.visibility == View.VISIBLE })
                 .joinToString(", ")
             card.setOnClickListener {
-                val manager = (Utils.appActivity as? FragmentActivity ?: context as? FragmentActivity)
+                // The card's own screen first: Aliucord's appActivity can be a screen that was already closed.
+                var screen: Context? = context
+                while (screen is ContextWrapper && screen !is FragmentActivity) screen = screen.baseContext
+                val manager = (screen as? FragmentActivity ?: Utils.appActivity as? FragmentActivity)
                     ?.supportFragmentManager ?: return@setOnClickListener
                 WidgetUserSheet()
                     .apply {
