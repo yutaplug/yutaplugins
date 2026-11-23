@@ -153,8 +153,15 @@ class MessageReminders : Plugin() {
                     if (!active) return@setOnClickListener
                     val author = message.author?.let { CoreUser(it) }?.let { it.username }
                     val preview = message.content?.replace('\n', ' ')?.trim()?.takeIf { it.isNotEmpty() }
+                    // The menu's own screen: Aliucord's appActivity can be a screen that was already closed.
+                    val manager = actions.activity?.supportFragmentManager ?: return@setOnClickListener
                     actions.dismiss()
-                    RemindMeSheet.show(this, Reminder(channelId, messageId, channel.i(), 0L, author, preview), jump = false)
+                    RemindMeSheet.show(
+                        this,
+                        Reminder(channelId, messageId, channel.i(), 0L, author, preview),
+                        jump = false,
+                        manager = manager,
+                    )
                 }
             },
         )

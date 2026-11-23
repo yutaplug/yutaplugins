@@ -75,7 +75,7 @@ class RemindersPage(private val plugin: MessageReminders) : SettingsPage() {
             if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, value, true)) {
                 setBackgroundResource(value.resourceId)
             }
-            setOnClickListener { RemindMeSheet.show(plugin, reminder, jump = true) }
+            setOnClickListener { RemindMeSheet.show(plugin, reminder, jump = true, manager = parentFragmentManager) }
         }
         row.addView(
             TextView(context, null, 0, R.i.UiKit_Settings_Item_Icon).apply {

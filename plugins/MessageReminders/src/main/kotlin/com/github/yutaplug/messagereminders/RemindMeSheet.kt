@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentManager
 import com.aliucord.Utils
 import com.aliucord.widgets.BottomSheet
 import com.lytefast.flexinput.R
@@ -222,8 +223,16 @@ internal class RemindMeSheet(
             return if (dueAt > now) "Due $relative" else "Was due $relative"
         }
 
-        fun show(plugin: MessageReminders, target: Reminder, jump: Boolean) {
-            val manager = Utils.appActivity.supportFragmentManager
+        /**
+         * [manager] should be the one of the screen the user is on: Aliucord's appActivity can be a
+         * closed screen (after leaving settings or the image viewer), where the sheet silently never shows.
+         */
+        fun show(
+            plugin: MessageReminders,
+            target: Reminder,
+            jump: Boolean,
+            manager: FragmentManager = Utils.appActivity.supportFragmentManager,
+        ) {
             if (manager.findFragmentByTag(TAG) != null) return
             RemindMeSheet(plugin, target, jump).show(manager, TAG)
         }
