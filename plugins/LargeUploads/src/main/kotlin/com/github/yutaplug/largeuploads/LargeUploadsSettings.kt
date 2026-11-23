@@ -35,6 +35,18 @@ class LargeUploadsSettings(private val plugin: LargeUploads) : SettingsPage() {
                 "message. Your limit is $own MB, or more in boosted servers (50 MB at level 2, 100 MB at level 3). " +
                 "Files too large for the host still show Discord's \"file too large\" message.",
         )
+        add(
+            Utils.createCheckedSetting(
+                requireContext(),
+                CheckedSetting.ViewType.SWITCH,
+                "Always upload to the file host",
+                "Send every attachment to the file host as a link, even files under your upload limit. " +
+                    "Files too large for the host are still sent to Discord.",
+            ).apply {
+                isChecked = plugin.alwaysUpload
+                setOnCheckedListener { plugin.alwaysUpload = it }
+            },
+        )
 
         divider()
         section("File host")

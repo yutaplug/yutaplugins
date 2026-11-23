@@ -3,8 +3,11 @@ package com.github.yutaplug.largeuploads
 import org.json.JSONObject
 import java.io.IOException
 import java.io.InputStream
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.util.Locale
 import java.util.regex.Pattern
 
 /** The file hosts the plugin can upload to. */
@@ -29,14 +32,14 @@ internal enum class Host(
         "catbox.moe",
         "Up to 200 MB, files are kept permanently",
         200L * 1000L * 1000L,
-        "catbox.moe has paused uploads because of storage issues",
+        "catbox.moe is losing or cutting short most uploads because of storage issues",
     ),
     LITTERBOX(
         "litterbox",
         "Litterbox",
         "Up to 1 GB, files are deleted after a set time",
         1000L * 1000L * 1000L,
-        "Litterbox has paused uploads because of storage issues",
+        "Litterbox is refusing uploads right now",
     ),
     ;
 
@@ -57,6 +60,7 @@ internal object FileHosts {
     private const val POMF_API = "https://pomf.lain.la/upload.php"
     private const val CATBOX_API = "https://catbox.moe/user/api.php"
     private const val LITTERBOX_API = "https://litterbox.catbox.moe/resources/internals/api.php"
+    private const val USER_AGENT = "Aliucord LargeUploads"
 
     /** How long Litterbox keeps a file. The API accepts exactly these values. */
     val LITTERBOX_TIMES = listOf("1h", "12h", "24h", "72h")
@@ -73,8 +77,14 @@ internal object FileHosts {
         val open: () -> InputStream,
     )
 
+    /** How many times an upload is sent before giving up on a host that keeps failing on its end. */
+    private const val ATTEMPTS = 3
+
+    /** A failure on the host's end that may not happen again if the upload is sent again. */
+    private class TransientException(message: String) : IOException(message)
+
     /** Uploads to pomf.lain.la, which answers with JSON: {"success":true,"files":[{"url":"..."}]}. */
-    fun uploadPomf(file: UploadFile, progress: (Long) -> Unit): String {
+    fun uploadPomf(file: UploadFile, progress: (Long) -> Unit): String = withRetries {
         val body = upload(POMF_API, emptyMap(), "files[]", file, progress)
         val json = try {
             JSONObject(body)
@@ -87,25 +97,89 @@ internal object FileHosts {
         }
         val url = json.optJSONArray("files")?.optJSONObject(0)?.optString("url").orEmpty()
         if (!url.startsWith("https://")) throw IOException("No link in the response")
-        return url
+        url
     }
 
     /** Uploads to catbox.moe. Files are kept permanently in the account of [userHash], if set. */
     fun uploadCatbox(file: UploadFile, userHash: String, progress: (Long) -> Unit): String {
         val fields = linkedMapOf("reqtype" to "fileupload")
         if (userHash.isNotEmpty()) fields["userhash"] = userHash
-        return plainUrl(upload(CATBOX_API, fields, "fileToUpload", file, progress))
+        val url = withRetries { plainUrl(upload(CATBOX_API, fields, "fileToUpload", file, progress)) }
+        return checkStored(url, file.length)
     }
 
     /** Uploads to Litterbox, which deletes the file after [time] (one of [LITTERBOX_TIMES]). */
     fun uploadLitterbox(file: UploadFile, time: String, progress: (Long) -> Unit): String {
         val fields = linkedMapOf("reqtype" to "fileupload", "time" to time)
-        return plainUrl(upload(LITTERBOX_API, fields, "fileToUpload", file, progress))
+        val url = withRetries { plainUrl(upload(LITTERBOX_API, fields, "fileToUpload", file, progress)) }
+        return checkStored(url, file.length)
     }
 
+    /**
+     * catbox and Litterbox sometimes keep only the start of a file but still return its link, so ask for the
+     * file's last byte. Sending it again doesn't help: catbox recognizes the file and returns the same broken link.
+     */
+    private fun checkStored(url: String, length: Long): String {
+        if (length <= 0) return url
+        val stored = try {
+            storedLength(url, length)
+        } catch (error: InterruptedIOException) {
+            if (error is SocketTimeoutException) return url
+            throw error
+        } catch (error: IOException) {
+            // The link can't be checked right now, which doesn't mean the file is broken.
+            return url
+        }
+        if (stored != null && stored < length) {
+            throw IOException(
+                "the host only kept ${mb(stored)} of ${mb(length)} of the file, its storage is failing right now. " +
+                    "Try pomf.lain.la instead",
+            )
+        }
+        return url
+    }
+
+    /** The size the host reports for [url], or null if it doesn't say. */
+    private fun storedLength(url: String, length: Long): Long? {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = 30_000
+            conn.readTimeout = 60_000
+            conn.setRequestProperty("User-Agent", USER_AGENT)
+            conn.setRequestProperty("Accept-Encoding", "identity")
+            conn.setRequestProperty("Range", "bytes=${length - 1}-${length - 1}")
+            // 206 for "bytes 99-99/100" when the whole file is there, 416 for "bytes */60" when it was cut short.
+            val code = conn.responseCode
+            if (code != 206 && code != 416) return null
+            return conn.getHeaderField("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull()
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun mb(bytes: Long) = String.format(Locale.US, "%.1f MB", bytes / 1_000_000.0)
+
     private fun plainUrl(body: String): String {
-        if (!body.startsWith("https://")) throw IOException(summarize(body).let { if (it.isEmpty()) "Empty response" else it })
+        // catbox and Litterbox sometimes accept the upload but answer with an empty body instead of the link.
+        if (body.isEmpty()) throw TransientException("the host didn't send back a link")
+        if (!body.startsWith("https://")) throw IOException(summarize(body).let { if (it.isEmpty()) "Unexpected response" else it })
         return body
+    }
+
+    /** Runs [upload] again, after a short pause, while it fails on the host's end. */
+    private fun <T> withRetries(upload: () -> T): T {
+        var attempt = 1
+        while (true) {
+            try {
+                return upload()
+            } catch (error: TransientException) {
+                if (attempt >= ATTEMPTS) {
+                    throw IOException("${error.message} (tried $ATTEMPTS times, the host may be having problems)")
+                }
+                Thread.sleep(2000L * attempt)
+                attempt++
+            }
+        }
     }
 
     /** Streams [file] as a multipart form to [endpoint] and returns the response body of a successful request. */
@@ -143,7 +217,7 @@ internal object FileHosts {
             conn.connectTimeout = 30_000
             // Large files can take a while to be processed after the upload finishes.
             conn.readTimeout = 10 * 60_000
-            conn.setRequestProperty("User-Agent", "Aliucord LargeUploads")
+            conn.setRequestProperty("User-Agent", USER_AGENT)
             conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             // Stream the body instead of letting HttpURLConnection buffer the whole file in memory.
             if (file.length >= 0) {
@@ -179,7 +253,15 @@ internal object FileHosts {
             val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty().trim()
             if (code !in 200..299) {
                 val reason = summarize(body)
-                throw IOException(if (reason.isEmpty()) "HTTP $code" else "HTTP $code: $reason")
+                val message = when {
+                    reason.isEmpty() -> "HTTP $code"
+                    // Error pages are titled like "403 | Forbidden", so don't repeat the code.
+                    reason.startsWith(code.toString()) -> "HTTP $reason"
+                    else -> "HTTP $code: $reason"
+                }
+                // A file is always sent, so Litterbox's "No file!" means it failed to store it, like a 5xx error.
+                if (code >= 500 || (code == 412 && body == "No file!")) throw TransientException(message)
+                throw IOException(message)
             }
             return body
         } finally {

@@ -20,6 +20,8 @@ import de.robv.android.xposed.callbacks.XCallback
 import rx.Observable
 import rx.subjects.BehaviorSubject
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.SocketTimeoutException
 
 @AliucordPlugin
 class LargeUploads : Plugin() {
@@ -44,6 +46,11 @@ class LargeUploads : Plugin() {
     internal var host: Host
         get() = Host.fromId(settings.getString(KEY_HOST, Host.DEFAULT.id)).takeIf { it.available } ?: Host.DEFAULT
         set(value) = settings.setString(KEY_HOST, value.id)
+
+    /** Send every file the host accepts to it, not only files over the Discord upload limit. */
+    var alwaysUpload: Boolean
+        get() = settings.getBool(KEY_ALWAYS_UPLOAD, false)
+        set(value) = settings.setBool(KEY_ALWAYS_UPLOAD, value)
 
     var catboxUserHash: String
         get() = settings.getString(KEY_CATBOX_USER_HASH, "").orEmpty().trim()
@@ -128,8 +135,13 @@ class LargeUploads : Plugin() {
                     try {
                         divert(payload, channelId)?.let { param.args[0] = it }
                     } catch (error: Throwable) {
-                        logger.error("Upload failed", error)
-                        toast("Upload failed: ${error.message ?: error.javaClass.simpleName}")
+                        if (isCancellation(error)) {
+                            // Cancelling a pending message interrupts this thread. That's not a failure worth a toast.
+                            logger.info("Upload cancelled")
+                        } else {
+                            logger.error("Upload failed", error)
+                            toast("Upload failed: ${error.message ?: error.javaClass.simpleName}")
+                        }
                         // Fail the send, so the message can be retried instead of going out without its files.
                         param.result = Observable.x<Any>(error)
                     }
@@ -141,7 +153,8 @@ class LargeUploads : Plugin() {
     /** Uploads the files Discord would reject and returns the rewritten payload, or null if nothing changes. */
     private fun divert(payload: SendUtils.SendPayload.ReadyToSend, channelId: Long): SendUtils.SendPayload.ReadyToSend? {
         val host = host
-        val limit = UploadLimits.forChannel(channelId)
+        // With "always upload", every non-empty file the host accepts counts as over the limit.
+        val limit = if (alwaysUpload) 0L else UploadLimits.forChannel(channelId)
         val keep = payload.uploads.toMutableList()
         val divert = keep.filter { it.contentLength > limit && it.contentLength <= host.maxBytes }
         keep.removeAll(divert)
@@ -200,6 +213,17 @@ class LargeUploads : Plugin() {
         }
     }
 
+    /** Whether [error] comes from the upload thread being interrupted (a timeout is a real failure). */
+    private fun isCancellation(error: Throwable): Boolean {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause is InterruptedException) return true
+            if (cause is InterruptedIOException && cause !is SocketTimeoutException) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
     private fun toast(text: String) {
         Utils.mainThread.post { Utils.showToast(text) }
     }
@@ -210,6 +234,7 @@ class LargeUploads : Plugin() {
 
     internal companion object {
         const val KEY_HOST = "host"
+        const val KEY_ALWAYS_UPLOAD = "alwaysUpload"
         const val KEY_CATBOX_USER_HASH = "catboxUserHash"
         const val KEY_LITTERBOX_TIME = "litterboxTime"
         const val DEFAULT_LITTERBOX_TIME = "72h"
