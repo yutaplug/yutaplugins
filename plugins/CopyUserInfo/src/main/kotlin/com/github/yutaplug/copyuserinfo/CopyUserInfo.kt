@@ -15,6 +15,7 @@ import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.wrappers.ChannelWrapper.Companion.guildId
 import com.aliucord.wrappers.users.globalName
+import com.discord.app.AppActivity
 import com.discord.stores.StoreStream
 import com.discord.utilities.io.NetworkUtils
 import com.discord.widgets.user.usersheet.WidgetUserSheet
@@ -135,10 +136,10 @@ class CopyUserInfo : Plugin() {
         row("Copy Profile Picture URL", "ic_copy") { copy(info.avatarUrl) }
         info.bannerUrl?.let { url -> row("Copy Banner URL", "ic_copy") { copy(url) } }
         row("Download Profile Picture", "ic_file_download_opaque") {
-            download(info.avatarUrl, "${info.username}_avatar")
+            download(dialog, info.avatarUrl, "${info.username}_avatar")
         }
         info.bannerUrl?.let { url ->
-            row("Download Banner", "ic_file_download_opaque") { download(url, "${info.username}_banner") }
+            row("Download Banner", "ic_file_download_opaque") { download(dialog, url, "${info.username}_banner") }
         }
 
         val server = info.server ?: return
@@ -148,12 +149,12 @@ class CopyUserInfo : Plugin() {
         server.bannerUrl?.let { url -> row("Copy Server Banner URL", "ic_copy") { copy(url) } }
         server.avatarUrl?.let { url ->
             row("Download Server Profile Picture", "ic_file_download_opaque") {
-                download(url, "${info.username}_server_avatar")
+                download(dialog, url, "${info.username}_server_avatar")
             }
         }
         server.bannerUrl?.let { url ->
             row("Download Server Banner", "ic_file_download_opaque") {
-                download(url, "${info.username}_server_banner")
+                download(dialog, url, "${info.username}_server_banner")
             }
         }
     }
@@ -228,9 +229,10 @@ class CopyUserInfo : Plugin() {
         Utils.showToast("Copied to clipboard")
     }
 
-    private fun download(url: String, baseName: String) {
+    private fun download(dialog: UserActionsDialog, url: String, baseName: String) {
         val fileName = "$baseName.${if (url.contains(".gif")) "gif" else "png"}"
-        val activity = Utils.appActivity
+        // The menu's own screen: Aliucord's appActivity can be a screen that was already closed.
+        val activity = dialog.activity as? AppActivity ?: Utils.appActivity
         activity.x.requestMediaDownload {
             NetworkUtils.downloadFile(
                 activity,
