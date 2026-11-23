@@ -228,7 +228,8 @@ class SwipeToReplyAndEdit : Plugin() {
     }
 
     private fun openKeyboard() {
-        val activity = Utils.appActivity ?: return
+        // The chat's own screen: Aliucord's appActivity can be a screen that was already closed.
+        val activity = Utils.widgetChatList?.activity ?: Utils.appActivity ?: return
         val input = activity.findViewById<EditText>(Utils.getResId("text_input", "id")) ?: return
         input.postDelayed({
             input.requestFocus()
