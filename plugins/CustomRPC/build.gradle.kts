@@ -1,8 +1,11 @@
-version = "1.0.7"
+version = "1.0.8"
 description = "Set a custom Rich Presence from Aliucord settings."
 aliucord {
     changelog.set(
         """
+        # 1.0.8
+        * The activity type and flags dialogs no longer stop opening after you open and close another screen, like settings or an image
+
         # 1.0.7
         * Use Aliucord's themed dialogs for activity type and activity flags
         * Rebuild settings with Discord's native rows, headers, dividers and text inputs

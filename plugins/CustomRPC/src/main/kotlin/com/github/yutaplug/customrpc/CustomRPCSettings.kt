@@ -67,7 +67,7 @@ class CustomRPCSettings(private val settings: SettingsAPI, private val plugin: C
                     plugin.setType(CustomRPC.types[which])
                     typeSummary.text = CustomRPC.typeLabel(plugin.activityType())
                 }
-            }.show(Utils.appActivity.supportFragmentManager, "CustomRPCType")
+            }.show(parentFragmentManager, "CustomRPCType")
         }
         input("Activity name", CustomRPC.NAME)
         input("Details", CustomRPC.DETAILS)
@@ -102,7 +102,7 @@ class CustomRPCSettings(private val settings: SettingsAPI, private val plugin: C
         lateinit var flagsSummary: TextView
         flagsSummary = action("Activity flags", ActivityFlags.label(plugin.flags())) {
             ActivityFlagsSheet(plugin) { flagsSummary.text = ActivityFlags.label(plugin.flags()) }
-                .show(Utils.appActivity.supportFragmentManager, "CustomRPCFlags")
+                .show(parentFragmentManager, "CustomRPCFlags")
         }
         note("Flags alone do not enable joining or spectating; these require activity secrets.")
 
