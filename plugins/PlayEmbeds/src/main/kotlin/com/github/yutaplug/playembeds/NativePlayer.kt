@@ -41,11 +41,11 @@ internal object NativePlayers {
     }
 
     /**
-     * Whether rotating Discord's own activity can't be used for fullscreen. Before
-     * Android 8 the activity has no window while it's rebuilt for a rotation (about
-     * 3 seconds), so the phone goes back to portrait meanwhile and the rebuilt
-     * activity asks for landscape again, rebuilding it endlessly. Fullscreen then
-     * rotates in a screen of its own, or turns the player sideways as a fallback.
+     * Whether fullscreen turns the player sideways instead of rotating the screen.
+     * Before Android 8, rotating Discord's own activity loops: it has no window while
+     * it's rebuilt (about 3 seconds), so the phone goes back to portrait meanwhile and
+     * the rebuilt activity asks for landscape again. A screen of its own does rotate
+     * there, but takes seconds to open on such phones; turning the player is instant.
      */
     val turnsPlayerSideways get() = Build.VERSION.SDK_INT < Build.VERSION_CODES.O
 

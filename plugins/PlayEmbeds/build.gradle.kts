@@ -1,9 +1,12 @@
-version = "1.0.16"
+version = "1.0.17"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.17
+        * On Android 7 and older, rotating fullscreen turns the video sideways instantly instead of rotating the screen
+
         # 1.0.16
         * Rotating fullscreen to landscape no longer makes Discord blink on the way in or out
 

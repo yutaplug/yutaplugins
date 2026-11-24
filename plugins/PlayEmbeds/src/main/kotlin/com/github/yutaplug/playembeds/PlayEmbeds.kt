@@ -1450,9 +1450,10 @@ class PlayEmbeds : Plugin() {
      * doesn't handle rotation itself and would be recreated, destroying the
      * player, so the current orientation is locked while fullscreen. With the
      * rotate setting, a [landscape] video on a portrait screen rotates in a
-     * screen of its own instead ([enterHostedFullscreen]). If that can't open,
-     * Discord's own screen rotates ([RotatedSession]), or before Android 8 (see
-     * [NativePlayers.turnsPlayerSideways]) the player is turned sideways.
+     * screen of its own instead ([enterHostedFullscreen]), or if that can't open,
+     * Discord's own screen rotates ([RotatedSession]). Before Android 8 (see
+     * [NativePlayers.turnsPlayerSideways]) the player is turned sideways instead,
+     * which is instant where a real rotation takes seconds.
      */
     @Suppress("DEPRECATION")
     private fun enterFullscreen(root: View, button: ImageButton, landscape: Boolean) {
@@ -1461,9 +1462,10 @@ class PlayEmbeds : Plugin() {
         val decor = activity.window.decorView as? ViewGroup ?: return
         val portraitScreen = decor.width > 0 && decor.width < decor.height
         val rotate = landscape && rotateFullscreen && portraitScreen
-        if (rotate) {
+        // Before Android 8 the player is turned sideways: really rotating takes a few seconds there.
+        if (rotate && !NativePlayers.turnsPlayerSideways) {
             if (enterHostedFullscreen(root, activity)) return
-            if (!NativePlayers.turnsPlayerSideways && enterRotatedFullscreen(root, activity)) return
+            if (enterRotatedFullscreen(root, activity)) return
         }
         val sideways = rotate && NativePlayers.turnsPlayerSideways &&
             ((root as? ViewGroup)?.getChildAt(0) as? PlayerView)?.videoSurfaceView is TextureView
