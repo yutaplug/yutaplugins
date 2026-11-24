@@ -11,12 +11,18 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PorterDuff
 import android.graphics.Rect
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.util.TypedValue
+import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.OrientationEventListener
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -34,6 +40,7 @@ import androidx.constraintlayout.widget.Barrier
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
+import com.android.billingclient.api.ProxyBillingActivity
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -90,6 +97,10 @@ class PlayEmbeds : Plugin() {
     private var returning: RotatedSession? = null
     private var application: Application? = null
 
+    /** The video in a fullscreen screen of its own (see [enterHostedFullscreen]). */
+    private var hosted: RotatedSession? = null
+    private var hostPatched = false
+
     internal val replaceWholeCard get() = settings.getBool(KEY_WHOLE_CARD, false)
     internal val rotateFullscreen get() = settings.getBool(KEY_ROTATE_FULLSCREEN, false)
     internal val youtubeQuality get()= settings.getInt(KEY_YOUTUBE_QUALITY, YoutubeResolver.AUTO_QUALITY)
@@ -109,7 +120,15 @@ class PlayEmbeds : Plugin() {
         patchEmbedRows()
         patchNativeHostedLaunches()
         patchPlayerErrors()
-        application = (context.applicationContext as? Application)?.also {
+        hostPatched = try {
+            patchFullscreenHost()
+            true
+        } catch (e: Throwable) {
+            // Then fullscreen turns the player sideways instead.
+            DebugLog.log("host: couldn't patch its screen: $e")
+            false
+        }
+        application =(context.applicationContext as? Application)?.also {
             it.registerActivityLifecycleCallbacks(rotationCallbacks)
         }
     }
@@ -147,6 +166,7 @@ class PlayEmbeds : Plugin() {
             onError,
             Hook { frame ->
                 val callback = errorCallbacks.remove(frame.thisObject) ?: return@Hook
+                DebugLog.log("player error: ${frame.args.firstOrNull()}")
                 Utils.mainThread.post { callback() }
             },
         )
@@ -652,7 +672,10 @@ class PlayEmbeds : Plugin() {
             val root = rootRef.get() ?: return@OnScrollChangedListener
             if (fullscreenPlayers.containsKey(root)) return@OnScrollChangedListener
             val onScreen = isOnScreen(root)
-            if (wasOnScreen && !onScreen) playerRef.get()?.let(NativePlayers::pause)
+            if (wasOnScreen && !onScreen) {
+                DebugLog.log("embed scrolled out of view: paused")
+                playerRef.get()?.let(NativePlayers::pause)
+            }
             wasOnScreen = onScreen
         }
         if (state.root.isAttachedToWindow) state.root.viewTreeObserver.addOnScrollChangedListener(scrollCheck)
@@ -666,6 +689,18 @@ class PlayEmbeds : Plugin() {
             override fun onViewDetachedFromWindow(view: View) {
                 view.viewTreeObserver.removeOnScrollChangedListener(scrollCheck)
                 val viewRef = WeakReference(view)
+                // A scroll recycles the row as soon as it's off screen, often before the scroll
+                // check sees it leave, so pause right away. Posting skips moves that re-attach
+                // it in the same pass (fullscreen, relayout); release still waits for the delay.
+                Utils.mainThread.post {
+                    val root = viewRef.get() ?: return@post
+                    val target = containerRef.get() ?: return@post
+                    val player = playerRef.get() ?: return@post
+                    if (!root.isAttachedToWindow && players[target]?.player === player) {
+                        DebugLog.log("embed row left the screen: paused")
+                        NativePlayers.pause(player)
+                    }
+                }
                 Utils.mainThread.postDelayed({
                     val root = viewRef.get() ?: return@postDelayed
                     val target = containerRef.get() ?: return@postDelayed
@@ -733,11 +768,7 @@ class PlayEmbeds : Plugin() {
         controls: PlayerControlView?,
         reuse: Boolean,
     ) {
-        when {
-            !reuse -> NativePlayers.play(player, media.uri, view, controls)
-            media.audioOnly -> NativePlayers.bind(player, view, controls)
-            else -> NativePlayers.moveVideo(player, media.uri, view, controls)
-        }
+        if (reuse) NativePlayers.bind(player, view, controls) else NativePlayers.play(player, media.uri, view, controls)
     }
 
     /** The video's aspect ratio at up to [cardWidth] wide, capped at Discord's embed image height. */
@@ -981,6 +1012,7 @@ class PlayEmbeds : Plugin() {
     private fun removeNativePlayer(container: ViewGroup) {
         val state = detachNativePlayer(container) ?: return
         errorCallbacks.remove(state.player.g)
+        DebugLog.log("embed player released")
         NativePlayers.release(state.player)
     }
 
@@ -1414,7 +1446,10 @@ class PlayEmbeds : Plugin() {
      * doesn't handle rotation itself and would be recreated, destroying the
      * player, so the current orientation is locked while fullscreen. With the
      * rotate setting, a [landscape] video on a portrait screen goes into a
-     * [RotatedSession] instead, which lets the screen really rotate.
+     * [RotatedSession] instead, which lets the screen really rotate. Before
+     * Android 8 (see [NativePlayers.turnsPlayerSideways]) it rotates in a screen
+     * of its own ([enterHostedFullscreen]), or if that can't open, the player is
+     * turned sideways on the portrait screen.
      */
     @Suppress("DEPRECATION")
     private fun enterFullscreen(root: View, button: ImageButton, landscape: Boolean) {
@@ -1422,7 +1457,17 @@ class PlayEmbeds : Plugin() {
         val activity = activityFrom(root.context) ?: return
         val decor = activity.window.decorView as? ViewGroup ?: return
         val portraitScreen = decor.width > 0 && decor.width < decor.height
-        if (landscape && rotateFullscreen && portraitScreen && enterRotatedFullscreen(root, activity)) return
+        val rotate = landscape && rotateFullscreen && portraitScreen
+        if (rotate) {
+            val entered = if (NativePlayers.turnsPlayerSideways) {
+                enterHostedFullscreen(root, activity)
+            } else {
+                enterRotatedFullscreen(root, activity)
+            }
+            if (entered) return
+        }
+        val sideways = rotate && NativePlayers.turnsPlayerSideways &&
+            ((root as? ViewGroup)?.getChildAt(0) as? PlayerView)?.videoSurfaceView is TextureView
         val parent = root.parent as? ViewGroup ?: return
         val index = parent.indexOfChild(root)
         val params = root.layoutParams ?: return
@@ -1442,7 +1487,16 @@ class PlayEmbeds : Plugin() {
         (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
             ?.hideSoftInputFromWindow(decor.windowToken, 0)
         parent.removeView(root)
-        overlay.addView(root, FrameLayout.LayoutParams(MATCH, MATCH))
+        if (sideways) {
+            // Laid out as wide as the screen is tall, then turned a quarter toward the side
+            // the phone is held; upright for a phone turned left until the sensor says otherwise.
+            overlay.addView(root, FrameLayout.LayoutParams(decor.height, decor.width, Gravity.CENTER))
+            root.rotation = SIDEWAYS_DEGREES
+            state.orientationListener = followPhoneSideways(activity, root)
+        } else {
+            overlay.addView(root, FrameLayout.LayoutParams(MATCH, MATCH))
+        }
+        DebugLog.log("fullscreen: enter${if (sideways) " sideways" else ""}, screen ${decor.width}x${decor.height}")
         decor.addView(overlay, FrameLayout.LayoutParams(MATCH, MATCH))
         fullscreenPlayers[root] = state
 
@@ -1450,6 +1504,33 @@ class PlayEmbeds : Plugin() {
         hideSystemBars(activity, decor, state.previousSystemUiVisibility)
         overlay.requestFocus()
         setFullscreenIcon(button, fullscreen = true)
+    }
+
+    /**
+     * Turns a sideways [root] upright for whichever side the phone is turned to.
+     * The sensor reports 270° with the phone turned left (its right side up) and
+     * 90° turned right; near upright or upside down the player stays as it is.
+     */
+    private fun followPhoneSideways(activity: Activity, root: View): OrientationEventListener? {
+        val listener = object : OrientationEventListener(activity) {
+            private var turnedTo = root.rotation
+
+            override fun onOrientationChanged(orientation: Int) {
+                val target = when {
+                    orientation >= 240 && orientation <= 300 -> SIDEWAYS_DEGREES
+                    orientation >= 60 && orientation <= 120 -> -SIDEWAYS_DEGREES
+                    else -> return
+                }
+                if (turnedTo == target) return
+                turnedTo = target
+                DebugLog.log("fullscreen: phone at $orientation°, player turned to $target°")
+                root.animate().cancel()
+                root.animate().rotation(target).setDuration(SIDEWAYS_TURN_MS).start()
+            }
+        }
+        if (!listener.canDetectOrientation()) return null
+        listener.enable()
+        return listener
     }
 
     @Suppress("DEPRECATION")
@@ -1504,27 +1585,70 @@ class PlayEmbeds : Plugin() {
         }
         rotated = session
         session.playerView = oldView
+        DebugLog.log(
+            "rotate: enter from ${DebugLog.name(activity)}, orientation ${activity.requestedOrientation}, " +
+                "video ${media.width}x${media.height} ${media.quality}p, playing ${NativePlayers.isPlaying(state.player)}",
+        )
         showRotated(session, activity)
         activity.requestedOrientation = RotatedSession.LANDSCAPE
         return true
+    }
+
+    /** Logs [view]'s surface events, and how the rotated player looks a moment after it's shown. */
+    private fun traceRotatedView(session: RotatedSession, view: PlayerView, overlay: View) {
+        (view.videoSurfaceView as? SurfaceView)?.holder?.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) = DebugLog.log("rotate: surface created")
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) =
+                DebugLog.log("rotate: surface changed ${width}x$height")
+            override fun surfaceDestroyed(holder: SurfaceHolder) = DebugLog.log("rotate: surface destroyed")
+        })
+        val viewRef = WeakReference(view)
+        val overlayRef = WeakReference(overlay)
+        Utils.mainThread.postDelayed({
+            val v = viewRef.get() ?: return@postDelayed
+            val o = overlayRef.get() ?: return@postDelayed
+            val shutter = v.findViewById<View>(id("exo_shutter"))
+            val surface = v.videoSurfaceView as? SurfaceView
+            val decor = o.parent as? ViewGroup
+            DebugLog.log(
+                "rotate: after 2s, overlay attached ${o.isAttachedToWindow} shown ${o.isShown} " +
+                    "${o.width}x${o.height} focus ${o.hasFocus()} window focus ${o.hasWindowFocus()}, " +
+                    "on top ${decor != null && decor.getChildAt(decor.childCount - 1) === o}, " +
+                    "view ${v.width}x${v.height}, surface ${surface?.width}x${surface?.height} " +
+                    "valid ${surface?.holder?.surface?.isValid}, shutter visible ${shutter?.visibility == View.VISIBLE}, " +
+                    "bound ${v.player === session.player.f}, playing ${NativePlayers.isPlaying(session.player)}, " +
+                    "state ${NativePlayers.playbackState(session.player)}, position ${NativePlayers.position(session.player)}",
+            )
+        }, TRACE_DELAY_MS)
     }
 
     /** Shows [session]'s player in a fullscreen overlay in [activity]. */
     @Suppress("DEPRECATION")
     private fun showRotated(session: RotatedSession, activity: Activity) {
         val decor = activity.window.decorView as? ViewGroup ?: return
-        val overlay = FullscreenOverlay(activity) { exitRotatedFullscreen() }
+        DebugLog.log(
+            "rotate: show in ${DebugLog.name(activity)}, decor ${decor.width}x${decor.height}, " +
+                "${decor.childCount} decor children, resumed window focus ${activity.hasWindowFocus()}",
+        )
+        val overlay = FullscreenOverlay(activity) {
+            DebugLog.log("rotate: back pressed in overlay")
+            exitRotatedFullscreen()
+        }
         val view = NativePlayers.videoView(activity)
         overlay.addView(view, FrameLayout.LayoutParams(MATCH, MATCH))
+        traceRotatedView(session, view, overlay)
         session.playerView?.setPlayer(null)
-        NativePlayers.moveVideo(session.player, session.media.uri, view, null)
+        NativePlayers.bind(session.player, view, null)
         session.playerView = view
         session.activity = activity
         session.overlay = overlay
         session.previousSystemUiVisibility = decor.systemUiVisibility
         session.wasFullscreen = activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_FULLSCREEN != 0
         addDownloadButton(view, session.title, audioOnly = false) { session.media.uri }
-        addBarButton(view, "exo_icon_fullscreen_exit", "Exit fullscreen") { exitRotatedFullscreen() }
+        addBarButton(view, "exo_icon_fullscreen_exit", "Exit fullscreen") {
+            DebugLog.log("rotate: exit button tapped")
+            exitRotatedFullscreen()
+        }
         decor.addView(overlay, FrameLayout.LayoutParams(MATCH, MATCH))
         (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
             ?.hideSoftInputFromWindow(decor.windowToken, 0)
@@ -1540,36 +1664,218 @@ class PlayEmbeds : Plugin() {
         val session = rotated ?: return
         rotated = null
         session.wasPlaying = NativePlayers.isPlaying(session.player)
+        DebugLog.log("rotate: exit, was playing ${session.wasPlaying}, row ${session.rowKey}")
         NativePlayers.pause(session.player)
         hideRotated(session, restoreOrientation = true)
         errorCallbacks.remove(session.player.g)
-        val rowKey = session.rowKey
-        if (rowKey == null) {
+        sendBack(session)
+    }
+
+    /**
+     * Has the paused [session] player wait to go back into its embed: once Discord's
+     * activity resumes, again a moment later, and otherwise it's released. If the
+     * chat is rebuilt meanwhile, onConfigure finds the new row first.
+     */
+    private fun sendBack(session: RotatedSession) {
+        if (session.rowKey == null) {
             NativePlayers.release(session.player)
             return
         }
         returning = session
-        // Without a rebuild (the phone is still sideways) the embed rows already exist;
-        // after one, onConfigure finds the new row first and these are detached.
-        Utils.mainThread.postDelayed({
-            if (returning !== session) return@postDelayed
-            embedRowKeys.entries
-                .firstOrNull { (container, key) -> key == rowKey && container.isAttachedToWindow }
-                ?.key
-                ?.let(::returnInto)
-        }, RETURN_RETRY_DELAY_MS)
+        // Without a rebuild (the phone is still sideways) the embed rows already exist.
+        Utils.mainThread.postDelayed({ if (returning === session) tryReturn() }, RETURN_RETRY_DELAY_MS)
         Utils.mainThread.postDelayed({
             if (returning !== session) return@postDelayed
             returning = null
+            DebugLog.log("rotate: embed row never came back, released")
             NativePlayers.release(session.player)
         }, RETURN_TIMEOUT_MS)
+    }
+
+    /** Puts the [returning] player back into its embed row, if that row is on screen. */
+    private fun tryReturn() {
+        val rowKey = returning?.rowKey ?: return
+        embedRowKeys.entries
+            .firstOrNull { (container, key) -> key == rowKey && container.isAttachedToWindow }
+            ?.key
+            ?.let(::returnInto)
+    }
+
+    /**
+     * Fullscreen with the screen really rotated where Discord's own activity can't
+     * be ([NativePlayers.turnsPlayerSideways]): the player opens in a screen of its
+     * own on top. Plugins can't declare activities, so it borrows the only one in
+     * Discord's manifest that handles rotation itself, Play Billing's
+     * ProxyBillingActivity (see [patchFullscreenHost]); it rotates without being
+     * rebuilt, and Discord underneath stays as it was. False if it can't open.
+     */
+    private fun enterHostedFullscreen(root: View, activity: Activity): Boolean {
+        // Unpatched, the billing screen would crash looking for a purchase to start.
+        if (!hostPatched) return false
+        val container = players.keys.firstOrNull { players[it]?.root === root } ?: return false
+        val state = players[container] ?: return false
+        val media = state.media ?: return false
+        val oldView = (root as? ViewGroup)?.getChildAt(0) as? PlayerView ?: return false
+        endRotated()
+        endHosted()
+        try {
+            activity.startActivity(Intent(activity, ProxyBillingActivity::class.java).putExtra(HOST_EXTRA, true))
+            activity.overridePendingTransition(0, 0)
+        } catch (e: Throwable) {
+            DebugLog.log("host: couldn't open its screen: $e")
+            return false
+        }
+        val session = RotatedSession(
+            state.player,
+            state.url,
+            state.provider,
+            state.title,
+            media,
+            embedRowKeys[container],
+            activity.requestedOrientation,
+        )
+        // Detaching (not removing) keeps the player playing; the embed shows its preview again.
+        detachNativePlayer(container)
+        val sessionRef = WeakReference(session)
+        errorCallbacks[state.player.g] = {
+            val current = sessionRef.get()
+            if (current != null && hosted === current) {
+                endHosted()
+                if (current.provider == HostedProvider.YOUTUBE) {
+                    showYoutubeError(current.identity)
+                } else {
+                    Utils.showToast("Couldn't play this embed", true)
+                }
+            }
+        }
+        hosted = session
+        session.playerView = oldView
+        session.theme = activity.theme
+        DebugLog.log(
+            "host: enter from ${DebugLog.name(activity)}, video ${media.width}x${media.height} ${media.quality}p, " +
+                "playing ${NativePlayers.isPlaying(state.player)}",
+        )
+        return true
+    }
+
+    private fun isHost(activity: Activity): Boolean =
+        activity is ProxyBillingActivity && activity.intent?.getBooleanExtra(HOST_EXTRA, false) == true
+
+    /**
+     * Turns ProxyBillingActivity into the fullscreen player's screen when it's
+     * opened by [enterHostedFullscreen]. Without a saved state its onCreate would
+     * start a purchase flow from extras that aren't there, so it gets an empty one
+     * and only sets itself up; the player is shown after it.
+     */
+    private fun patchFullscreenHost() {
+        val onCreate = ProxyBillingActivity::class.java.getDeclaredMethod("onCreate", Bundle::class.java)
+        patcher.patch(onCreate, PreHook { frame ->
+            if (isHost(frame.thisObject as Activity) && frame.args[0] == null) frame.args[0] = Bundle()
+        })
+        patcher.patch(onCreate, Hook { frame ->
+            val activity = frame.thisObject as Activity
+            if (!isHost(activity)) return@Hook
+            val session = hosted
+            if (session == null) {
+                DebugLog.log("host: opened without a player, closing")
+                activity.finish()
+                return@Hook
+            }
+            try {
+                showHosted(session, activity)
+            } catch (e: Throwable) {
+                DebugLog.log("host: couldn't show the player: ${DebugLog.causes(e)}")
+                // Closing sends the player back to its embed; fullscreen turns it sideways from now on.
+                hostPatched = false
+                session.activity = activity
+                closeHost(activity)
+            }
+        })
+    }
+
+    /** Shows [session]'s player in the host screen [activity], held in landscape. */
+    @Suppress("DEPRECATION")
+    private fun showHosted(session: RotatedSession, activity: Activity) {
+        // The billing screen is see-through, which would keep Discord underneath visible,
+        // and so rotated (rebuilt) along with it. As an opaque screen Discord just stops.
+        val opaque = try {
+            Activity::class.java.getDeclaredMethod("convertFromTranslucent").apply { isAccessible = true }.invoke(activity)
+            true
+        } catch (e: Throwable) {
+            false
+        }
+        activity.window.setBackgroundDrawable(ColorDrawable(Color.BLACK))
+        activity.requestedOrientation = RotatedSession.LANDSCAPE
+        // Its theme isn't Discord's, and the player's controls need Discord's styles and
+        // attributes, so its views get the exact theme of the screen fullscreen came from.
+        val themeId = Utils.getResId("AppTheme_Dark", "style")
+        val context = ContextThemeWrapper(activity, themeId)
+        session.theme?.let { context.theme.setTo(it) }
+        val overlay = FullscreenOverlay(context) {
+            DebugLog.log("host: back pressed")
+            closeHost(activity)
+        }
+        val view = NativePlayers.videoView(context)
+        overlay.addView(view, FrameLayout.LayoutParams(MATCH, MATCH))
+        traceRotatedView(session, view, overlay)
+        session.playerView?.setPlayer(null)
+        NativePlayers.bind(session.player, view, null)
+        session.playerView = view
+        session.activity = activity
+        session.overlay = overlay
+        addDownloadButton(view, session.title, audioOnly = false) { session.media.uri }
+        addBarButton(view, "exo_icon_fullscreen_exit", "Exit fullscreen") {
+            DebugLog.log("host: exit button tapped")
+            closeHost(activity)
+        }
+        activity.setContentView(overlay)
+        hideSystemBars(activity, activity.window.decorView, 0)
+        overlay.requestFocus()
+        DebugLog.log("host: shown in ${DebugLog.name(activity)}, opaque $opaque")
+    }
+
+    private fun closeHost(activity: Activity) {
+        activity.finish()
+        activity.overridePendingTransition(0, 0)
+    }
+
+    /** The host screen is closing: the paused player goes back to its embed. */
+    private fun hostClosed(activity: Activity) {
+        val session = hosted ?: return
+        if (session.activity !== activity) return
+        hosted = null
+        session.wasPlaying = NativePlayers.isPlaying(session.player)
+        DebugLog.log("host: closed, was playing ${session.wasPlaying}, row ${session.rowKey}")
+        NativePlayers.pause(session.player)
+        session.playerView?.setPlayer(null)
+        session.playerView = null
+        session.overlay = null
+        session.activity = null
+        errorCallbacks.remove(session.player.g)
+        sendBack(session)
+    }
+
+    /** Closes any host screen and releases its player. */
+    private fun endHosted() {
+        val session = hosted ?: return
+        hosted = null
+        DebugLog.log("host: ended, released")
+        errorCallbacks.remove(session.player.g)
+        session.playerView?.setPlayer(null)
+        session.playerView = null
+        session.activity?.let(::closeHost)
+        session.activity = null
+        NativePlayers.release(session.player)
     }
 
     /** Puts a player back from a rotated fullscreen into [container], its embed, if it's waiting for it. */
     private fun returnInto(container: ViewGroup) {
         val session = returning ?: return
         if (!container.isAttachedToWindow || embedRowKeys[container] != session.rowKey) return
-        if (players[container] != null) return
+        if (players[container] != null) {
+            DebugLog.log("rotate: return skipped, embed already has a player")
+            return
+        }
         returning = null
         val attached = attachPlayer(
             container,
@@ -1579,6 +1885,7 @@ class PlayEmbeds : Plugin() {
             session.title,
             existing = session.player,
         )
+        DebugLog.log("rotate: back in embed $attached, resume ${session.wasPlaying}")
         if (attached && session.wasPlaying) NativePlayers.resume(session.player)
     }
 
@@ -1597,12 +1904,14 @@ class PlayEmbeds : Plugin() {
     private fun endRotated() {
         rotated?.let { session ->
             rotated = null
+            DebugLog.log("rotate: ended, released")
             hideRotated(session, restoreOrientation = true)
             errorCallbacks.remove(session.player.g)
             NativePlayers.release(session.player)
         }
         returning?.let { session ->
             returning = null
+            DebugLog.log("rotate: returning player released")
             NativePlayers.release(session.player)
         }
     }
@@ -1614,16 +1923,37 @@ class PlayEmbeds : Plugin() {
      */
     private val rotationCallbacks = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            if (rotated != null || returning != null) DebugLog.log("activity created ${DebugLog.name(activity)}")
             val session = rotated ?: return
             if (session.activity == null && activity is AppActivity) activity.requestedOrientation = RotatedSession.LANDSCAPE
         }
 
         override fun onActivityResumed(activity: Activity) {
+            if (rotated != null || returning != null) DebugLog.log("activity resumed ${DebugLog.name(activity)}")
+            // Back from fullscreen without a rebuild, the embed rows are already there.
+            if (returning != null && activity is AppActivity) Utils.mainThread.post(::tryReturn)
             val session = rotated ?: return
             if (session.activity == null && activity is AppActivity) showRotated(session, activity)
         }
 
         override fun onActivityDestroyed(activity: Activity) {
+            val host = hosted
+            if (host != null && host.activity === activity) {
+                if (activity.isChangingConfigurations) {
+                    // Rebuilt for some other change; the new one shows the player again.
+                    DebugLog.log("host: rebuilt")
+                    host.activity = null
+                    host.overlay = null
+                } else {
+                    hostClosed(activity)
+                }
+            }
+            if (rotated != null || returning != null) {
+                DebugLog.log(
+                    "activity destroyed ${DebugLog.name(activity)}, changing config " +
+                        "${activity.isChangingConfigurations}, session in ${DebugLog.name(rotated?.activity)}",
+                )
+            }
             val session = rotated ?: return
             if (session.activity !== activity) return
             session.activity = null
@@ -1633,7 +1963,11 @@ class PlayEmbeds : Plugin() {
         }
 
         override fun onActivityStarted(activity: Activity) {}
-        override fun onActivityPaused(activity: Activity) {}
+        override fun onActivityPaused(activity: Activity) {
+            if (rotated != null) DebugLog.log("activity paused ${DebugLog.name(activity)}")
+            // Closing: return the player now rather than once it's destroyed, after Discord resumes.
+            if (activity.isFinishing && hosted?.activity === activity) hostClosed(activity)
+        }
         override fun onActivityStopped(activity: Activity) {}
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
     }
@@ -1642,7 +1976,11 @@ class PlayEmbeds : Plugin() {
     private fun exitFullscreen(root: View) {
         val state = fullscreenPlayers.remove(root) ?: return
         val activity = state.activity
+        DebugLog.log("fullscreen: exit")
+        state.orientationListener?.disable()
         state.overlay.removeView(root)
+        root.animate().cancel()
+        root.rotation = 0f
         (state.overlay.parent as? ViewGroup)?.removeView(state.overlay)
         restoreSystemBars(activity, state.previousSystemUiVisibility, state.wasFullscreen)
         activity.requestedOrientation = state.previousOrientation
@@ -1734,6 +2072,8 @@ class PlayEmbeds : Plugin() {
     override fun stop(context: Context) {
         application?.unregisterActivityLifecycleCallbacks(rotationCallbacks)
         application = null
+        endHosted()
+        hostPatched = false
         endRotated()
         ArrayList(fullscreenPlayers.keys).forEach(::exitFullscreen)
         ArrayList(players.keys).forEach(::removeNativePlayer)
@@ -1776,6 +2116,12 @@ class PlayEmbeds : Plugin() {
 
         /** Children of Discord's exo_player_control_view bar: play, pause, position, seekbar, duration. */
         private const val STOCK_BAR_CHILDREN = 5
+        private const val TRACE_DELAY_MS = 2_000L
+        private const val SIDEWAYS_DEGREES = 90f
+        private const val SIDEWAYS_TURN_MS = 250L
+
+        /** Marks the ProxyBillingActivity launch that hosts a fullscreen player. */
+        private const val HOST_EXTRA = "com.github.yutaplug.playembeds.FULLSCREEN_HOST"
         private const val RETURN_RETRY_DELAY_MS = 1_000L
         private const val RETURN_TIMEOUT_MS = 15_000L
         private const val SEARCH_EVENT_HANDLER =

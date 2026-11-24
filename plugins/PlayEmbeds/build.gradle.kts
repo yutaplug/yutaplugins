@@ -1,9 +1,14 @@
-version = "1.0.14"
+version = "1.0.15"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.15
+        * Rotating fullscreen to landscape now works on Android 7 and older instead of showing a black screen
+        * Players pause as soon as they scroll off screen instead of a second later
+        * New "Copy debug log" setting to paste into bug reports
+
         # 1.0.14
         * The seekbar moves to its own row above the controls when extra buttons are shown, so it no longer shrinks to nothing
         * On Android 7 and older, videos no longer go black after going fullscreen or when the screen is rebuilt

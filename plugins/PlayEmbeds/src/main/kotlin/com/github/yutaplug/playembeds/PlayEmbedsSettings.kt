@@ -45,6 +45,14 @@ class PlayEmbedsSettings(private val plugin: PlayEmbeds) : SettingsPage() {
         section("YouTube")
         val qualityRow = action("Default quality") { row -> pickQuality(row) }
         updateQualitySubtitle(qualityRow)
+
+        section("Troubleshooting")
+        val logRow = action("Copy debug log") {
+            Utils.setClipboard("PlayEmbeds log", DebugLog.dump())
+            Utils.showToast("Copied the PlayEmbeds log")
+        }
+        ((logRow as? LinearLayout)?.getChildAt(1) as? TextView)?.text =
+            "Copies what the players and fullscreen did since Discord started, to paste into a bug report."
     }
 
     private fun pickQuality(row: View) {

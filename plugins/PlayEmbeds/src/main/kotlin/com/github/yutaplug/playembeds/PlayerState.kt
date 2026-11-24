@@ -2,6 +2,8 @@ package com.github.yutaplug.playembeds
 
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.content.res.Resources
+import android.view.OrientationEventListener
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -58,7 +60,10 @@ internal class FullscreenState(
     val previousSystemUiVisibility: Int,
     val wasFullscreen: Boolean,
     val previousOrientation: Int,
-)
+) {
+    /** Turns a sideways player to whichever side the phone is held, while it's fullscreen. */
+    var orientationListener: OrientationEventListener? = null
+}
 
 /**
  * A video shown fullscreen with the screen really turned to landscape. Discord
@@ -77,6 +82,9 @@ internal class RotatedSession(
     val previousOrientation: Int,
 ) {
     var activity: Activity? = null
+
+    /** The theme of the Discord screen fullscreen was opened from, for a host screen's views. */
+    var theme: Resources.Theme? = null
     var overlay: View? = null
     var playerView: PlayerView? = null
     var previousSystemUiVisibility = 0

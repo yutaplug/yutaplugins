@@ -4,18 +4,19 @@ import android.content.Context
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
+import android.util.Xml
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.view.View
 import android.view.ViewParent
 import android.widget.FrameLayout
+import com.aliucord.Utils
 import com.discord.player.AppMediaPlayer
 import com.discord.player.MediaSource
 import com.discord.player.MediaType
 import com.google.android.exoplayer2.ui.PlayerControlView
 import com.google.android.exoplayer2.ui.PlayerView
+import org.xmlpull.v1.XmlPullParser
 import java.lang.reflect.Method
 
 /** Builds players from Discord's own ExoPlayer setup and its stock control views. */
@@ -39,14 +40,56 @@ internal object NativePlayers {
         null
     }
 
-    /** A video surface with ExoPlayer's stock controller (Discord's exo_player_control_view). */
-    fun videoView(context: Context): PlayerView = PlayerView(context, null).apply {
+    /**
+     * Whether rotating Discord's own activity can't be used for fullscreen. Before
+     * Android 8 the activity has no window while it's rebuilt for a rotation (about
+     * 3 seconds), so the phone goes back to portrait meanwhile and the rebuilt
+     * activity asks for landscape again, rebuilding it endlessly. Fullscreen then
+     * rotates in a screen of its own, or turns the player sideways as a fallback.
+     */
+    val turnsPlayerSideways get() = Build.VERSION.SDK_INT < Build.VERSION_CODES.O
+
+    /**
+     * A video surface with ExoPlayer's stock controller (Discord's exo_player_control_view).
+     * Where fullscreen turns the player sideways, it draws into a TextureView, which
+     * (unlike the default SurfaceView) rotates with its view.
+     */
+    fun videoView(context: Context): PlayerView = (textureVideoView(context) ?: PlayerView(context, null)).apply {
         setBackgroundColor(Color.BLACK)
         setShutterBackgroundColor(Color.BLACK)
         setUseController(true)
         setControllerAutoShow(true)
         setShowBuffering(SHOW_BUFFERING_WHEN_PLAYING)
         keepScreenOnWhilePlaying(this)
+    }
+
+    /**
+     * A PlayerView built with the attributes of the one in Discord's media viewer
+     * (widget_media), which draws into a TextureView. Only where [turnsPlayerSideways].
+     */
+    private fun textureVideoView(context: Context): PlayerView? {
+        if (!turnsPlayerSideways) return null
+        val layoutId = Utils.getResId("widget_media", "layout")
+        if (layoutId == 0) return null
+        val parser = try {
+            context.resources.getLayout(layoutId)
+        } catch (_: Throwable) {
+            return null
+        }
+        try {
+            var event = parser.next()
+            while (event != XmlPullParser.END_DOCUMENT) {
+                if (event == XmlPullParser.START_TAG && parser.name == PlayerView::class.java.name) {
+                    return PlayerView(context, Xml.asAttributeSet(parser)).apply { id = View.NO_ID }
+                }
+                event = parser.next()
+            }
+        } catch (_: Throwable) {
+            // Fall back to the default SurfaceView player.
+        } finally {
+            parser.close()
+        }
+        return null
     }
 
     /**
@@ -115,31 +158,6 @@ internal object NativePlayers {
         controlView?.setPlayer(player.f)
     }
 
-    /**
-     * Shows [player]'s running video in a new [playerView] (in a rebuilt activity).
-     * Moving a running decoder to another surface leaves many Android 7 and older
-     * decoders drawing nothing, so there [uri] is reloaded at the same position
-     * once the new surface exists, and the new decoder starts on it.
-     */
-    fun moveVideo(player: AppMediaPlayer, uri: String, playerView: PlayerView, controlView: PlayerControlView?) {
-        bind(player, playerView, controlView)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) return
-        val surface = playerView.videoSurfaceView as? SurfaceView ?: return
-        surface.holder.addCallback(
-            object : SurfaceHolder.Callback {
-                override fun surfaceCreated(holder: SurfaceHolder) {
-                    holder.removeCallback(this)
-                    // ExoPlayer's own callback (added first) has already handed it the surface.
-                    if (playerView.player !== player.f) return
-                    play(player, uri, playerView, controlView, position(player), isPlaying(player))
-                }
-
-                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                override fun surfaceDestroyed(holder: SurfaceHolder) {}
-            },
-        )
-    }
-
     /** `SimpleExoPlayer.setPlayWhenReady(true)`, obfuscated as `k2.u(boolean)`. */
     fun resume(player: AppMediaPlayer) {
         try {
@@ -156,6 +174,14 @@ internal object NativePlayers {
         exo.javaClass.getMethod("T").invoke(exo) as? Long ?: 0L
     } catch (_: Throwable) {
         0L
+    }
+
+    /** `Player.getPlaybackState()`, obfuscated as `y1.y()`: 1 idle, 2 buffering, 3 ready, 4 ended. */
+    fun playbackState(player: AppMediaPlayer): Int = try {
+        val exo: Any = player.f
+        exo.javaClass.getMethod("y").invoke(exo) as? Int ?: -1
+    } catch (_: Throwable) {
+        -1
     }
 
     /** `Player.getPlayWhenReady()`, obfuscated as `y1.j()`. */
