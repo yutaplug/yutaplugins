@@ -1,4 +1,4 @@
-version = "1.0.4"
+version = "1.0.5"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,9 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.5
+        * Slow uploads and downloads: new fix for uploads and media loading very slowly on networks without IPv6, where the app first waited for IPv6 connections to time out
+
         # 1.0.4
         * Markdown: rewritten from scratch
         * Markdown: code blocks no longer lose their background, also after an edit, and fit inside quotes and lists. One-line ```code``` shows as a box too

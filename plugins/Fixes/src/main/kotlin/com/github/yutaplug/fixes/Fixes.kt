@@ -12,6 +12,7 @@ import com.github.yutaplug.fixes.friend.FriendFix
 import com.github.yutaplug.fixes.friendrequest.FriendRequestFix
 import com.github.yutaplug.fixes.gifdownload.GifDownloadFix
 import com.github.yutaplug.fixes.gifsticker.GifStickerFix
+import com.github.yutaplug.fixes.ipv4first.IPv4FirstFix
 import com.github.yutaplug.fixes.markdown.MarkdownAppearance
 import com.github.yutaplug.fixes.markdown.MarkdownFix
 import com.github.yutaplug.fixes.messagelink.MessageLinkFix
@@ -50,6 +51,7 @@ class Fixes : Plugin() {
         AppActivityFix(),
         SearchMessageMenuFix(),
         ServerHoldFix(),
+        IPv4FirstFix(),
     )
 
     internal val markdown: MarkdownFix get() = fixes.first { it is MarkdownFix } as MarkdownFix
