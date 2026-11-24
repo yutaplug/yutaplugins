@@ -27,6 +27,8 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.RelativeLayout
+import android.widget.Space
 import android.widget.TextView
 import androidx.constraintlayout.widget.Barrier
 import androidx.constraintlayout.widget.ConstraintLayout
@@ -731,7 +733,11 @@ class PlayEmbeds : Plugin() {
         controls: PlayerControlView?,
         reuse: Boolean,
     ) {
-        if (reuse) NativePlayers.bind(player, view, controls) else NativePlayers.play(player, media.uri, view, controls)
+        when {
+            !reuse -> NativePlayers.play(player, media.uri, view, controls)
+            media.audioOnly -> NativePlayers.bind(player, view, controls)
+            else -> NativePlayers.moveVideo(player, media.uri, view, controls)
+        }
     }
 
     /** The video's aspect ratio at up to [cardWidth] wide, capped at Discord's embed image height. */
@@ -1150,6 +1156,7 @@ class PlayEmbeds : Plugin() {
             bar.indexOfChild(duration) + 1,
             LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(context, 12) },
         )
+        fitSeekbar(bar)
         return control
     }
 
@@ -1188,7 +1195,34 @@ class PlayEmbeds : Plugin() {
         val fullscreen = bar.findViewWithTag<View>(FULLSCREEN_BUTTON_TAG)
         val index = if (fullscreen != null) bar.indexOfChild(fullscreen) else bar.childCount
         bar.addView(button, index, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
+        fitSeekbar(bar)
         return button
+    }
+
+    /**
+     * Discord's control bar is a single row (play, position, seekbar, duration)
+     * where the seekbar only gets the width that's left. Once two or more of our
+     * controls are added it would shrink to nothing in an embed, so it moves to
+     * its own row just above the bar, as wide as the player.
+     */
+    private fun fitSeekbar(bar: LinearLayout) {
+        val timeBar = bar.findViewById<View>(id("exo_progress")) ?: return
+        if (timeBar.parent !== bar || bar.childCount - STOCK_BAR_CHILDREN < 2) return
+        val host = bar.parent as? RelativeLayout ?: return
+        val context = bar.context
+        if (bar.id == View.NO_ID) bar.id = View.generateViewId()
+        val index = bar.indexOfChild(timeBar)
+        bar.removeView(timeBar)
+        // Keeps the duration and the buttons at the end of the row, where they were.
+        bar.addView(Space(context), index, LinearLayout.LayoutParams(0, 0, 1f))
+        val gap = dp(context, 4)
+        val row = FrameLayout(context).apply {
+            background = bar.background?.constantState?.newDrawable()
+            setPadding(bar.paddingLeft, gap, bar.paddingRight, 0)
+            addView(timeBar, FrameLayout.LayoutParams(MATCH, WRAP))
+        }
+        host.addView(row, RelativeLayout.LayoutParams(MATCH, WRAP).apply { addRule(RelativeLayout.ABOVE, bar.id) })
+        bar.setPadding(bar.paddingLeft, gap, bar.paddingRight, bar.paddingBottom)
     }
 
     private class QualityControl(
@@ -1362,6 +1396,7 @@ class PlayEmbeds : Plugin() {
         }
         val size = dp(context, 24)
         bar.addView(button, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
+        fitSeekbar(bar)
     }
 
     private fun setFullscreenIcon(button: ImageButton, fullscreen: Boolean) {
@@ -1482,7 +1517,7 @@ class PlayEmbeds : Plugin() {
         val view = NativePlayers.videoView(activity)
         overlay.addView(view, FrameLayout.LayoutParams(MATCH, MATCH))
         session.playerView?.setPlayer(null)
-        NativePlayers.bind(session.player, view, null)
+        NativePlayers.moveVideo(session.player, session.media.uri, view, null)
         session.playerView = view
         session.activity = activity
         session.overlay = overlay
@@ -1738,6 +1773,9 @@ class PlayEmbeds : Plugin() {
         private const val MIN_VISIBLE_FRACTION = 0.25f
         private const val LOADING_TICK_MS = 500L
         private const val FULLSCREEN_BUTTON_TAG = "PlayEmbedsFullscreen"
+
+        /** Children of Discord's exo_player_control_view bar: play, pause, position, seekbar, duration. */
+        private const val STOCK_BAR_CHILDREN = 5
         private const val RETURN_RETRY_DELAY_MS = 1_000L
         private const val RETURN_TIMEOUT_MS = 15_000L
         private const val SEARCH_EVENT_HANDLER =

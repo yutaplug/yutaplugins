@@ -3,8 +3,11 @@ package com.github.yutaplug.playembeds
 import android.content.Context
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewParent
 import android.widget.FrameLayout
@@ -110,6 +113,31 @@ internal object NativePlayers {
     fun bind(player: AppMediaPlayer, playerView: PlayerView, controlView: PlayerControlView?) {
         playerView.setPlayer(player.f)
         controlView?.setPlayer(player.f)
+    }
+
+    /**
+     * Shows [player]'s running video in a new [playerView] (in a rebuilt activity).
+     * Moving a running decoder to another surface leaves many Android 7 and older
+     * decoders drawing nothing, so there [uri] is reloaded at the same position
+     * once the new surface exists, and the new decoder starts on it.
+     */
+    fun moveVideo(player: AppMediaPlayer, uri: String, playerView: PlayerView, controlView: PlayerControlView?) {
+        bind(player, playerView, controlView)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) return
+        val surface = playerView.videoSurfaceView as? SurfaceView ?: return
+        surface.holder.addCallback(
+            object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    holder.removeCallback(this)
+                    // ExoPlayer's own callback (added first) has already handed it the surface.
+                    if (playerView.player !== player.f) return
+                    play(player, uri, playerView, controlView, position(player), isPlaying(player))
+                }
+
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                override fun surfaceDestroyed(holder: SurfaceHolder) {}
+            },
+        )
     }
 
     /** `SimpleExoPlayer.setPlayWhenReady(true)`, obfuscated as `k2.u(boolean)`. */

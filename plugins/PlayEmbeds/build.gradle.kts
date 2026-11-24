@@ -1,9 +1,13 @@
-version = "1.0.13"
+version = "1.0.14"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.14
+        * The seekbar moves to its own row above the controls when extra buttons are shown, so it no longer shrinks to nothing
+        * On Android 7 and older, videos no longer go black after going fullscreen or when the screen is rebuilt
+
         # 1.0.13
         * The screen no longer dims or locks while a video or audio is playing
 
