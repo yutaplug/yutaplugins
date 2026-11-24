@@ -1,9 +1,13 @@
-version = "1.0.3"
+version = "1.0.4"
 description = "Groups several images and videos sent in one message into a grid, and lets you swipe between them in fullscreen."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.4
+        * The fullscreen viewer now shows a row of thumbnails of the message's images and videos; tap one to switch to it
+        * The "x/x" counter now also shows on videos
+
         # 1.0.3
         * The play button on videos in the grid now always opens them fullscreen instead of playing in the small tile
 

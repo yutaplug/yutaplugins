@@ -13,7 +13,9 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.cardview.widget.CardView
 import androidx.core.content.ContextCompat
@@ -24,7 +26,10 @@ import com.aliucord.utils.DimenUtils
 import com.discord.api.message.attachment.MessageAttachment
 import com.discord.api.message.attachment.MessageAttachmentType
 import com.discord.player.MediaType
+import com.discord.utilities.embed.EmbedResourceUtils
+import com.discord.utilities.images.MGImages
 import com.discord.widgets.media.WidgetMedia
+import com.facebook.drawee.view.SimpleDraweeView
 import com.facebook.samples.zoomable.ZoomableDraweeView
 import com.google.android.exoplayer2.ui.PlayerView
 import kotlin.math.abs
@@ -126,10 +131,14 @@ object MediaGallery {
         val overlay = fragment.view?.findViewWithTag<ViewGroup>(OVERLAY_TAG) ?: return
         for (i in 0 until overlay.childCount) {
             val child = overlay.getChildAt(i)
-            if (child.visibility != View.VISIBLE) continue
+            if (child.visibility == View.GONE) continue
             child.isEnabled = shown
             val target = if (!shown) 0f else if (child is ImageView) ARROW_ALPHA else 1f
-            child.animate().alpha(target).setDuration(200).start()
+            // Hide faded-out views so the invisible thumbnails and arrows can't be tapped.
+            if (shown) child.visibility = View.VISIBLE
+            child.animate().alpha(target).setDuration(200)
+                .withEndAction { if (!shown) child.visibility = View.INVISIBLE }
+                .start()
         }
     }
 
@@ -158,6 +167,12 @@ object MediaGallery {
 
         val overlay = FrameLayout(context).apply { tag = OVERLAY_TAG }
 
+        // Counter on top, thumbnail strip under it, both at the bottom of the screen.
+        val bottom = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+
         // Same pill as Discord's spoiler label (widget_chat_list_adapter_item_attachment.xml).
         val counterText = TextView(context, null, 0, Utils.getResId("UiKit_TextView_H2", "style")).apply {
             text = "${index + 1}/${gallery.size}"
@@ -172,10 +187,15 @@ object MediaGallery {
             cardElevation = 0f
             addView(counterText)
         }
-        val counterParams = FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-            bottomMargin = DimenUtils.dpToPx(24)
+        bottom.addView(counter, LinearLayout.LayoutParams(-2, -2))
+        bottom.addView(
+            thumbnailStrip(context, gallery, index) { target -> go(target - index) },
+            LinearLayout.LayoutParams(-2, -2).apply { topMargin = DimenUtils.dpToPx(12) },
+        )
+        val bottomParams = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+            bottomMargin = DimenUtils.dpToPx(BOTTOM_MARGIN_DP)
         }
-        overlay.addView(counter, counterParams)
+        overlay.addView(bottom, bottomParams)
 
         // Same round buttons as the inline media play button (inline_media_view.xml).
         val arrowsShown = showArrows()
@@ -206,13 +226,18 @@ object MediaGallery {
         val position = toolbar?.let { root.indexOfChild(it) } ?: root.childCount
         root.addView(overlay, position, FrameLayout.LayoutParams(-1, -1))
 
-        // Keep the counter above the video controls.
+        // Keep the counter and thumbnails above the video controls.
         val controls = root.findViewById<View>(Utils.getResId("media_player_control_view", "id"))
+        // The control view itself fills the screen (exo_player_control_view.xml is match_parent);
+        // only the bar holding the play button at its bottom takes space.
+        val playButtonId = Utils.getResId("exo_play", "id")
         controls?.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
-            val margin = DimenUtils.dpToPx(24) + if (v.visibility == View.VISIBLE) v.height else 0
-            if (counterParams.bottomMargin != margin) {
-                counterParams.bottomMargin = margin
-                counter.layoutParams = counterParams
+            val bar = v.findViewById<View>(playButtonId)?.parent as? View
+            val barHeight = if (v.visibility == View.VISIBLE && bar != null) v.height - bar.top else 0
+            val margin = DimenUtils.dpToPx(BOTTOM_MARGIN_DP) + barHeight
+            if (bottomParams.bottomMargin != margin) {
+                bottomParams.bottomMargin = margin
+                bottom.layoutParams = bottomParams
             }
         }
 
@@ -246,6 +271,65 @@ object MediaGallery {
             ?.videoSurfaceView?.setOnTouchListener(swipeListener)
     }
 
+    /** A row of small previews of every item; the current one is wider and fully opaque, tapping another opens it. */
+    private fun thumbnailStrip(context: Context, gallery: Gallery, index: Int, open: (Int) -> Unit): View {
+        val height = DimenUtils.dpToPx(THUMB_HEIGHT_DP)
+        val gap = DimenUtils.dpToPx(4)
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val side = DimenUtils.dpToPx(16)
+            setPadding(side, 0, side, 0)
+        }
+        var selected: View? = null
+        for (i in 0 until gallery.size) {
+            val current = i == index
+            val width = DimenUtils.dpToPx(if (current) THUMB_SELECTED_WIDTH_DP else THUMB_WIDTH_DP)
+            val image = SimpleDraweeView(context)
+            setCenterCrop(image)
+            val (w, h) = previewSize(gallery.widths[i], gallery.heights[i], width, height)
+            MGImages.setImage(image, EmbedResourceUtils.INSTANCE.getPreviewUrls(gallery.urls[i], w, h, false))
+            val card = CardView(context).apply {
+                radius = DimenUtils.dpToPx(4).toFloat()
+                cardElevation = 0f
+                setCardBackgroundColor(ContextCompat.getColor(context, Utils.getResId("black_alpha_60", "color")))
+                alpha = if (current) 1f else THUMB_ALPHA
+                contentDescription = gallery.titles[i]
+                addView(image, FrameLayout.LayoutParams(-1, -1))
+                if (!current) setOnClickListener { open(i) }
+            }
+            row.addView(card, LinearLayout.LayoutParams(width, height).apply { if (i > 0) leftMargin = gap })
+            if (current) selected = card
+        }
+        return HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(row)
+            // Center the current item when the row is wider than the screen.
+            post {
+                val target = selected ?: return@post
+                scrollTo(target.left + target.width / 2 - width / 2, 0)
+            }
+        }
+    }
+
+    /** Proxy size that covers a [boxWidth]x[boxHeight] box while keeping the media's aspect ratio. */
+    private fun previewSize(mediaWidth: Int, mediaHeight: Int, boxWidth: Int, boxHeight: Int): Pair<Int, Int> {
+        if (mediaWidth <= 0 || mediaHeight <= 0) return boxWidth to boxHeight
+        val scale = maxOf(boxWidth.toFloat() / mediaWidth, boxHeight.toFloat() / mediaHeight)
+        return maxOf(1, (mediaWidth * scale).toInt()) to maxOf(1, (mediaHeight * scale).toInt())
+    }
+
+    /** Fresco's CENTER_CROP; the obfuscated ScalingUtils$ScaleType class can't be named from Kotlin. */
+    private fun setCenterCrop(view: SimpleDraweeView) {
+        try {
+            val scaleTypeClass = Class.forName("com.facebook.drawee.drawable.ScalingUtils\$ScaleType")
+            val centerCrop = scaleTypeClass.getField("i").get(null)
+            val hierarchy = view.hierarchy
+            hierarchy.javaClass.getMethod("n", scaleTypeClass).invoke(hierarchy, centerCrop)
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun findActivity(context: Context): Activity? {
         var current: Context? = context
         while (current is ContextWrapper) {
@@ -256,4 +340,9 @@ object MediaGallery {
     }
 
     private const val ARROW_ALPHA = 0.6f
+    private const val THUMB_ALPHA = 0.5f
+    private const val BOTTOM_MARGIN_DP = 24
+    private const val THUMB_HEIGHT_DP = 52
+    private const val THUMB_WIDTH_DP = 26
+    private const val THUMB_SELECTED_WIDTH_DP = 40
 }
