@@ -16,12 +16,13 @@ import kotlin.math.abs
  * This hook runs before Aliucord's and ignores movements smaller than Android's touch slop, the same
  * distance Android uses to tell a tap from a drag.
  */
-internal class ServerHoldFix : Fix(
-    "ServerHoldFix",
-    "Server long press",
-    "Fixes the menu from holding a server or folder closing by itself when you let go. " +
-        "Moving your finger still starts dragging it.",
-) {
+internal class ServerHoldFix :
+    Fix(
+        "ServerHoldFix",
+        "Server long press",
+        "Fixes the menu from holding a server or folder closing by itself when you let go. " +
+            "Moving your finger still starts dragging it.",
+    ) {
     override fun start(context: Context) {
         patcher.patch(
             ItemTouchHelper::class.java,

@@ -16,11 +16,12 @@ import org.json.JSONObject
 import java.util.Collections
 import java.util.WeakHashMap
 
-internal class FriendRequestFix : Fix(
-    "FriendRequestFix",
-    "Accepting friend requests",
-    "Fixes accepting incoming friend requests.",
-) {
+internal class FriendRequestFix :
+    Fix(
+        "FriendRequestFix",
+        "Accepting friend requests",
+        "Fixes accepting incoming friend requests.",
+    ) {
     private val accepting = Collections.synchronizedMap(WeakHashMap<RestAPIParams.UserRelationship, Boolean>())
 
     override fun start(context: Context) {

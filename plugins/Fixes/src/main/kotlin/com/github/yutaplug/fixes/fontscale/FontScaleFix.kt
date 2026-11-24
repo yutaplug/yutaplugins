@@ -11,11 +11,12 @@ import com.discord.utilities.font.FontUtils
 import com.github.yutaplug.fixes.Fix
 import com.github.yutaplug.fixes.OpenActivities
 
-internal class FontScaleFix : Fix(
-    "FontScaleFix",
-    "Font scaling",
-    "Fixes the font scaling option not working.",
-) {
+internal class FontScaleFix :
+    Fix(
+        "FontScaleFix",
+        "Font scaling",
+        "Fixes the font scaling option not working.",
+    ) {
     override fun onToggled() {
         // Each AppActivity remembers the font scale it was created with (q). When a stale one
         // resumes, Discord relaunches it itself, as after changing the font scale in Appearance.

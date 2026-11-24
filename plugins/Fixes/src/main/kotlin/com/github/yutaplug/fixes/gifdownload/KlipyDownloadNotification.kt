@@ -61,8 +61,10 @@ internal class KlipyDownloadNotification(
             } else {
                 Notification.Builder(context).setPriority(Notification.PRIORITY_LOW)
             }
-            builder.setSmallIcon(if (ongoing) android.R.drawable.stat_sys_download else android.R.drawable.stat_sys_download_done)
-                .setContentTitle(title)
+            builder
+                .setSmallIcon(
+                    if (ongoing) android.R.drawable.stat_sys_download else android.R.drawable.stat_sys_download_done,
+                ).setContentTitle(title)
                 .setContentText(text)
                 .setStyle(Notification.BigTextStyle().bigText(text))
                 .setOnlyAlertOnce(true)

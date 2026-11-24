@@ -1,4 +1,4 @@
-version = "1.0.3"
+version = "1.0.4"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,14 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.4
+        * Markdown: rewritten from scratch
+        * Markdown: code blocks no longer lose their background, also after an edit, and fit inside quotes and lists. One-line ```code``` shows as a box too
+        * Markdown: numbered lists now render after a line of text
+        * Markdown: each heading can have its own color, set in Markdown appearance
+        * Markdown: reply previews show a heading's text instead of a big heading
+        * Markdown: the settings explain what each part of the fix does
+
         # 1.0.3
         * Added Plugin menus: menus and popups from plugins no longer stop opening after you open and close another screen, like settings or an image
         * Added Message menu in search: holding a message in search opens its menu instead of jumping to it

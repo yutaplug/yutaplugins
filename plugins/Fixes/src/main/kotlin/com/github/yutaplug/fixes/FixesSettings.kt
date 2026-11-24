@@ -75,7 +75,12 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
                 val res = Utils.getResId(icon, "drawable")
                 if (res != 0) {
                     val tint = MarkdownAppearance.themedColor(context, "colorInteractiveNormal", Color.LTGRAY)
-                    setCompoundDrawablesRelativeWithIntrinsicBounds(DrawableCompat.getDrawable(context, res, tint), null, null, null)
+                    setCompoundDrawablesRelativeWithIntrinsicBounds(
+                        DrawableCompat.getDrawable(context, res, tint),
+                        null,
+                        null,
+                        null,
+                    )
                 }
                 isClickable = true
                 setOnClickListener { action() }

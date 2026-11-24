@@ -31,12 +31,13 @@ import java.util.WeakHashMap
  * Mentions of users Discord has not cached render as "invalid-user". This fetches them and
  * redraws the messages that mention them.
  */
-internal class ValidUserFix : Fix(
-    "ValidUser",
-    "Mentioned users",
-    "Fetches users that mentions show as invalid-user because Discord has not loaded them yet.",
-    author = "js6pak",
-) {
+internal class ValidUserFix :
+    Fix(
+        "ValidUser",
+        "Mentioned users",
+        "Fetches users that mentions show as invalid-user because Discord has not loaded them yet.",
+        author = "js6pak",
+    ) {
     private class MessageRef(val messageId: Long, val adapter: WeakReference<WidgetChatListAdapter>)
 
     /** Which chat message each render context draws, so a fetched user can redraw it. */

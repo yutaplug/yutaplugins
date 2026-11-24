@@ -28,11 +28,12 @@ import java.util.concurrent.Executors
 import kotlin.Function1
 
 /** Downloads the GIF image URL for hosted GIFs and keeps its filename in sync. */
-internal class GifDownloadFix : Fix(
-    "GifDownloadFix",
-    "GIF downloads",
-    "Fixes downloading GIFs not working.",
-) {
+internal class GifDownloadFix :
+    Fix(
+        "GifDownloadFix",
+        "GIF downloads",
+        "Fixes downloading GIFs not working.",
+    ) {
     private val pendingGifUrls = LinkedHashMap<Uri, Uri>(32, 0.75f, true)
     private val giphyNames = LinkedHashMap<Uri, String>(32, 0.75f, true)
     private val klipyAliases = LinkedHashMap<Uri, Boolean>(32, 0.75f, true)

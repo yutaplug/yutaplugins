@@ -16,11 +16,12 @@ import java.util.WeakHashMap
  * Aliucord shows GIF stickers (API format 4, unknown to Discord 126.21) through the static PNG
  * path with a `.gif` URL, so Fresco autoplays them and the sticker animation setting is ignored.
  */
-internal class GifStickerFix : Fix(
-    "GifStickerAnimationFix",
-    "GIF sticker animation",
-    "Makes GIF stickers follow the sticker animation setting in Text & Images instead of always animating.",
-) {
+internal class GifStickerFix :
+    Fix(
+        "GifStickerAnimationFix",
+        "GIF sticker animation",
+        "Makes GIF stickers follow the sticker animation setting in Text & Images instead of always animating.",
+    ) {
     /** Sticker images that got this fix's long-press listener, so a reused view can drop it. */
     private val longPressViews = Collections.newSetFromMap(WeakHashMap<View, Boolean>())
 

@@ -11,12 +11,13 @@ import okhttp3.RequestBody
 import okio.ByteString
 
 /** Ported from TsyQax's FriendFix: https://github.com/tsyqax/aliucord_plugins_tsq */
-internal class FriendFix : Fix(
-    "FriendFix",
-    "Sending friend requests",
-    "Fixes sending friend requests to users without a discriminator.",
-    author = "TsyQax",
-) {
+internal class FriendFix :
+    Fix(
+        "FriendFix",
+        "Sending friend requests",
+        "Fixes sending friend requests to users without a discriminator.",
+        author = "TsyQax",
+    ) {
     override fun start(context: Context) {
         // Request.Builder.build(): replace the placeholder discriminator with null.
         patcher.patch(

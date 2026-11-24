@@ -12,11 +12,12 @@ import com.discord.utilities.persister.Persister
 import com.github.yutaplug.fixes.Fix
 
 /** Keeps explicit media choices local instead of relying on legacy settings sync. */
-internal class SettingsFix : Fix(
-    "SettingsFix",
-    "Settings",
-    "Fixes settings such as who can send you friend requests and accessibility options not applying correctly.",
-) {
+internal class SettingsFix :
+    Fix(
+        "SettingsFix",
+        "Settings",
+        "Fixes settings such as who can send you friend requests and accessibility options not applying correctly.",
+    ) {
     private var friendSettings: FriendSettingsFix? = null
 
     override fun start(context: Context) {
@@ -24,7 +25,8 @@ internal class SettingsFix : Fix(
         val preferences = context.getSharedPreferences("MediaSettingsFix", Context.MODE_PRIVATE)
         val store = StoreStream.getUserSettings()
         try {
-            friendSettings = FriendSettingsFix { message, error -> logger.warn(message, error) }.also { it.start(patcher) }
+            friendSettings =
+                FriendSettingsFix { message, error -> logger.warn(message, error) }.also { it.start(patcher) }
             patcher.patchRequired(
                 StoreUserSettings::class.java,
                 "getIsAutoPlayGifsEnabled",
@@ -75,8 +77,18 @@ internal class SettingsFix : Fix(
             }
             if (preferences.contains(EMOJI)) store.setIsAnimatedEmojisEnabled(null, preferences.getBoolean(EMOJI, true))
             if (preferences.contains(STICKERS)) store.setStickerAnimationSettings(null, preferences.getInt(STICKERS, 0))
-            if (preferences.contains(ATTACHMENTS)) store.setIsAttachmentMediaInline(null, preferences.getBoolean(ATTACHMENTS, true))
-            if (preferences.contains(EMBED_MEDIA)) store.setIsEmbedMediaInlined(null, preferences.getBoolean(EMBED_MEDIA, true))
+            if (preferences.contains(
+                    ATTACHMENTS,
+                )
+            ) {
+                store.setIsAttachmentMediaInline(null, preferences.getBoolean(ATTACHMENTS, true))
+            }
+            if (preferences.contains(
+                    EMBED_MEDIA,
+                )
+            ) {
+                store.setIsEmbedMediaInlined(null, preferences.getBoolean(EMBED_MEDIA, true))
+            }
             if (preferences.contains(EMBEDS)) store.setIsRenderEmbedsEnabled(null, preferences.getBoolean(EMBEDS, true))
         } catch (error: Throwable) {
             friendSettings?.close()

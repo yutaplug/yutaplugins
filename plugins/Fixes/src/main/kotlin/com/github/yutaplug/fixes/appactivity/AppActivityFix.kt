@@ -12,12 +12,13 @@ import com.github.yutaplug.fixes.Fix
  * the closed screen. Plugins that open menus through it then do nothing, because Discord's dialogs
  * swallow the error. Point it at whichever screen comes back to the front instead.
  */
-internal class AppActivityFix : Fix(
-    "AppActivityFix",
-    "Plugin menus",
-    "Fixes menus and popups from plugins doing nothing after you open and close another screen, " +
-        "like settings, search or an image.",
-) {
+internal class AppActivityFix :
+    Fix(
+        "AppActivityFix",
+        "Plugin menus",
+        "Fixes menus and popups from plugins doing nothing after you open and close another screen, " +
+            "like settings, search or an image.",
+    ) {
     override fun start(context: Context) {
         patcher.patch(
             AppActivity::class.java,

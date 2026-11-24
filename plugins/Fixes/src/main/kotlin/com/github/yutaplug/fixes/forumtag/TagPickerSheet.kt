@@ -123,6 +123,7 @@ internal class TagPickerSheet(
         container.addView(name)
 
         val id = tag.c()
+
         fun render() {
             if (id in selected) {
                 background.setStroke(maxOf(1, DimenUtils.dpToPx(17) / 10), 0xFF5865F2.toInt())

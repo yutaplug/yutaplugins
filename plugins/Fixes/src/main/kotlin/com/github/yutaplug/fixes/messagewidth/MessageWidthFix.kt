@@ -15,14 +15,15 @@ import com.discord.widgets.chat.list.entries.StickerEntry
 import com.github.yutaplug.fixes.Fix
 
 /** Ported from zt64's MessageWidthFix: https://github.com/zt64/aliucord-plugins */
-internal class MessageWidthFix : Fix(
-    "MessageWidthFix",
-    "Message width",
-    "Lets embeds and stickers use the full chat width, so you can long-press beside them like other messages.",
-    author = "zt64",
-    // Chat rows that were already laid out keep the wider layout until Discord recreates them.
-    requiresRestart = true,
-) {
+internal class MessageWidthFix :
+    Fix(
+        "MessageWidthFix",
+        "Message width",
+        "Lets embeds and stickers use the full chat width, so you can long-press beside them like other messages.",
+        author = "zt64",
+        // Chat rows that were already laid out keep the wider layout until Discord recreates them.
+        requiresRestart = true,
+    ) {
     override fun start(context: Context) {
         val embedCardId = Utils.getResId("chat_list_item_embed_container_card", "id")
         val stickerId = Utils.getResId("chat_list_adapter_item_sticker", "id")

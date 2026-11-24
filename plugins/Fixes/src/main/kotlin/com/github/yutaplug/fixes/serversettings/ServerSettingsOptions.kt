@@ -18,7 +18,8 @@ internal class ServerSettingsOptions(private val plugin: Fixes, private val fix:
 
         for (option in ServerSettingsFix.options) {
             addView(
-                Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, option.title, option.description)
+                Utils
+                    .createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, option.title, option.description)
                     .apply {
                         isChecked = fix.option(option)
                         setOnCheckedListener {

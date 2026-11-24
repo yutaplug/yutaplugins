@@ -80,8 +80,14 @@ internal object QrLogin {
 
     private fun confirmLogin(host: AppFragment, token: String) {
         when (remoteFinish(token, null)) {
-            FINISH_SUCCESS -> loginDone(host)
-            FINISH_MFA -> startMfa(host, token, pendingMfa)
+            FINISH_SUCCESS -> {
+                loginDone(host)
+            }
+
+            FINISH_MFA -> {
+                startMfa(host, token, pendingMfa)
+            }
+
             else -> {
                 logger.errorToast(pendingError ?: "Login failed")
                 reEnable(host)
@@ -96,7 +102,8 @@ internal object QrLogin {
                 return@post
             }
             val dialog = ConfirmDialog()
-            dialog.setTitle("Resume login?")
+            dialog
+                .setTitle("Resume login?")
                 .setDescription("The login screen reloaded. Approve the pending login?")
                 .setOnOkListener {
                     recovering = false
@@ -128,9 +135,18 @@ internal object QrLogin {
             }
         }
         val type = when {
-            "totp" in types -> "totp"
-            "backup" in types -> "backup"
-            "password" in types -> "password"
+            "totp" in types -> {
+                "totp"
+            }
+
+            "backup" in types -> {
+                "backup"
+            }
+
+            "password" in types -> {
+                "password"
+            }
+
             else -> {
                 logger.errorToast("Unsupported 2FA method: ${types.joinToString(", ")}")
                 reEnable(host)
@@ -193,7 +209,13 @@ internal object QrLogin {
             mfaError(dialog, pendingError)
             return
         }
-        if (remoteFinish(handshakeToken, mfaToken) == FINISH_SUCCESS) loginDone(dialog) else mfaError(dialog, pendingError)
+        if (remoteFinish(handshakeToken, mfaToken) ==
+            FINISH_SUCCESS
+        ) {
+            loginDone(dialog)
+        } else {
+            mfaError(dialog, pendingError)
+        }
     }
 
     private fun mfaVerify(code: String): String? {
@@ -210,15 +232,20 @@ internal object QrLogin {
             }
             val json = JSONObject(response)
             when {
-                json.has("token") -> json.optString("token")
+                json.has("token") -> {
+                    json.optString("token")
+                }
+
                 json.optInt("code", -1) == 60008 -> {
                     pendingError = "Invalid code, try again"
                     null
                 }
+
                 json.has("retry_after") -> {
                     pendingError = "Rate limited, wait ${Math.ceil(json.optDouble("retry_after")).toInt()}s"
                     null
                 }
+
                 else -> {
                     pendingError = json.optString("message", "MFA verification failed")
                     null
@@ -246,7 +273,11 @@ internal object QrLogin {
                     pendingMfa = json.optJSONObject("mfa")
                     FINISH_MFA
                 }
-                -1 -> FINISH_SUCCESS
+
+                -1 -> {
+                    FINISH_SUCCESS
+                }
+
                 else -> {
                     pendingError = "Login failed: ${json.optString("message", "code $code")}"
                     FINISH_FAIL
@@ -262,7 +293,11 @@ internal object QrLogin {
     private fun cancelFlow() {
         val token = handshakeToken
         clearState()
-        if (token != null) Utils.threadPool.execute { post("/users/@me/remote-auth/cancel", handshakeBody(token), null) }
+        if (token !=
+            null
+        ) {
+            Utils.threadPool.execute { post("/users/@me/remote-auth/cancel", handshakeBody(token), null) }
+        }
     }
 
     private fun loginDone(fragment: Fragment) {

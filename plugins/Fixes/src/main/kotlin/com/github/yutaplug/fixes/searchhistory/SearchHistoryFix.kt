@@ -11,11 +11,12 @@ import com.github.yutaplug.fixes.Fix
 import java.util.LinkedList
 
 /** Persists search-history changes immediately without mutating published history. */
-internal class SearchHistoryFix : Fix(
-    "SearchHistoryFix",
-    "Search history",
-    "Fixes cleared search history coming back after an app restart.",
-) {
+internal class SearchHistoryFix :
+    Fix(
+        "SearchHistoryFix",
+        "Search history",
+        "Fixes cleared search history coming back after an app restart.",
+    ) {
     override fun start(context: Context) {
         try {
             patcher.patch(
@@ -39,6 +40,7 @@ internal class SearchHistoryFix : Fix(
                 PreHook { frame ->
                     val cache = frame.thisObject as MGPreferenceSearchHistoryCache
                     val target = frame.args[0] as StoreSearch.SearchTarget
+
                     @Suppress("UNCHECKED_CAST")
                     val query = (frame.args[1] as List<QueryNode>).toList()
                     backingCache(cache).getAndSet(true) { history ->
@@ -80,14 +82,17 @@ internal class SearchHistoryFix : Fix(
             // change one another's lists. Preserve Discord's ordering and limits.
             val queries = LinkedList<List<QueryNode>>()
             queries.add(query.toList())
-            history.firstOrNull { it.searchTarget == target }?.recentQueries
+            history
+                .firstOrNull { it.searchTarget == target }
+                ?.recentQueries
                 ?.filter { it != query }
                 ?.take(MAX_QUERIES_PER_TARGET - 1)
                 ?.forEach { queries.add(it.toList()) }
 
             val updated = LinkedList<TargetHistory>()
             updated.add(TargetHistory(target, queries))
-            history.filter { it.searchTarget != target }
+            history
+                .filter { it.searchTarget != target }
                 .take(MAX_SEARCH_TARGETS - 1)
                 .forEach { updated.add(it) }
             return updated

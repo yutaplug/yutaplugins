@@ -6,12 +6,13 @@ import com.aliucord.patcher.PreHook
 import com.github.yutaplug.fixes.Fix
 import java.util.regex.Pattern
 
-internal class RawGitHubUpdater : Fix(
-    "RawGitHubUpdater",
-    "Raw GitHub updater",
-    "Downloads plugin updates from raw.githubusercontent.com instead of jsDelivr. " +
-        "Might fix stale or failed plugin updates.",
-) {
+internal class RawGitHubUpdater :
+    Fix(
+        "RawGitHubUpdater",
+        "Raw GitHub updater",
+        "Downloads plugin updates from raw.githubusercontent.com instead of jsDelivr. " +
+            "Might fix stale or failed plugin updates.",
+    ) {
     // https://cdn.jsdelivr.net/gh/<user>/<repo>[@<ref>]/<path>
     // java.util.regex rather than kotlin.text.Regex, which is broken by Discord's obfuscated stdlib.
     private val jsDelivrPattern = Pattern.compile(

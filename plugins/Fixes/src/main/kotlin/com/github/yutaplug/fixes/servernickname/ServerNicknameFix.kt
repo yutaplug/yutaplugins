@@ -10,12 +10,13 @@ import okio.ByteString
 import org.json.JSONObject
 
 /** Ported from TsyQax's ServerNicknameFix: https://github.com/tsyqax/aliucord_plugins_tsq */
-internal class ServerNicknameFix : Fix(
-    "ServerNicknameFix",
-    "Server nickname",
-    "Fixes not being able to change your server nickname.",
-    author = "TsyQax",
-) {
+internal class ServerNicknameFix :
+    Fix(
+        "ServerNicknameFix",
+        "Server nickname",
+        "Fixes not being able to change your server nickname.",
+        author = "TsyQax",
+    ) {
     override fun start(context: Context) {
         // Request.Builder.build(): non-Nitro users may not send a per-server bio, even an empty one.
         patcher.patch(

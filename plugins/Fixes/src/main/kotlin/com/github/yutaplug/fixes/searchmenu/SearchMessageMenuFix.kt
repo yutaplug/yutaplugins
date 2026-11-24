@@ -16,12 +16,13 @@ import com.github.yutaplug.fixes.Fix
  * chat instead. Search results usually aren't loaded in the channel, so the menu, which looks the
  * message up in the channel, is handed the search result while it sets itself up.
  */
-internal class SearchMessageMenuFix : Fix(
-    "SearchMessageMenuFix",
-    "Message menu in search",
-    "Holding a message in search opens its menu, like in chat, instead of jumping to it. " +
-        "Tapping still jumps to the message.",
-) {
+internal class SearchMessageMenuFix :
+    Fix(
+        "SearchMessageMenuFix",
+        "Message menu in search",
+        "Holding a message in search opens its menu, like in chat, instead of jumping to it. " +
+            "Tapping still jumps to the message.",
+    ) {
     /** Recent search results that were held, by message ID. */
     private val held = object : LinkedHashMap<Long, Message>() {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Message>?) = size > MAX_HELD
@@ -43,15 +44,16 @@ internal class SearchMessageMenuFix : Fix(
                 val manager = fragmentManagerField.get(call.thisObject) as? FragmentManager ?: return@PreHook
                 if (message.isLocal || message.id <= 0L) return@PreHook
                 held[message.id] = message
-                WidgetChatListActions().apply {
-                    arguments = Bundle().apply {
-                        putLong(EXTRA_CHANNEL_ID, message.channelId)
-                        putLong(EXTRA_MESSAGE_ID, message.id)
-                        putCharSequence(EXTRA_CONTENT, call.args[1] as? CharSequence ?: "")
-                        putInt(EXTRA_TYPE, 0)
-                        putBoolean(EXTRA_FROM_SEARCH, true)
-                    }
-                }.show(manager, WidgetChatListActions::class.java.name)
+                WidgetChatListActions()
+                    .apply {
+                        arguments = Bundle().apply {
+                            putLong(EXTRA_CHANNEL_ID, message.channelId)
+                            putLong(EXTRA_MESSAGE_ID, message.id)
+                            putCharSequence(EXTRA_CONTENT, call.args[1] as? CharSequence ?: "")
+                            putInt(EXTRA_TYPE, 0)
+                            putBoolean(EXTRA_FROM_SEARCH, true)
+                        }
+                    }.show(manager, WidgetChatListActions::class.java.name)
                 call.result = null
             },
         )

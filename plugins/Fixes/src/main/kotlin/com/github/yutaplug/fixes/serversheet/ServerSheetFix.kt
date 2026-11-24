@@ -18,11 +18,12 @@ import com.github.yutaplug.fixes.Fix
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
-internal class ServerSheetFix : Fix(
-    "ServerSheetFix",
-    "Server sheet",
-    "Fixes the server sheet sometimes opening scrolled or laid out wrong.",
-) {
+internal class ServerSheetFix :
+    Fix(
+        "ServerSheetFix",
+        "Server sheet",
+        "Fixes the server sheet sometimes opening scrolled or laid out wrong.",
+    ) {
     private val initialized = WeakHashMap<WidgetGuildProfileSheet, Boolean>()
     private val openingGuards = WeakHashMap<NestedScrollView, OpeningGuard>()
 
@@ -125,7 +126,8 @@ internal class ServerSheetFix : Fix(
         }
     }
 
-    private inner class OpeningGuard(root: NestedScrollView) : ViewTreeObserver.OnPreDrawListener,
+    private inner class OpeningGuard(root: NestedScrollView) :
+        ViewTreeObserver.OnPreDrawListener,
         View.OnAttachStateChangeListener {
         private val view = WeakReference(root)
         private val expiresAt = SystemClock.uptimeMillis() + 1200L

@@ -22,8 +22,8 @@ import com.github.yutaplug.fixes.searchhistory.SearchHistoryFix
 import com.github.yutaplug.fixes.searchmenu.SearchMessageMenuFix
 import com.github.yutaplug.fixes.serverhold.ServerHoldFix
 import com.github.yutaplug.fixes.servernickname.ServerNicknameFix
-import com.github.yutaplug.fixes.serversheet.ServerSheetFix
 import com.github.yutaplug.fixes.serversettings.ServerSettingsFix
+import com.github.yutaplug.fixes.serversheet.ServerSheetFix
 import com.github.yutaplug.fixes.settings.SettingsFix
 import com.github.yutaplug.fixes.validuser.ValidUserFix
 

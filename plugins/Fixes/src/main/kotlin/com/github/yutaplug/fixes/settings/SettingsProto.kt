@@ -4,7 +4,12 @@ import java.io.ByteArrayOutputStream
 
 /** Minimal protobuf wire handling that preserves fields we do not understand. */
 internal object SettingsProto {
-    private data class Field(val number: Int, val wire: Int, val value: ByteArray, val raw: ByteArray)
+    private data class Field(
+        val number: Int,
+        val wire: Int,
+        val value: ByteArray,
+        val raw: ByteArray,
+    )
 
     fun friendFlags(settings: ByteArray): Int {
         val privacy = message(settings, 8) ?: return 14
@@ -37,8 +42,8 @@ internal object SettingsProto {
             result
         } ?: 0L
 
-    private fun replace(data: ByteArray, number: Int, replacement: ByteArray): ByteArray =
-        ByteArrayOutputStream().apply {
+    private fun replace(data: ByteArray, number: Int, replacement: ByteArray): ByteArray = ByteArrayOutputStream()
+        .apply {
             fields(data).filter { it.number != number }.forEach { write(it.raw) }
             write(replacement)
         }.toByteArray()
@@ -46,17 +51,19 @@ internal object SettingsProto {
     private fun bytes(number: Int, value: ByteArray): ByteArray =
         varint((number.toLong() shl 3) or 2) + varint(value.size.toLong()) + value
 
-    private fun varint(value: Long): ByteArray = ByteArrayOutputStream().apply {
-        var remaining = value
-        do {
-            val next = (remaining and 127).toInt()
-            remaining = remaining ushr 7
-            write(next or if (remaining != 0L) 128 else 0)
-        } while (remaining != 0L)
-    }.toByteArray()
+    private fun varint(value: Long): ByteArray = ByteArrayOutputStream()
+        .apply {
+            var remaining = value
+            do {
+                val next = (remaining and 127).toInt()
+                remaining = remaining ushr 7
+                write(next or if (remaining != 0L) 128 else 0)
+            } while (remaining != 0L)
+        }.toByteArray()
 
     private fun fields(data: ByteArray): List<Field> {
         var position = 0
+
         fun readVarint(): Long {
             var value = 0L
             // Discord's Kotlin runtime renames IntProgression.Companion. Avoid
@@ -85,17 +92,22 @@ internal object SettingsProto {
                     valueStart = position
                     readVarint()
                 }
+
                 1, 5 -> {
                     valueStart = position
                     position += if (wire == 1) 8 else 4
                 }
+
                 2 -> {
                     val length = readVarint()
                     require(length >= 0 && length <= (data.size - position).toLong()) { "Invalid protobuf length" }
                     valueStart = position
                     position += length.toInt()
                 }
-                else -> error("Unsupported protobuf wire type: $wire")
+
+                else -> {
+                    error("Unsupported protobuf wire type: $wire")
+                }
             }
             require(position <= data.size) { "Truncated protobuf field" }
             result.add(Field(number, wire, data.copyOfRange(valueStart, position), data.copyOfRange(start, position)))

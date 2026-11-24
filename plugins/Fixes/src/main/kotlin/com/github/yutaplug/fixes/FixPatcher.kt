@@ -9,12 +9,8 @@ internal class FixPatcher(private val api: PatcherAPI) {
     private val unpatches = ArrayList<Runnable>()
 
     /** Like [PatcherAPI.patch]: failures to find the method are logged, not thrown. */
-    fun patch(
-        clazz: Class<*>,
-        fn: String,
-        paramTypes: Array<Class<*>> = emptyArray(),
-        hook: XC_MethodHook,
-    ): Runnable = track(api.patch(clazz, fn, paramTypes, hook))
+    fun patch(clazz: Class<*>, fn: String, paramTypes: Array<Class<*>> = emptyArray(), hook: XC_MethodHook): Runnable =
+        track(api.patch(clazz, fn, paramTypes, hook))
 
     fun patch(member: Member, hook: XC_MethodHook): Runnable = track(api.patch(member, hook))
 

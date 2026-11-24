@@ -4,191 +4,210 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.InputType
-import android.text.TextUtils
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
-import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.SeekBar
 import android.widget.TextView
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
 import com.aliucord.fragments.ConfirmDialog
+import com.aliucord.fragments.InputDialog
+import com.aliucord.fragments.SelectDialog
 import com.aliucord.fragments.SettingsPage
 import com.discord.utilities.drawable.DrawableCompat
-import com.discord.views.CheckedSetting
 import com.lytefast.flexinput.R
 import java.util.Locale
-import kotlin.math.roundToInt
 
-internal class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin: MarkdownFix) : SettingsPage() {
-    private var activeDialog: DiscordDialog? = null
-    private lateinit var customColor: CheckedSetting
-    private lateinit var colorRow: LinearLayout
-    private lateinit var colorValue: TextView
-    private val sizeValues = mutableMapOf<MarkdownAppearance.TextSize, TextView>()
+internal class MarkdownFixSettings(private val settings: SettingsAPI, private val plugin: MarkdownFix) :
+    SettingsPage() {
+    private val updaters = ArrayList<() -> Unit>()
 
     override fun onViewBound(view: View) {
         super.onViewBound(view)
         setActionBarTitle("Markdown appearance")
         setActionBarSubtitle("Fixes")
-        sizeValues.clear()
+        updaters.clear()
         linearLayout.setPadding(0, 0, 0, dp(16))
         linearLayout.setBackgroundColor(color("colorBackgroundPrimary", Color.DKGRAY))
 
-        header("Text sizes", first = true)
-        for (size in MarkdownAppearance.sizes) {
-            val (_, value) = row(size.title) { showScaleDialog(size) }
-            sizeValues[size] = value
+        header("Headings", first = true)
+        for (index in 0 until 3) {
+            sizeRow(MarkdownAppearance.sizes[index])
+            colorRow(MarkdownAppearance.headingColors[index])
         }
+        sizeRow(MarkdownAppearance.sizes[3])
 
-        header("Bullet lists")
-        customColor = Utils
-            .createCheckedSetting(
-                requireContext(),
-                CheckedSetting.ViewType.SWITCH,
-                "Custom bullet color",
-                "Replace the theme color for list bullets.",
-            ).apply {
-                isChecked = settings.getBool(MarkdownAppearance.CUSTOM_BULLET_COLOR, false)
-                setOnCheckedListener {
-                    settings.setBool(MarkdownAppearance.CUSTOM_BULLET_COLOR, it)
-                    changed()
-                }
-            }
-        addView(customColor)
-        val (row, value) = row("Bullet color", action = ::showColorDialog)
-        colorRow = row
-        colorValue = value
+        header("Lists")
+        colorRow(MarkdownAppearance.bullet)
 
         divider()
         row("Reset appearance", "ic_refresh_white_a60_24dp", ::confirmReset)
-        addView(
-            TextView(requireContext(), null, 0, R.i.UiKit_Settings_Item_SubText).apply {
-                text = "Changes apply to visible messages immediately."
-                background = null
-                setPaddingRelative(paddingStart, dp(4), paddingEnd, dp(8))
-            },
-        )
-        updateUi()
+        subtext("Sizes and colors apply to visible messages right away.")
+
+        header("What this fixes")
+        for ((title, description) in FEATURES) feature(title, description)
     }
 
     private fun changed() {
-        updateUi()
+        updaters.forEach { it() }
         plugin.refreshAppearance()
     }
 
-    private fun updateUi() {
-        for ((size, value) in sizeValues) value.text = "${format(MarkdownAppearance.scale(settings, size))}×"
-        val custom = settings.getBool(MarkdownAppearance.CUSTOM_BULLET_COLOR, false)
-        colorRow.isEnabled = custom
-        colorRow.alpha = if (custom) 1f else 0.45f
-        colorValue.text = currentColor()
-        colorValue.setCompoundDrawablesRelativeWithIntrinsicBounds(swatch(Color.parseColor(currentColor())), null, null, null)
-        colorValue.compoundDrawablePadding = dp(8)
+    private fun sizeRow(size: MarkdownAppearance.TextSize) {
+        val value = row(if (size.key == MarkdownAppearance.SUBTEXT_SCALE) "Subtext size" else "${size.title} size") {
+            showSizeDialog(size)
+        }
+        track { value.text = "${format(MarkdownAppearance.scale(settings, size))}×" }
     }
 
-    private fun showScaleDialog(size: MarkdownAppearance.TextSize) {
-        activeDialog?.dismiss()
-        val context = requireContext()
-        var selected = MarkdownAppearance.scale(settings, size)
-        val content = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(4), dp(16), dp(12))
-        }
-        // Preview at the chosen scale, relative to Discord's normal message text size.
-        val preview = text(size.example.substringAfter(' '), BASE_TEXT_SIZE, "colorHeaderPrimary").apply {
-            if (size.key != MarkdownAppearance.SUBTEXT_SCALE) setTypeface(typeface, Typeface.BOLD)
-            gravity = Gravity.CENTER_VERTICAL
-            minHeight = dp(64)
-            setSingleLine(true)
-            ellipsize = TextUtils.TruncateAt.END
-        }
-        content.addView(preview, LinearLayout.LayoutParams(-1, -2))
-        val controls = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
-        val value = text("", 14f, "colorTextMuted").apply {
-            gravity = Gravity.END
-            minWidth = dp(52)
-        }
+    /** Shows a row's current value now and again after every change. */
+    private fun track(update: () -> Unit) {
+        updaters.add(update)
+        update()
+    }
 
-        fun update() {
-            value.text = "${format(selected)}×"
-            preview.setTextSize(TypedValue.COMPLEX_UNIT_SP, BASE_TEXT_SIZE * selected)
+    private fun colorRow(setting: MarkdownAppearance.ColorSetting) {
+        val value = row(setting.title) { showColorDialog(setting) }
+        track {
+            val custom = setting.color(settings)
+            value.text = if (custom == null) "Theme" else setting.hex(settings)
+            value.setCompoundDrawablesRelativeWithIntrinsicBounds(custom?.let(::swatch), null, null, null)
+            value.compoundDrawablePadding = dp(8)
         }
-        val bar = SeekBar(context, null, 0, com.lytefast.flexinput.R.i.UiKit_SeekBar).apply {
-            max = 290
-            contentDescription = "${size.title} scale"
-            // The UiKit style has no horizontal padding, which clips half the thumb at either end.
-            val inset = maxOf(thumb?.intrinsicWidth ?: 0, dp(20)) / 2
-            setPadding(inset, paddingTop, inset, paddingBottom)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (!fromUser) return
-                    selected = (progress + 10) / 100f
-                    update()
+    }
+
+    private fun showSizeDialog(size: MarkdownAppearance.TextSize) {
+        val current = MarkdownAppearance.scale(settings, size)
+        val presets = (SIZE_PRESETS + size.default).distinct().sorted()
+        val labels = presets.map { scale ->
+            (if (scale == current) "✓ " else "") +
+                "${format(scale)}×" +
+                (if (scale == size.default) " (default)" else "")
+        } +
+            "Custom…"
+        SelectDialog()
+            .apply {
+                title = "${size.title} size"
+                items = labels.toTypedArray()
+                onResultListener = { which ->
+                    if (which < presets.size) {
+                        saveSize(size, presets[which])
+                    } else {
+                        showCustomSizeDialog(size)
+                    }
                 }
-
-                override fun onStartTrackingTouch(bar: SeekBar?) {}
-
-                override fun onStopTrackingTouch(bar: SeekBar?) {}
-            })
-        }
-
-        fun select(scale: Float) {
-            selected = scale
-            bar.progress = ((scale - 0.1f) * 100).roundToInt().coerceIn(0, bar.max)
-            update()
-        }
-        controls.addView(bar, LinearLayout.LayoutParams(0, dp(48), 1f))
-        controls.addView(value)
-        content.addView(controls, LinearLayout.LayoutParams(-1, -2))
-        content.addView(text("${size.example} · normal is 1.00×", 12f, "colorTextMuted"))
-        select(selected)
-
-        activeDialog = DiscordDialog(context, size.title)
-            .content(content)
-            // Previews the default instead of saving it, so Cancel still keeps the current value.
-            .neutral("Default") { select(size.default) }
-            .negative("Cancel")
-            .positive("Save") {
-                settings.setString(size.key, selected.toString())
-                changed()
-                true
-            }.show()
+            }.show(parentFragmentManager, "MarkdownFixSize")
     }
 
-    private fun showColorDialog() {
-        activeDialog?.dismiss()
-        activeDialog = MarkdownEditDialog.show(
-            context = requireContext(),
-            title = "Bullet color",
-            label = "Hex color",
-            value = currentColor(),
-            hint = "#RRGGBB or #AARRGGBB",
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
-            colorPicker = true,
-            validate = { raw ->
-                if (MarkdownAppearance.normalizeColor(raw) == null) "Enter #RRGGBB or #AARRGGBB" else null
-            },
-            save = { raw ->
-                settings.setString(MarkdownAppearance.BULLET_COLOR, MarkdownAppearance.normalizeColor(raw)!!)
-                changed()
-            },
-            defaultValue = MarkdownAppearance.DEFAULT_BULLET_COLOR,
-        )
+    private fun showCustomSizeDialog(size: MarkdownAppearance.TextSize) {
+        val dialog = InputDialog()
+        dialog
+            .setTitle("${size.title} size")
+            .setDescription("A size from 0.10 to 3.00, where 1.00 is normal message text. Example: ${size.example}")
+            .setPlaceholderText("Size")
+            .setInputType(InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL)
+            .setOnOkListener {
+                val scale = dialog.input.trim().replace(',', '.').toFloatOrNull()
+                if (scale == null || !scale.isFinite() || scale < 0.1f || scale > 3f) {
+                    dialog.inputLayout.error = "Enter a number from 0.10 to 3.00"
+                } else {
+                    saveSize(size, scale)
+                    dialog.dismiss()
+                }
+            }
+        dialog.setOnDialogShownListener {
+            dialog.inputLayout.editText?.apply {
+                setText(format(MarkdownAppearance.scale(settings, size)))
+                setSelection(text.length)
+            }
+            dialog.okButton.text = "Save"
+        }
+        dialog.show(parentFragmentManager, "MarkdownFixCustomSize")
+    }
+
+    private fun saveSize(size: MarkdownAppearance.TextSize, scale: Float) {
+        settings.setString(size.key, scale.toString())
+        changed()
+    }
+
+    private fun showColorDialog(setting: MarkdownAppearance.ColorSetting) {
+        val custom = setting.isCustom(settings)
+        val currentHex = setting.hex(settings)
+        val labels = listOf((if (custom) "" else "✓ ") + "Theme color") +
+            MarkdownAppearance.presets.map { (name, hex) ->
+                (if (custom && hex == currentHex) "✓ " else "") + "$name  $hex"
+            } +
+            "Custom hex…"
+        SelectDialog()
+            .apply {
+                title = setting.title
+                items = labels.toTypedArray()
+                onResultListener = { which ->
+                    when {
+                        which == 0 -> saveColor(setting, null)
+
+                        which <= MarkdownAppearance.presets.size -> saveColor(
+                            setting,
+                            MarkdownAppearance.presets[which - 1].second,
+                        )
+
+                        else -> showCustomColorDialog(setting)
+                    }
+                }
+            }.show(parentFragmentManager, "MarkdownFixColor")
+    }
+
+    private fun showCustomColorDialog(setting: MarkdownAppearance.ColorSetting) {
+        val dialog = InputDialog()
+        dialog
+            .setTitle(setting.title)
+            .setDescription("A hex color such as #5865F2, or #AARRGGBB with transparency.")
+            .setPlaceholderText("Hex color")
+            .setInputType(InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
+            .setOnOkListener {
+                val hex = MarkdownAppearance.normalizeColor(dialog.input)
+                if (hex == null) {
+                    dialog.inputLayout.error = "Enter #RRGGBB or #AARRGGBB"
+                } else {
+                    saveColor(setting, hex)
+                    dialog.dismiss()
+                }
+            }
+        dialog.setOnDialogShownListener {
+            dialog.inputLayout.editText?.apply {
+                setText(setting.hex(settings))
+                setSelection(text.length)
+            }
+            dialog.okButton.text = "Save"
+        }
+        dialog.show(parentFragmentManager, "MarkdownFixCustomColor")
+    }
+
+    /** A null [hex] goes back to the theme color but remembers the last custom one. */
+    private fun saveColor(setting: MarkdownAppearance.ColorSetting, hex: String?) {
+        if (hex != null) settings.setString(setting.key, hex)
+        settings.setBool(setting.customKey, hex != null)
+        changed()
     }
 
     private fun confirmReset() {
-        activeDialog?.dismiss()
-        activeDialog = null
         val confirm = ConfirmDialog()
         confirm
             .setTitle("Reset appearance?")
-            .setDescription("All text sizes and the bullet color return to their defaults.")
+            .setDescription("All text sizes return to their defaults, and headings and bullets use the theme colors.")
             .setIsDangerous(true)
             .setOnOkListener {
-                reset()
+                MarkdownAppearance.sizes.forEach { settings.setString(it.key, it.default.toString()) }
+                for (setting in MarkdownAppearance.headingColors + MarkdownAppearance.bullet) {
+                    settings.setString(setting.key, setting.default)
+                    settings.setBool(setting.customKey, false)
+                }
+                changed()
                 confirm.dismiss()
             }.show(parentFragmentManager, "MarkdownFixReset")
     }
@@ -197,7 +216,7 @@ internal class MarkdownFixSettings(private val settings: SettingsAPI, private va
      * A settings row built like Discord's own: a `UiKit_Settings_Item_Icon` label with an optional
      * icon, and a `UiKit_Settings_Item_Compound_Right` value, as in Account settings.
      */
-    private fun row(title: String, icon: String? = null, action: () -> Unit): Pair<LinearLayout, TextView> {
+    private fun row(title: String, icon: String? = null, action: () -> Unit): TextView {
         val context = requireContext()
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -209,7 +228,7 @@ internal class MarkdownFixSettings(private val settings: SettingsAPI, private va
             ) {
                 background = context.getDrawable(attribute.resourceId)
             }
-            setOnClickListener { if (isEnabled) action() }
+            setOnClickListener { action() }
         }
         row.addView(
             TextView(context, null, 0, R.i.UiKit_Settings_Item_Icon).apply {
@@ -217,17 +236,21 @@ internal class MarkdownFixSettings(private val settings: SettingsAPI, private va
                 background = null
                 val res = icon?.let { Utils.getResId(it, "drawable") } ?: 0
                 if (res != 0) {
-                    val drawable = DrawableCompat.getDrawable(context, res, color("colorInteractiveNormal", Color.LTGRAY))
+                    val drawable = DrawableCompat.getDrawable(
+                        context,
+                        res,
+                        color("colorInteractiveNormal", Color.LTGRAY),
+                    )
                     setCompoundDrawablesRelativeWithIntrinsicBounds(drawable, null, null, null)
                 }
             },
             LinearLayout.LayoutParams(0, -2, 1f),
         )
-        // Wrap the value so the bullet swatch stays next to its text instead of at the start of the free space.
+        // Wrapped, so a color swatch stays next to its text instead of at the start of the free space.
         val value = TextView(context, null, 0, R.i.UiKit_Settings_Item_Compound_Right)
         row.addView(value, LinearLayout.LayoutParams(-2, -2))
         addView(row)
-        return row to value
+        return value
     }
 
     private fun header(title: String, first: Boolean = false) {
@@ -241,8 +264,34 @@ internal class MarkdownFixSettings(private val settings: SettingsAPI, private va
         )
     }
 
+    private fun subtext(text: CharSequence): TextView =
+        TextView(requireContext(), null, 0, R.i.UiKit_Settings_Item_SubText)
+            .apply {
+                this.text = text
+                background = null
+                setPaddingRelative(paddingStart, dp(4), paddingEnd, dp(8))
+            }.also(::addView)
+
+    /** A feature's name in the header color, then what it does in the muted subtext color. */
+    private fun feature(title: String, description: String) {
+        val text = SpannableStringBuilder(title).apply {
+            setSpan(StyleSpan(Typeface.BOLD), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            setSpan(
+                ForegroundColorSpan(color("colorHeaderPrimary", Color.WHITE)),
+                0,
+                length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            append('\n').append(description)
+        }
+        subtext(text)
+    }
+
     private fun divider() {
-        linearLayout.addView(View(requireContext(), null, 0, R.i.UiKit_Settings_Divider), LinearLayout.LayoutParams(-1, dp(1)))
+        linearLayout.addView(
+            View(requireContext(), null, 0, R.i.UiKit_Settings_Divider),
+            LinearLayout.LayoutParams(-1, dp(1)),
+        )
     }
 
     private fun swatch(fill: Int) = GradientDrawable().apply {
@@ -252,32 +301,10 @@ internal class MarkdownFixSettings(private val settings: SettingsAPI, private va
         setSize(dp(14), dp(14))
     }
 
-    private fun reset() {
-        MarkdownAppearance.sizes.forEach { settings.setString(it.key, it.default.toString()) }
-        settings.setString(MarkdownAppearance.BULLET_COLOR, MarkdownAppearance.DEFAULT_BULLET_COLOR)
-        settings.setBool(MarkdownAppearance.CUSTOM_BULLET_COLOR, false)
-        customColor.isChecked = false
-        changed()
-    }
-
     override fun onDestroyView() {
-        activeDialog?.dismiss()
-        activeDialog = null
-        sizeValues.clear()
+        updaters.clear()
         super.onDestroyView()
     }
-
-    private fun currentColor(): String = MarkdownAppearance.normalizeColor(
-        settings.getString(MarkdownAppearance.BULLET_COLOR, MarkdownAppearance.DEFAULT_BULLET_COLOR),
-    )
-        ?: MarkdownAppearance.DEFAULT_BULLET_COLOR
-
-    private fun text(value: String, size: Float, attribute: String): TextView =
-        DiscordSettingsUi.text(requireContext()).apply {
-            text = value
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
-            setTextColor(color(attribute, Color.LTGRAY))
-        }
 
     private fun color(attribute: String, fallback: Int): Int =
         MarkdownAppearance.themedColor(requireContext(), attribute, fallback)
@@ -286,7 +313,31 @@ internal class MarkdownFixSettings(private val settings: SettingsAPI, private va
 
     private fun format(value: Float): String = String.format(Locale.US, "%.2f", value)
 
-    companion object {
-        private const val BASE_TEXT_SIZE = 16f
+    private companion object {
+        val SIZE_PRESETS = listOf(0.75f, 1.0f, 1.2f, 1.35f, 1.5f, 1.75f, 2.0f)
+
+        val FEATURES = listOf(
+            "Headings   #   ##   ###" to
+                "Start a line with #, ## or ### and a space for a big, bold title. Sizes and colors can be changed above.",
+            "Subtext   -#" to "Start a line with -# and a space for small grey text.",
+            "Lists   -   *   1." to
+                "Start lines with - or * for bullets, or 1. for numbers. Indent with two spaces to nest a list. " +
+                "A - right after a numbered item keeps counting, like on current Discord.",
+            "Block quotes   >   >>>" to
+                "They look like Discord's own. The fix draws them itself only so bullets, numbers, headings and " +
+                "code blocks inside a quote line up to the right of its stripe.",
+            "Code blocks   ```" to
+                "The box no longer disappears after an edit or at the end of a message, also shows for one-line " +
+                "```code```, and fits inside quotes and lists. ```ansi blocks show their colors.",
+            "Masked links   [text](https://…)" to "Show the text as a link in every message.",
+            "Game mentions   <@\$id>" to "Show the game's name and icon. Tap one to see the game's details.",
+            "Command mentions   </name:id>" to "Show the command. Tap one to put it in the message box.",
+            "Hex colors   #5865F2" to "Shown in their own color.",
+            "Timestamps   <t:…:s>   <t:…:S>" to "Show a short date with the time, which Discord 126.21 didn't know.",
+            "Replies" to "Reply previews show a heading's text without its # instead of a big heading.",
+            "Forum posts" to
+                "**bold** at the start of a line no longer turns into a bullet, and posts get quotes, masked " +
+                "links and the rest of the Markdown messages have.",
+        )
     }
 }

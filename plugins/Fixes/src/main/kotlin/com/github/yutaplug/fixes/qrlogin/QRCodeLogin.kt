@@ -15,12 +15,13 @@ import com.github.yutaplug.fixes.Fix
 import com.lytefast.flexinput.R
 
 /** Ported from secp192k1's QRCodeLogin: https://github.com/secp192k1/Aliucord-Plugins */
-internal class QRCodeLogin : Fix(
-    "QRCodeLogin",
-    "QR code login",
-    "Fixes logging in on another device by scanning its QR code, including 2FA and password prompts.",
-    author = "secp192k1",
-) {
+internal class QRCodeLogin :
+    Fix(
+        "QRCodeLogin",
+        "QR code login",
+        "Fixes logging in on another device by scanning its QR code, including 2FA and password prompts.",
+        author = "secp192k1",
+    ) {
     override fun start(context: Context) {
         // The native scanner already opens WidgetRemoteAuth for login codes. Route its Login
         // button through remote-auth/finish, which also handles the 2FA challenge (60003).

@@ -2,14 +2,14 @@ package com.github.yutaplug.fixes.markdown
 
 import android.content.Context
 import android.graphics.Color
-import android.text.TextPaint
-import android.text.style.RelativeSizeSpan
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
 import com.discord.utilities.color.ColorCompat
 import java.util.Locale
+import java.util.regex.Pattern
 import kotlin.math.roundToInt
 
+/** Sizes and colors the user can change. Everything reads settings at draw time, so changes apply live. */
 internal object MarkdownAppearance {
     const val HEADER_1_SCALE = "header1Scale"
     const val HEADER_2_SCALE = "header2Scale"
@@ -26,25 +26,60 @@ internal object MarkdownAppearance {
         TextSize("Subtext", "-# Subtext", SUBTEXT_SCALE, 0.75f),
     )
 
-    data class TextSize(
+    val bullet = ColorSetting("Bullet color", CUSTOM_BULLET_COLOR, BULLET_COLOR, DEFAULT_BULLET_COLOR)
+
+    // Not (1..3): Discord's stripped IntRange can't be iterated at runtime.
+    val headingColors = listOf(1, 2, 3).map {
+        ColorSetting("Heading $it color", "customHeader${it}Color", "header${it}Color", "#FFFFFF")
+    }
+
+    /** Offered in the color picker; any other color can be typed as hex. */
+    val presets = listOf(
+        "Blurple" to "#5865F2",
+        "Green" to "#3BA55C",
+        "Yellow" to "#FEE75C",
+        "Orange" to "#E67E22",
+        "Gold" to "#FAA61A",
+        "Red" to "#ED4245",
+        "Fuchsia" to "#EB459E",
+        "Purple" to "#9B59B6",
+        "Blue" to "#00B0F4",
+        "Teal" to "#1ABC9C",
+        "White" to "#FFFFFF",
+        "Grey" to "#99AAB5",
+    )
+
+    class TextSize(
         val title: String,
         val example: String,
         val key: String,
         val default: Float,
     )
 
+    /** A color that follows the theme until [customKey] is set; [key] keeps the last chosen hex. */
+    class ColorSetting(
+        val title: String,
+        val customKey: String,
+        val key: String,
+        val default: String,
+    ) {
+        fun isCustom(settings: SettingsAPI) = settings.getBool(customKey, false)
+
+        fun hex(settings: SettingsAPI): String = normalizeColor(settings.getString(key, default)) ?: default
+
+        /** The custom color, or null while the theme color is used. */
+        fun color(settings: SettingsAPI): Int? = if (isCustom(settings)) Color.parseColor(hex(settings)) else null
+    }
+
+    private val hexPattern = Pattern.compile("#[0-9A-F]{6}(?:[0-9A-F]{2})?")
+
     fun scale(settings: SettingsAPI, size: TextSize): Float =
-        settings.getString(size.key, "").toFloatOrNull()?.takeIf { it.isFinite() && it in 0.1f..3f } ?: size.default
+        settings.getString(size.key, "").toFloatOrNull()?.takeIf { it.isFinite() && it >= 0.1f && it <= 3f }
+            ?: size.default
 
     fun normalizeColor(raw: String): String? {
         val value = "#" + raw.trim().removePrefix("#").uppercase(Locale.ROOT)
-        return value.takeIf { it.matches(Regex("#[0-9A-F]{6}(?:[0-9A-F]{2})?")) }
-    }
-
-    fun bulletColor(settings: SettingsAPI, fallback: Int): Int {
-        if (!settings.getBool(CUSTOM_BULLET_COLOR, false)) return fallback
-        val color = normalizeColor(settings.getString(BULLET_COLOR, DEFAULT_BULLET_COLOR)) ?: return fallback
-        return Color.parseColor(color)
+        return value.takeIf { hexPattern.matcher(it).matches() }
     }
 
     fun themedColor(context: Context, attribute: String, fallback: Int): Int {
@@ -53,14 +88,4 @@ internal object MarkdownAppearance {
     }
 
     fun dp(context: Context, value: Int): Int = (value * context.resources.displayMetrics.density).roundToInt()
-}
-
-/** Reading at measure time lets existing messages adopt settings without reparsing their spoilers. */
-internal class MarkdownSizeSpan(private val settings: SettingsAPI, private val size: MarkdownAppearance.TextSize) :
-    RelativeSizeSpan(1f) {
-    override fun updateDrawState(paint: TextPaint) {
-        paint.textSize *= MarkdownAppearance.scale(settings, size)
-    }
-
-    override fun updateMeasureState(paint: TextPaint) = updateDrawState(paint)
 }

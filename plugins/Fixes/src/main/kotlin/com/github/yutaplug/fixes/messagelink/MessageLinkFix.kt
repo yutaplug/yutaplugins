@@ -10,12 +10,13 @@ import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.github.yutaplug.fixes.Fix
 import rx.functions.Action0
 
-internal class MessageLinkFix : Fix(
-    "MessageLinkFix",
-    "Message links",
-    "Opens message links in Aliucord instead of the Discord app or website, " +
-        "and stops them from sometimes jumping to the end of the chat.",
-) {
+internal class MessageLinkFix :
+    Fix(
+        "MessageLinkFix",
+        "Message links",
+        "Opens message links in Aliucord instead of the Discord app or website, " +
+            "and stops them from sometimes jumping to the end of the chat.",
+    ) {
     @Volatile private var jump: Jump? = null
 
     private val activeScrollField by lazy {

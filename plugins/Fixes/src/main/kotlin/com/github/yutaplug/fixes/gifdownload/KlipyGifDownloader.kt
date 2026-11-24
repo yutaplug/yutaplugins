@@ -30,7 +30,14 @@ internal object KlipyGifDownloader {
     private const val MAX_DURATION_MS = 120_000L
     private const val FRAMES_PER_SECOND = 12
 
-    fun download(context: Context, mediaUri: Uri, gifUri: Uri?, fileName: String, directUri: Uri, progress: Progress): String {
+    fun download(
+        context: Context,
+        mediaUri: Uri,
+        gifUri: Uri?,
+        fileName: String,
+        directUri: Uri,
+        progress: Progress,
+    ): String {
         val source = File.createTempFile("klipy-source-", ".bin", context.cacheDir)
         val encoded = File.createTempFile("klipy-output-", ".gif", context.cacheDir)
         try {

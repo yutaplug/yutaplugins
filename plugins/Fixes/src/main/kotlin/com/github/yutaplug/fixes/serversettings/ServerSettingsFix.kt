@@ -25,12 +25,13 @@ import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
 /** Ported from pilotbellyt-spec's ServerSettingsFix: https://github.com/pilotbellyt-spec/AliucordPlugins */
-internal class ServerSettingsFix : Fix(
-    "ServerSettingsFix",
-    "Server settings",
-    "Fixes the bans list and audit log not loading in server settings, and shows invite durations properly.",
-    author = "pilotbellyt-spec",
-) {
+internal class ServerSettingsFix :
+    Fix(
+        "ServerSettingsFix",
+        "Server settings",
+        "Fixes the bans list and audit log not loading in server settings, and shows invite durations properly.",
+        author = "pilotbellyt-spec",
+    ) {
     private val pendingBanGuilds: MutableSet<Long> = ConcurrentHashMap.newKeySet()
 
     override fun start(context: Context) {
@@ -176,7 +177,8 @@ internal class ServerSettingsFix : Fix(
         }
     }
 
-    private fun auditLogState(store: StoreAuditLog) = ReflectUtils.getField(store, "state") as StoreAuditLog.AuditLogState
+    private fun auditLogState(store: StoreAuditLog) =
+        ReflectUtils.getField(store, "state") as StoreAuditLog.AuditLogState
 
     /** Marks the log as loading, or returns false if this page was already requested. */
     private fun prepareAuditLogLoad(
@@ -258,9 +260,8 @@ internal class ServerSettingsFix : Fix(
         return sanitized
     }
 
-    private fun labelFor(value: JSONObject): String? =
-        value.optString("name").takeIf { it.trim().isNotEmpty() }
-            ?: value.optString("id").takeIf { it.trim().isNotEmpty() }
+    private fun labelFor(value: JSONObject): String? = value.optString("name").takeIf { it.trim().isNotEmpty() }
+        ?: value.optString("id").takeIf { it.trim().isNotEmpty() }
 
     private fun ensureAuditEntries(auditLog: ModelAuditLog) {
         if (auditLog.auditLogEntries == null) {
@@ -297,7 +298,12 @@ internal class ServerSettingsFix : Fix(
         settings.setBool(MIGRATED, true)
     }
 
-    class Option(val title: String, val description: String, val oldKey: String, val default: Boolean) {
+    class Option(
+        val title: String,
+        val description: String,
+        val oldKey: String,
+        val default: Boolean,
+    ) {
         val key = "serverSettings_$oldKey"
     }
 

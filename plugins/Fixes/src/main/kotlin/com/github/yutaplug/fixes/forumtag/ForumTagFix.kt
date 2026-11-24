@@ -33,12 +33,13 @@ import java.io.StringReader
 import java.util.Properties
 
 /** Ported from TsyQax's ForumTagFix: https://github.com/tsyqax/aliucord_plugins_tsq */
-internal class ForumTagFix : Fix(
-    "ForumTagFix",
-    "Forum tags",
-    "Fixes not being able to select tags when creating a forum post, and adds Change Tags to a post's long-press menu.",
-    author = "TsyQax",
-) {
+internal class ForumTagFix :
+    Fix(
+        "ForumTagFix",
+        "Forum tags",
+        "Fixes not being able to select tags when creating a forum post, and adds Change Tags to a post's long-press menu.",
+        author = "TsyQax",
+    ) {
     private val selectedTagIds: MutableList<Long> = mutableListOf()
     private var postName: String? = null
     private var postContent: String? = null

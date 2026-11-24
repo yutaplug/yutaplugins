@@ -10,8 +10,8 @@ import com.aliucord.patcher.PreHook
 import com.aliucord.utils.ReflectUtils
 import com.discord.app.AppActivity
 import com.discord.models.domain.ModelUserSettings
-import com.discord.stores.StoreStream
 import com.discord.stores.StoreAuthentication
+import com.discord.stores.StoreStream
 import com.discord.stores.StoreUserSettings
 import com.discord.utilities.rest.RestAPI
 import com.discord.views.CheckedSetting
@@ -36,12 +36,18 @@ internal class FriendSettingsFix(private val log: (String, Throwable) -> Unit) {
         var status = "Loading current settings…"
     }
 
-    private class HttpFailure(val status: Int, val retryAfter: Long, message: String) : Exception(message)
+    private class HttpFailure(
+        val status: Int,
+        val retryAfter: Long,
+        message: String,
+    ) : Exception(message)
+
     private val lock = Any()
     private var session: Session? = null
     private val worker = Executors.newSingleThreadScheduledExecutor { Thread(it, "SettingsFixRequests") }
     private val main = Handler(Looper.getMainLooper())
     private val views = WeakHashMap<WidgetSettingsPrivacy, List<CheckedSetting>>()
+
     @Volatile private var closed = false
     private var hookErrorShown = false
 
@@ -49,18 +55,26 @@ internal class FriendSettingsFix(private val log: (String, Throwable) -> Unit) {
         patcher.patchRequired(
             StoreUserSettings::class.java,
             "setFriendSourceFlags",
-            arrayOf(AppActivity::class.java, Boolean::class.javaObjectType, Boolean::class.javaObjectType, Boolean::class.javaObjectType),
+            arrayOf(
+                AppActivity::class.java,
+                Boolean::class.javaObjectType,
+                Boolean::class.javaObjectType,
+                Boolean::class.javaObjectType,
+            ),
             PreHook { frame ->
                 if (frame.args[0] != null) {
                     val active = activeSession()
                     if (active != null) {
                         synchronized(lock) {
                             val base = active.state.displayed ?: 14
-                            choose(active, SettingsProto.flags(
-                                frame.args[1] as Boolean? ?: (base and 8 != 0),
-                                frame.args[2] as Boolean? ?: (base and 4 != 0),
-                                frame.args[3] as Boolean? ?: (base and 2 != 0),
-                            ))
+                            choose(
+                                active,
+                                SettingsProto.flags(
+                                    frame.args[1] as Boolean? ?: (base and 8 != 0),
+                                    frame.args[2] as Boolean? ?: (base and 4 != 0),
+                                    frame.args[3] as Boolean? ?: (base and 2 != 0),
+                                ),
+                            )
                         }
                         render()
                     }
@@ -154,7 +168,11 @@ internal class FriendSettingsFix(private val log: (String, Throwable) -> Unit) {
             (active.state.displayed ?: fallback) to if (active.state.isPending) "Saving…" else active.status
         }
         radios.forEachIndexed { index, radio ->
-            val bit = when (index) { 0 -> 8; 1 -> 2; else -> 4 }
+            val bit = when (index) {
+                0 -> 8
+                1 -> 2
+                else -> 4
+            }
             radio.isChecked = display.first and bit != 0
             radio.setSubtext(display.second.takeIf { it.isNotEmpty() })
             radio.setOnCheckedListener { checked ->
@@ -193,8 +211,12 @@ internal class FriendSettingsFix(private val log: (String, Throwable) -> Unit) {
             worker.schedule({
                 val selection = synchronized(lock) {
                     active.scheduled = false
-                    if (!isActive(active)) null else active.state.beginSave()?.also {
-                        active.nextWriteAt = now() + 10_000L
+                    if (!isActive(active)) {
+                        null
+                    } else {
+                        active.state.beginSave()?.also {
+                            active.nextWriteAt = now() + 10_000L
+                        }
                     }
                 } ?: return@schedule
                 save(active, selection)
@@ -321,8 +343,11 @@ internal class FriendSettingsFix(private val log: (String, Throwable) -> Unit) {
                     val retry = errorBody?.optDouble("retry_after", 0.0) ?: 0.0
                     val detail = errorBody?.optString("message")?.take(120)?.takeIf(::hasText)
                     val retryMillis = if (retry.isFinite()) (maxOf(0.0, minOf(retry, 86400.0)) * 1000).toLong() else 0L
-                    throw HttpFailure(it.statusCode, retryMillis,
-                        "HTTP ${it.statusCode}${detail?.let { message -> ": $message" } ?: ""}")
+                    throw HttpFailure(
+                        it.statusCode,
+                        retryMillis,
+                        "HTTP ${it.statusCode}${detail?.let { message -> ": $message" } ?: ""}",
+                    )
                 }
                 JSONObject(it.text())
             }
@@ -330,14 +355,20 @@ internal class FriendSettingsFix(private val log: (String, Throwable) -> Unit) {
     }
 
     private fun decode(response: JSONObject): ByteArray = Base64.decode(response.getString("settings"), Base64.DEFAULT)
+
     private fun token(): String? {
         // The notification client's header provider can be unset even while
         // Discord's authentication store has a valid signed-in session.
-        return StoreAuthentication.`access$getAuthState$p`(StoreStream.getAuthentication())?.token
+        return StoreAuthentication
+            .`access$getAuthState$p`(StoreStream.getAuthentication())
+            ?.token
             ?.takeIf { it.isNotEmpty() }
             ?: RestAPI.AppHeadersProvider.INSTANCE.authToken?.takeIf { it.isNotEmpty() }
     }
-    private fun isActive(active: Session): Boolean = !closed && token() == active.token && synchronized(lock) { session === active }
+
+    private fun isActive(active: Session): Boolean =
+        !closed && token() == active.token && synchronized(lock) { session === active }
+
     private fun reason(error: Throwable): String = error.message?.take(180) ?: error.javaClass.simpleName
 
     private fun hasText(value: String): Boolean {
@@ -387,9 +418,19 @@ internal class FriendSettingsFix(private val log: (String, Throwable) -> Unit) {
         views.forEach { (widget, radios) ->
             val actual = synchronized(lock) { session?.state?.confirmed }
             radios.forEachIndexed { index, radio ->
-                if (actual != null) radio.isChecked = actual and (when (index) { 0 -> 8; 1 -> 2; else -> 4 }) != 0
+                if (actual != null) {
+                    radio.isChecked = actual and (
+                        when (index) {
+                            0 -> 8
+                            1 -> 2
+                            else -> 4
+                        }
+                    ) != 0
+                }
                 radio.setSubtext(null)
-                radio.setOnCheckedListener { checked -> WidgetSettingsPrivacy.`access$updateFriendSourceFlags`(widget, index, checked) }
+                radio.setOnCheckedListener { checked ->
+                    WidgetSettingsPrivacy.`access$updateFriendSourceFlags`(widget, index, checked)
+                }
             }
         }
         views.clear()
