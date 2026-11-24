@@ -6,6 +6,7 @@ import com.aliucord.api.SettingsAPI
 import java.io.File
 import java.io.FileNotFoundException
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 /** Installed themes, which of them are enabled and in what order, and their downloaded files. */
 internal object ThemeStore {
@@ -159,12 +160,28 @@ internal object ThemeStore {
             return localFile(url) ?: throw FileNotFoundException(url.removePrefix("file://"))
         }
         localFile(url)?.let { return it }
-        verifyUntrustedUrl(url)
-        val file = cacheFile(url)
-        // Mirror links contain theme names with spaces.
-        Http.Request(url.replace(" ", "%20")).use { it.execute().apply { assertOk() }.saveToFile(file) }
-        return file
+        // The resolver and the dead theme check can ask for the same file at once.
+        synchronized(downloadLocks.getOrPut(url) { Any() }) {
+            localFile(url)?.let { return it }
+            verifyUntrustedUrl(url)
+            val file = cacheFile(url)
+            val part = File(file.path + ".part")
+            try {
+                if (DiscordLinks.isDiscordUrl(url)) {
+                    DiscordLinks.download(url, part)
+                } else {
+                    // Mirror links contain theme names with spaces.
+                    Http.Request(url.replace(" ", "%20")).use { it.execute().apply { assertOk() }.saveToFile(part) }
+                }
+                if (!part.renameTo(file)) part.copyTo(file, overwrite = true)
+            } finally {
+                part.delete()
+            }
+            return file
+        }
     }
+
+    private val downloadLocks = ConcurrentHashMap<String, Any>()
 
     fun clearCache() {
         cacheDir.deleteRecursively()

@@ -4,39 +4,48 @@ import com.aliucord.Http
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
-import java.util.regex.Pattern
 
 /**
- * Themes whose background image points at Discord's CDN. Those links now expire, so the background
- * no longer loads and the theme, usually built around it, is broken. Fixed copies of many such
- * themes are kept in the Aliucord theme mirror.
+ * Themes whose background image was deleted from Discord. Discord links themselves still work (see
+ * [DiscordLinks]), but many old themes point at attachments that are gone, so the background no
+ * longer loads and the theme, usually built around it, is broken. Fixed copies of many such themes
+ * are kept in the Aliucord theme mirror.
  *
- * Fonts and sounds on Discord's CDN don't count: the theme still works without them, they are just
- * skipped (some mirror copies still have dead sound links).
+ * Fonts and sounds don't count: the theme still works without them, they are just skipped.
  */
 internal object DeadThemes {
     const val MIRROR_URL = "https://gitlab.com/Grzesiek11/aliucord-theme-mirror"
     private const val MIRROR_API = "https://gitlab.com/api/v4/projects/Grzesiek11%2Faliucord-theme-mirror"
     private const val MIRROR_RAW = "$MIRROR_URL/-/raw/master/themes/"
 
-    private val discordCdn = Pattern.compile(
-        "^https?://(www\\.)?(cdn\\.discordapp\\.com|media\\.discordapp\\.net|cdn\\.discord\\.com|media\\.discord\\.net)/",
-        Pattern.CASE_INSENSITIVE,
-    )
-
     /** Normalized theme name to mirror file name; null until first fetched. */
     @Volatile
     private var mirrorIndex: Map<String, String>? = null
 
-    fun isDiscordUrl(url: String) = discordCdn.matcher(url.trim()).find()
+    /** The background image link, legacy flat themes included. */
+    private fun backgroundUrl(json: JSONObject): String =
+        (json.optJSONObject("background")?.optString("url") ?: json.optString("background_url")).orEmpty()
 
-    /** Whether the theme's background image is a Discord CDN link (legacy flat themes included). */
-    fun hasDiscordBackground(json: JSONObject): Boolean {
-        val url = json.optJSONObject("background")?.optString("url") ?: json.optString("background_url")
-        return isDiscordUrl(url.orEmpty())
+    fun hasDiscordBackground(theme: ThemeFile) =
+        runCatching { DiscordLinks.isDiscordUrl(backgroundUrl(theme.json())) }.getOrDefault(false)
+
+    /**
+     * Whether [json]'s background is a Discord link to a deleted file. Downloads the background to
+     * find out, unless it's already known. Blocking.
+     */
+    fun hasGoneBackground(json: JSONObject): Boolean {
+        val url = backgroundUrl(json)
+        if (!DiscordLinks.isDiscordUrl(url)) return false
+        if (DiscordLinks.isGone(url)) return true
+        runCatching { ThemeStore.fetch(url) }
+        return DiscordLinks.isGone(url)
     }
 
-    fun uses(theme: ThemeFile) = runCatching { hasDiscordBackground(theme.json()) }.getOrDefault(false)
+    /** See [hasGoneBackground]. Blocking. */
+    fun isDead(theme: ThemeFile) = runCatching { hasGoneBackground(theme.json()) }.getOrDefault(false)
+
+    /** Whether [theme]'s background is already known to be deleted from Discord, without checking. */
+    fun uses(theme: ThemeFile) = runCatching { DiscordLinks.isGone(backgroundUrl(theme.json())) }.getOrDefault(false)
 
     private fun normalize(name: String) = name.lowercase().filter { it.isLetterOrDigit() }
 
@@ -74,7 +83,7 @@ internal object DeadThemes {
     fun replaceWithMirror(theme: ThemeFile, url: String) {
         val text = Http.simpleGet(url)
         val json = JSONObject(text)
-        check(!hasDiscordBackground(json)) { "The mirror copy still uses a Discord background link" }
+        check(!hasGoneBackground(json)) { "The mirror copy's background was deleted from Discord too" }
         theme.file.writeText(text)
     }
 

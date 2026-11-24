@@ -181,6 +181,19 @@ internal object ThemeResolver {
             null
         }
 
+        if (download) {
+            // Renew every Discord attachment link up front, in as few requests as possible.
+            val links = ArrayList<String>()
+            if (ThemeStore.customFonts) links += c.fonts.values
+            if (ThemeStore.customSounds) links += c.raws.values
+            if (ThemeStore.customIcons) c.icons.values.filter { !it.isDrawable }.mapTo(links) { it.source }
+            c.background?.optString("url")?.let { links += it }
+            val missing = links.filter { DiscordLinks.isDiscordUrl(it) && ThemeStore.localFile(it) == null }
+            if (missing.isNotEmpty()) {
+                runCatching { DiscordLinks.renew(missing) }.onFailure { logger.error("Failed to renew Discord links", it) }
+            }
+        }
+
         val fontById = SparseArray<Typeface>()
         var defaultFont: Typeface? = null
         if (ThemeStore.customFonts) {

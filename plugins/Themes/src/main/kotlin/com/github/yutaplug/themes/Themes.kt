@@ -49,8 +49,8 @@ class Themes : Plugin() {
 
         InstallButton.install(patcher) { theme ->
             ThemeStore.loadThemes()
-            if (handleDeadThemes(listOf(theme)).isEmpty()) {
-                Utils.showToast("Installed theme ${theme.name}. Enable it in the Themes settings.")
+            handleDeadThemes(listOf(theme)) { dead ->
+                if (dead.isEmpty()) Utils.showToast("Installed theme ${theme.name}. Enable it in the Themes settings.")
             }
         }
         Backgrounds.install(patcher)
@@ -212,20 +212,20 @@ class Themes : Plugin() {
     private var pendingNotice: DeadNotice? = null
 
     /**
-     * Turns off the [themes] that load files from Discord's CDN, then explains why in a pop-up and
-     * offers fixed copies from the Aliucord theme mirror. Themes in [enableAfterReplace] (by id) and
-     * those that were enabled are turned back on once replaced. Returns the themes it turned off.
+     * Checks in the background which of [themes] have a background image deleted from Discord, turns
+     * those off, then explains why in a pop-up and offers fixed copies from the Aliucord theme mirror.
+     * Themes in [enableAfterReplace] (by id) and those that were enabled are turned back on once
+     * replaced. [onChecked] gets the themes it turned off, on the main thread.
      */
     internal fun handleDeadThemes(
         themes: List<ThemeFile>,
         enableAfterReplace: Set<String> = emptySet(),
-    ): List<ThemeFile> {
-        val dead = themes.filter { DeadThemes.uses(it) }
-        if (dead.isEmpty()) return dead
-        val enable = dead.filter { ThemeStore.isEnabled(it) }.map { it.id }.toSet() + enableAfterReplace
-        dead.forEach { ThemeStore.setEnabled(it, false) }
-        logger.warn("Themes: disabled ${dead.joinToString { it.name }}, they use Discord CDN links")
+        onChecked: (List<ThemeFile>) -> Unit = {},
+    ) {
+        val candidates = themes.filter { DeadThemes.hasDiscordBackground(it) }
+        if (candidates.isEmpty()) return onChecked(candidates)
         Utils.threadPool.execute {
+            val dead = candidates.filter { DeadThemes.isDead(it) }
             val mirrors = LinkedHashMap<ThemeFile, String>()
             dead.forEach { theme ->
                 runCatching { DeadThemes.mirrorFor(theme) }
@@ -234,11 +234,17 @@ class Themes : Plugin() {
                     ?.let { mirrors[theme] = it }
             }
             Utils.mainThread.post {
-                pendingNotice = DeadNotice(dead, mirrors, enable)
-                showDeadNotice()
+                if (dead.isNotEmpty()) {
+                    val wasEnabled = dead.filter { ThemeStore.isEnabled(it) }.map { it.id }.toSet()
+                    dead.forEach { ThemeStore.setEnabled(it, false) }
+                    logger.warn("Themes: disabled ${dead.joinToString { it.name }}, their background was deleted")
+                    if (wasEnabled.isNotEmpty()) reload()
+                    pendingNotice = DeadNotice(dead, mirrors, wasEnabled + enableAfterReplace)
+                    showDeadNotice()
+                }
+                onChecked(dead)
             }
         }
-        return dead
     }
 
     private fun showDeadNotice() {
@@ -254,7 +260,7 @@ class Themes : Plugin() {
         val description = StringBuilder()
             .append(names)
             .append(if (many) " use" else " uses")
-            .append(" a Discord link for the background image. Discord links now expire, so ")
+            .append(" a background image that was deleted from Discord, so ")
             .append(if (many) "these themes can't load and were" else "it can't load and was")
             .append(" turned off.")
         val mirrors = notice.mirrors

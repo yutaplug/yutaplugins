@@ -46,8 +46,10 @@ internal const val THEME_SUPPORT_CHANNEL = 875213883776847873L
 internal const val BLOCKED_COLOR_DARK = 0xff34373c.toInt()
 internal const val BLOCKED_COLOR_LIGHT = 0xfffcfcfc.toInt()
 
-// Discord CDN links are left out: they now expire, so themes using them break (see DeadThemes).
+// Discord attachment links expire, so they are renewed right before downloading (see DiscordLinks).
 internal val ALLOWED_RESOURCE_DOMAINS = arrayOf(
+    "cdn.discordapp.com",
+    "media.discordapp.net",
     "github.com",
     "raw.githubusercontent.com",
     "gitlab.com",
@@ -69,8 +71,7 @@ internal fun isThemerActive() = runCatching {
 }.getOrDefault(false)
 
 internal fun verifyUntrustedUrl(url: String) {
-    require(!DeadThemes.isDiscordUrl(url)) { "Discord CDN links expire and no longer load: $url" }
-    require(ALLOWED_RESOURCE_DOMAINS_PATTERN.matcher(url).find()) {
+    require(DiscordLinks.isDiscordUrl(url) || ALLOWED_RESOURCE_DOMAINS_PATTERN.matcher(url).find()) {
         "URL $url is not allowed. Please use one of: ${ALLOWED_RESOURCE_DOMAINS.joinToString()}"
     }
 }

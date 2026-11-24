@@ -1,8 +1,13 @@
-version = "1.0.8"
+version = "1.0.9"
 description = "Aliucord theme engine compatible with Themer themes, that keeps working on modern Android."
 aliucord {
     changelog.set(
         """
+        # 1.0.9
+        * Discord links now work for backgrounds, fonts, sounds and icons. Expiring attachment links are renewed automatically.
+        * Themes with a Discord background are only turned off when the image was deleted from Discord.
+        * Fix Discord crashing when the screen was rotated or the app was in the background while picking a file in the theme editor.
+
         # 1.0.8
         * Fix Discord crashing when opening the Icons page of the theme editor once a theme has icons set.
 

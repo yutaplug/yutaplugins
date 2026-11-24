@@ -73,13 +73,14 @@ internal class ThemeFile(val file: File) {
     fun update(): Boolean {
         val url = updaterUrl ?: return false
         verifyUntrustedUrl(url)
-        val text = Http.Request(url).use { it.execute().text() }
+        val source = if (DiscordLinks.isDiscordUrl(url)) DiscordLinks.resolve(url) else url
+        val text = Http.Request(source).use { it.execute().text() }
         val remote = JSONObject(text)
         val remoteVersion = (remote.optJSONObject("manifest") ?: remote).optString("version")
         if (remoteVersion.isEmpty() || !isNewer(remoteVersion, version)) return false
         // Mirrored themes often keep the original updater link, which would bring the dead background back.
-        if (DeadThemes.hasDiscordBackground(remote)) {
-            logger.warn("Themes: skipped update of $name, the new version uses a Discord background link")
+        if (DeadThemes.hasGoneBackground(remote)) {
+            logger.warn("Themes: skipped update of $name, the new version's background was deleted from Discord")
             return false
         }
         file.writeText(text)

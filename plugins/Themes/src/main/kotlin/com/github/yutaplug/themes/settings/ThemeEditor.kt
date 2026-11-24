@@ -61,7 +61,7 @@ internal class ThemeEditor(
         val hosts = ALLOWED_RESOURCE_DOMAINS.joinToString()
         note(
             "Images, fonts and sounds must be https links on: $hosts, or files from your device: tap the " +
-                "folder button in a field to pick one. Discord links expire, so they can't be used.",
+                "folder button in a field to pick one. Expiring Discord attachment links are renewed automatically.",
         )
         entry("Manifest", "ic_audit_logs_24dp") {
             FormPage(

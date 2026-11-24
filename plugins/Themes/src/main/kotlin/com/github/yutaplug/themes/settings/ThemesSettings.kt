@@ -148,7 +148,7 @@ class ThemesSettings(private val plugin: Themes) :
             append("by ").append(theme.author)
             theme.license?.let { append(" · ").append(it) }
             if (layer >= 0 && ThemeStore.enabledIds().size > 1) append(" · layer ").append(layer + 1)
-            if (DeadThemes.uses(theme)) append(" · background is an expired Discord link")
+            if (DeadThemes.uses(theme)) append(" · background was deleted from Discord")
         }
         val switch = Utils
             .createCheckedSetting(
@@ -160,7 +160,7 @@ class ThemesSettings(private val plugin: Themes) :
                 isChecked = layer >= 0
                 setOnCheckedListener { checked ->
                     if (checked && DeadThemes.uses(theme)) {
-                        // Explains the expired links and offers the mirror copy, enabling it once replaced.
+                        // Explains the deleted background and offers the mirror copy, enabling it once replaced.
                         plugin.handleDeadThemes(listOf(theme), setOf(theme.id))
                         post { if (view != null) reRender() }
                         return@setOnCheckedListener
@@ -168,6 +168,8 @@ class ThemesSettings(private val plugin: Themes) :
                     ThemeStore.setEnabled(theme, checked)
                     setActionBarSubtitle("${ThemeStore.enabledIds().size} enabled")
                     plugin.reload { if (view != null) reRender() }
+                    // Turns the theme back off with an explanation if its Discord background was deleted.
+                    if (checked) plugin.handleDeadThemes(listOf(theme)) { if (it.isNotEmpty() && view != null) reRender() }
                 }
             }
 
