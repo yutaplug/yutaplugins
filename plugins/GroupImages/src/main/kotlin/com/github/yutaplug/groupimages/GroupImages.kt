@@ -28,6 +28,10 @@ import com.discord.widgets.media.WidgetMedia
 class GroupImages : Plugin() {
     private val gridId = View.generateViewId()
 
+    init {
+        settingsTab = SettingsTab(GroupImagesSettings::class.java, SettingsTab.Type.PAGE).withArgs(settings)
+    }
+
     override fun start(context: Context) {
         // Keep only the first grouped attachment's chat row; it draws the whole grid.
         val createEmbedEntries = Class.forName("com.discord.widgets.chat.list.entries.ChatListEntry\$Companion")
@@ -69,7 +73,7 @@ class GroupImages : Plugin() {
             )
         }
 
-        MediaGallery.patch(patcher)
+        MediaGallery.patch(patcher) { settings.getBool(KEY_ARROWS, true) }
 
         // Uninstall after every plugin has started: unloading during Aliucord's start loop
         // would modify the plugin map while it is iterated.
@@ -170,6 +174,7 @@ class GroupImages : Plugin() {
 
     companion object {
         private const val GAP_DP = 4
+        const val KEY_ARROWS = "arrows"
 
         /** The attachments shown together in the grid: inline images and videos that aren't spoilers. */
         fun groupedMedia(message: Message): List<MessageAttachment> {

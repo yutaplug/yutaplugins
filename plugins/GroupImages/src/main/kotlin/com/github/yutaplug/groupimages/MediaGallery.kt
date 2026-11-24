@@ -97,7 +97,10 @@ object MediaGallery {
         AppScreens.d(context, WidgetMedia::class.java, intent)
     }
 
-    fun patch(patcher: PatcherAPI) {
+    private var showArrows: () -> Boolean = { true }
+
+    fun patch(patcher: PatcherAPI, showArrows: () -> Boolean) {
+        this.showArrows = showArrows
         patcher.patch(
             WidgetMedia::class.java,
             "onViewBound",
@@ -175,6 +178,7 @@ object MediaGallery {
         overlay.addView(counter, counterParams)
 
         // Same round buttons as the inline media play button (inline_media_view.xml).
+        val arrowsShown = showArrows()
         fun arrow(icon: String, gravity: Int, delta: Int) = ImageView(context).apply {
             val size = DimenUtils.dpToPx(44)
             val padding = DimenUtils.dpToPx(8)
@@ -184,7 +188,7 @@ object MediaGallery {
             setPadding(padding, padding, padding, padding)
             alpha = ARROW_ALPHA
             contentDescription = if (delta < 0) "Previous" else "Next"
-            visibility = if (index + delta in 0 until gallery.size) View.VISIBLE else View.GONE
+            visibility = if (arrowsShown && index + delta in 0 until gallery.size) View.VISIBLE else View.GONE
             setOnClickListener { go(delta) }
             overlay.addView(
                 this,
