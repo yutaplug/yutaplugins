@@ -99,8 +99,9 @@ class CustomTypingIndicator : Plugin() {
                     bars += WeakReference(binding)
                 }
                 val name = typing.typingUsers.singleOrNull()
+                val showStyles = settings.getBool(KEY_SHOW_OTHERS, true)
                 try {
-                    render(binding.c, binding.d, binding.g, name?.let { soleTyperStyle() }, name)
+                    render(binding.c, binding.d, binding.g, name?.takeIf { showStyles }?.let { soleTyperStyle() }, name)
                 } catch (error: Throwable) {
                     logger.error("Failed to show custom typing indicator", error)
                 }
@@ -197,6 +198,7 @@ class CustomTypingIndicator : Plugin() {
     companion object {
         private const val ROW_TAG = "custom_typing_indicator_row"
         private const val EMOJI_TAG = "custom_typing_indicator_emojis"
+        const val KEY_SHOW_OTHERS = "showOthers"
         const val KEY_SHOW_AVATARS = "showAvatars"
         const val KEY_CLICKABLE_PROFILES = "clickableProfiles"
 

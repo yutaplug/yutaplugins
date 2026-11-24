@@ -20,6 +20,12 @@ class CustomTypingIndicatorSettings(private val plugin: CustomTypingIndicator) :
             TextView(requireContext(), null, 0, R.i.UiKit_Settings_Item_Header).apply { text = "Typing bar" },
         )
         switch(
+            CustomTypingIndicator.KEY_SHOW_OTHERS,
+            "Show custom typing indicators",
+            "Show other people's custom emojis and phrases in the typing bar.",
+            default = true,
+        )
+        switch(
             CustomTypingIndicator.KEY_SHOW_AVATARS,
             "Show avatars",
             "Show each typing person's avatar next to their name.",
@@ -39,10 +45,10 @@ class CustomTypingIndicatorSettings(private val plugin: CustomTypingIndicator) :
         )
     }
 
-    private fun switch(key: String, title: String, subtitle: String) {
+    private fun switch(key: String, title: String, subtitle: String, default: Boolean = false) {
         add(
             Utils.createCheckedSetting(requireContext(), CheckedSetting.ViewType.SWITCH, title, subtitle).apply {
-                isChecked = plugin.settings.getBool(key, false)
+                isChecked = plugin.settings.getBool(key, default)
                 setOnCheckedListener {
                     plugin.settings.setBool(key, it)
                     Utils.promptRestart()
