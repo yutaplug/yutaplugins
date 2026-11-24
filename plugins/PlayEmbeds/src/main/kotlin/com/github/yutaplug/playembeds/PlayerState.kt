@@ -85,6 +85,9 @@ internal class RotatedSession(
 
     /** The theme of the Discord screen fullscreen was opened from, for a host screen's views. */
     var theme: Resources.Theme? = null
+
+    /** The Discord screen a host screen was opened from, kept in portrait meanwhile. */
+    var source: WeakReference<Activity>? = null
     var overlay: View? = null
     var playerView: PlayerView? = null
     var previousSystemUiVisibility = 0

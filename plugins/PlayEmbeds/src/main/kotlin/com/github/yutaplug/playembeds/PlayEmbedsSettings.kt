@@ -34,8 +34,7 @@ class PlayEmbedsSettings(private val plugin: PlayEmbeds) : SettingsPage() {
                 requireContext(),
                 CheckedSetting.ViewType.SWITCH,
                 "Rotate fullscreen to landscape",
-                "Rotate the screen to landscape when you open a landscape video in fullscreen. " +
-                    "Discord reloads the screen when it rotates, so it blinks on the way in and out.",
+                "Rotate the screen to landscape when you open a landscape video in fullscreen.",
             ).apply {
                 isChecked = plugin.rotateFullscreen
                 setOnCheckedListener { plugin.settings.setBool(PlayEmbeds.KEY_ROTATE_FULLSCREEN, it) }

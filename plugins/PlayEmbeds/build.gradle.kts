@@ -1,9 +1,12 @@
-version = "1.0.15"
+version = "1.0.16"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.16
+        * Rotating fullscreen to landscape no longer makes Discord blink on the way in or out
+
         # 1.0.15
         * Rotating fullscreen to landscape now works on Android 7 and older instead of showing a black screen
         * Players pause as soon as they scroll off screen instead of a second later

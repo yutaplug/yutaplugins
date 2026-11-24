@@ -14,6 +14,7 @@ import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.ContextThemeWrapper
@@ -100,6 +101,9 @@ class PlayEmbeds : Plugin() {
     /** The video in a fullscreen screen of its own (see [enterHostedFullscreen]). */
     private var hosted: RotatedSession? = null
     private var hostPatched = false
+
+    /** Waits for the phone to be upright to give Discord's screen its orientation back. */
+    private var orientationUnlock: Pair<OrientationEventListener, Runnable>? = null
 
     internal val replaceWholeCard get() = settings.getBool(KEY_WHOLE_CARD, false)
     internal val rotateFullscreen get() = settings.getBool(KEY_ROTATE_FULLSCREEN, false)
@@ -1445,11 +1449,10 @@ class PlayEmbeds : Plugin() {
      * whole window, so playback continues without a restart. Discord's activity
      * doesn't handle rotation itself and would be recreated, destroying the
      * player, so the current orientation is locked while fullscreen. With the
-     * rotate setting, a [landscape] video on a portrait screen goes into a
-     * [RotatedSession] instead, which lets the screen really rotate. Before
-     * Android 8 (see [NativePlayers.turnsPlayerSideways]) it rotates in a screen
-     * of its own ([enterHostedFullscreen]), or if that can't open, the player is
-     * turned sideways on the portrait screen.
+     * rotate setting, a [landscape] video on a portrait screen rotates in a
+     * screen of its own instead ([enterHostedFullscreen]). If that can't open,
+     * Discord's own screen rotates ([RotatedSession]), or before Android 8 (see
+     * [NativePlayers.turnsPlayerSideways]) the player is turned sideways.
      */
     @Suppress("DEPRECATION")
     private fun enterFullscreen(root: View, button: ImageButton, landscape: Boolean) {
@@ -1459,12 +1462,8 @@ class PlayEmbeds : Plugin() {
         val portraitScreen = decor.width > 0 && decor.width < decor.height
         val rotate = landscape && rotateFullscreen && portraitScreen
         if (rotate) {
-            val entered = if (NativePlayers.turnsPlayerSideways) {
-                enterHostedFullscreen(root, activity)
-            } else {
-                enterRotatedFullscreen(root, activity)
-            }
-            if (entered) return
+            if (enterHostedFullscreen(root, activity)) return
+            if (!NativePlayers.turnsPlayerSideways && enterRotatedFullscreen(root, activity)) return
         }
         val sideways = rotate && NativePlayers.turnsPlayerSideways &&
             ((root as? ViewGroup)?.getChildAt(0) as? PlayerView)?.videoSurfaceView is TextureView
@@ -1702,8 +1701,9 @@ class PlayEmbeds : Plugin() {
     }
 
     /**
-     * Fullscreen with the screen really rotated where Discord's own activity can't
-     * be ([NativePlayers.turnsPlayerSideways]): the player opens in a screen of its
+     * Fullscreen with the screen really rotated, without rebuilding Discord's
+     * activity (which blinks, and before Android 8 loops, see
+     * [NativePlayers.turnsPlayerSideways]): the player opens in a screen of its
      * own on top. Plugins can't declare activities, so it borrows the only one in
      * Discord's manifest that handles rotation itself, Play Billing's
      * ProxyBillingActivity (see [patchFullscreenHost]); it rotates without being
@@ -1751,6 +1751,12 @@ class PlayEmbeds : Plugin() {
         hosted = session
         session.playerView = oldView
         session.theme = activity.theme
+        // Discord underneath stays in portrait, so it isn't rebuilt while the player's
+        // screen rotates, nor when it closes with the phone still sideways.
+        cancelOrientationUnlock()
+        session.source = WeakReference(activity)
+        // Not LOCKED: that would take whatever rotation the player's screen left behind.
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         DebugLog.log(
             "host: enter from ${DebugLog.name(activity)}, video ${media.width}x${media.height} ${media.quality}p, " +
                 "playing ${NativePlayers.isPlaying(state.player)}",
@@ -1798,9 +1804,16 @@ class PlayEmbeds : Plugin() {
     private fun showHosted(session: RotatedSession, activity: Activity) {
         // The billing screen is see-through, which would keep Discord underneath visible,
         // and so rotated (rebuilt) along with it. As an opaque screen Discord just stops.
+        // (Android 8.0 also refuses an orientation from a see-through screen.)
         val opaque = try {
-            Activity::class.java.getDeclaredMethod("convertFromTranslucent").apply { isAccessible = true }.invoke(activity)
-            true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                activity.setTranslucent(false)
+            } else {
+                Activity::class.java.getDeclaredMethod("convertFromTranslucent")
+                    .apply { isAccessible = true }
+                    .invoke(activity)
+                true
+            }
         } catch (e: Throwable) {
             false
         }
@@ -1852,7 +1865,45 @@ class PlayEmbeds : Plugin() {
         session.overlay = null
         session.activity = null
         errorCallbacks.remove(session.player.g)
+        unlockOrientationWhenUpright(session)
         sendBack(session)
+    }
+
+    /**
+     * Gives Discord's screen its orientation back once the phone is held upright,
+     * so it doesn't rotate (and rebuild) the moment fullscreen closes sideways.
+     * At once if the phone can't tell how it's held.
+     */
+    private fun unlockOrientationWhenUpright(session: RotatedSession) {
+        val source = session.source?.get() ?: return
+        session.source = null
+        val restore = Runnable {
+            if (!source.isDestroyed) source.requestedOrientation = session.previousOrientation
+        }
+        val listener = object : OrientationEventListener(source) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                if (orientation > UPRIGHT_DEGREES && orientation < 360 - UPRIGHT_DEGREES) return
+                DebugLog.log("host: phone upright, Discord can rotate again")
+                cancelOrientationUnlock()
+                restore.run()
+            }
+        }
+        cancelOrientationUnlock()
+        if (!listener.canDetectOrientation()) {
+            restore.run()
+            return
+        }
+        orientationUnlock = listener to restore
+        listener.enable()
+    }
+
+    /** Stops waiting for the phone to be upright; with [restore], gives the orientation back now. */
+    private fun cancelOrientationUnlock(restore: Boolean = false) {
+        val (listener, restoreOrientation) = orientationUnlock ?: return
+        orientationUnlock = null
+        listener.disable()
+        if (restore) restoreOrientation.run()
     }
 
     /** Closes any host screen and releases its player. */
@@ -1860,6 +1911,8 @@ class PlayEmbeds : Plugin() {
         val session = hosted ?: return
         hosted = null
         DebugLog.log("host: ended, released")
+        session.source?.get()?.let { if (!it.isDestroyed) it.requestedOrientation = session.previousOrientation }
+        session.source = null
         errorCallbacks.remove(session.player.g)
         session.playerView?.setPlayer(null)
         session.playerView = null
@@ -2073,6 +2126,7 @@ class PlayEmbeds : Plugin() {
         application?.unregisterActivityLifecycleCallbacks(rotationCallbacks)
         application = null
         endHosted()
+        cancelOrientationUnlock(restore = true)
         hostPatched = false
         endRotated()
         ArrayList(fullscreenPlayers.keys).forEach(::exitFullscreen)
@@ -2119,6 +2173,9 @@ class PlayEmbeds : Plugin() {
         private const val TRACE_DELAY_MS = 2_000L
         private const val SIDEWAYS_DEGREES = 90f
         private const val SIDEWAYS_TURN_MS = 250L
+
+        /** How far (degrees) from upright the phone still counts as held upright. */
+        private const val UPRIGHT_DEGREES = 30
 
         /** Marks the ProxyBillingActivity launch that hosts a fullscreen player. */
         private const val HOST_EXTRA = "com.github.yutaplug.playembeds.FULLSCREEN_HOST"
