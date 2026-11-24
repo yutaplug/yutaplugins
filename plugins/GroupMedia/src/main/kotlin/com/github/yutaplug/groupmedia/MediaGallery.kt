@@ -1,4 +1,4 @@
-package com.github.yutaplug.groupimages
+package com.github.yutaplug.groupmedia
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -33,13 +33,13 @@ import b.c.a.a0.d as MediaSources
 
 /** Adds previous/next arrows, swiping and an "x/x" counter to Discord's fullscreen viewer for grouped media. */
 object MediaGallery {
-    private const val EXTRA_TITLES = "GROUPIMAGES_TITLES"
-    private const val EXTRA_URLS = "GROUPIMAGES_URLS"
-    private const val EXTRA_WIDTHS = "GROUPIMAGES_WIDTHS"
-    private const val EXTRA_HEIGHTS = "GROUPIMAGES_HEIGHTS"
-    private const val EXTRA_VIDEOS = "GROUPIMAGES_VIDEOS"
-    private const val EXTRA_INDEX = "GROUPIMAGES_INDEX"
-    private const val OVERLAY_TAG = "GroupImagesOverlay"
+    private const val EXTRA_TITLES = "GROUPMEDIA_TITLES"
+    private const val EXTRA_URLS = "GROUPMEDIA_URLS"
+    private const val EXTRA_WIDTHS = "GROUPMEDIA_WIDTHS"
+    private const val EXTRA_HEIGHTS = "GROUPMEDIA_HEIGHTS"
+    private const val EXTRA_VIDEOS = "GROUPMEDIA_VIDEOS"
+    private const val EXTRA_INDEX = "GROUPMEDIA_INDEX"
+    private const val OVERLAY_TAG = "GroupMediaOverlay"
 
     private class Gallery(
         val titles: Array<String>,

@@ -1,4 +1,4 @@
-package com.github.yutaplug.groupimages
+package com.github.yutaplug.groupmedia
 
 import com.aliucord.Constants
 import com.aliucord.Logger
@@ -6,9 +6,9 @@ import com.aliucord.PluginManager
 import java.io.File
 import java.util.Locale
 
-/** Removes other plugins that group media or add swiping to the viewer, since they'd fight with GroupImages. */
+/** Removes other plugins that group media or add swiping to the viewer, since they'd fight with GroupMedia. */
 internal object ConflictingPlugins {
-    val NAMES = listOf("MosaicFork", "SwipeMediaViewer")
+    val NAMES = listOf("MosaicFork", "SwipeMediaViewer", "GroupImages")
 
     /** Returns which of [NAMES] are installed, including zips that failed to load. */
     fun installed(): List<String> {

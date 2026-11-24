@@ -1,4 +1,4 @@
-package com.github.yutaplug.groupimages
+package com.github.yutaplug.groupmedia
 
 import android.content.Context
 import android.graphics.Color
@@ -25,11 +25,11 @@ import com.discord.widgets.media.WidgetMedia
 /** Shows a message's images and videos as one grid, and lets the fullscreen viewer switch between them. */
 @AliucordPlugin
 @Suppress("unused")
-class GroupImages : Plugin() {
+class GroupMedia : Plugin() {
     private val gridId = View.generateViewId()
 
     init {
-        settingsTab = SettingsTab(GroupImagesSettings::class.java, SettingsTab.Type.PAGE).withArgs(settings)
+        settingsTab = SettingsTab(GroupMediaSettings::class.java, SettingsTab.Type.PAGE).withArgs(settings)
     }
 
     override fun start(context: Context) {
@@ -82,7 +82,7 @@ class GroupImages : Plugin() {
             Utils.mainThread.post {
                 val removed = ConflictingPlugins.uninstall(conflicts, logger)
                 if (removed.isNotEmpty()) {
-                    Utils.showToast("GroupImages replaced and uninstalled: ${removed.joinToString(", ")}", true)
+                    Utils.showToast("GroupMedia replaced and uninstalled: ${removed.joinToString(", ")}", true)
                 }
             }
         }
@@ -123,7 +123,11 @@ class GroupImages : Plugin() {
             lp.topMargin = rect[1]
             tile.layoutParams = lp
             tile.updateUIWithAttachment(attachment, rect[2], rect[3], entry.autoPlayGifs)
-            tile.setOnClickListener { MediaGallery.open(it.context, group, index) }
+            val openFullscreen = View.OnClickListener { MediaGallery.open(it.context, group, index) }
+            tile.setOnClickListener(openFullscreen)
+            // The play button would play the video inside the small tile; open it fullscreen instead.
+            tile.findViewById<View>(Utils.getResId("inline_media_play_button", "id"))
+                ?.setOnClickListener(openFullscreen)
             tile.setOnLongClickListener {
                 root.performLongClick()
                 true
