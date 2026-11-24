@@ -1,8 +1,21 @@
-version = "1.0.8"
+version = "1.0.9"
 description = "Set a custom Rich Presence from Aliucord settings."
 aliucord {
     changelog.set(
         """
+        # 1.0.9
+        * Rewritten from scratch
+        * Settings are now a live copy of your rich presence card; tap any part of it to change it, and changes apply right away
+        * Show or hide the activity with the eye button in the top bar
+        * Images now need an application ID, with a built-in guide to getting one
+        * Discord image links work, and expiring attachment links are renewed automatically
+        * Art asset names from the Developer Portal work for other people too
+        * Set a custom elapsed time (like "2h played"), a countdown, or hide the time
+        * Add up to two link buttons, a party size like "(2 of 4)", and a stream link for Streaming
+        * The activity no longer disappears after a reconnect
+        * Spotify and other activities of the same type no longer replace your activity while it's shown
+        * Removed activity flags, which had no visible effect
+
         # 1.0.8
         * The activity type and flags dialogs no longer stop opening after you open and close another screen, like settings or an image
 

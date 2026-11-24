@@ -1,160 +1,53 @@
 package com.github.yutaplug.customrpc
 
 import android.content.Context
-import android.os.Bundle
-import androidx.activity.ComponentActivity
+import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
-import com.aliucord.Http
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
-import com.aliucord.Utils
 import com.discord.api.activity.Activity
 import com.discord.api.activity.ActivityAssets
+import com.discord.api.activity.ActivityMetadata
+import com.discord.api.activity.ActivityParty
+import com.discord.api.activity.ActivityTimestamps
 import com.discord.api.activity.ActivityType
-import com.discord.api.presence.ClientStatus
 import com.discord.app.AppActivity
-import com.discord.gateway.GatewaySocket
 import com.discord.models.domain.ModelPayload
-import com.discord.models.domain.ModelUserSettings
-import com.discord.stores.StoreConnectionOpen
-import com.discord.stores.StoreGatewayConnection
 import com.discord.stores.StoreStream
 import com.discord.stores.StoreUserPresence
 import com.discord.utilities.icon.IconUtils
-import java.lang.ref.WeakReference
-import java.net.URI
-import org.json.JSONArray
-import org.json.JSONObject
+import java.util.UUID
 
 @AliucordPlugin
 class CustomRPC : Plugin() {
-    companion object {
-        const val ENABLED = "enabled"
-        const val ACTIVITY_TYPE = "activityType"
-        const val ACTIVITY_FLAGS = "activityFlags"
-        const val APPLICATION_ID = "applicationId"
-        const val NAME = "name"
-        const val DETAILS = "details"
-        const val STATE = "state"
-        const val LARGE_IMAGE = "largeImage"
-        const val LARGE_IMAGE_TEXT = "largeImageText"
-        const val SMALL_IMAGE = "smallImage"
-        const val SMALL_IMAGE_TEXT = "smallImageText"
-        const val LARGE_IMAGE_URL = "largeImageUrl"
-        const val SMALL_IMAGE_URL = "smallImageUrl"
-        val types =
-            listOf(
-                ActivityType.PLAYING,
-                ActivityType.STREAMING,
-                ActivityType.LISTENING,
-                ActivityType.WATCHING,
-                ActivityType.COMPETING,
-            )
-
-        fun typeLabel(type: ActivityType) = when (type) {
-            ActivityType.STREAMING -> "Streaming"
-            ActivityType.LISTENING -> "Listening to"
-            ActivityType.WATCHING -> "Watching"
-            ActivityType.COMPETING -> "Competing in"
-            else -> "Playing"
-        }
-
-        fun publicImageUrl(value: String?): String? {
-            val text = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-            val uri = runCatching { URI(text) }.getOrNull() ?: return null
-            return text.takeIf {
-                uri.scheme?.lowercase() in listOf("http", "https") &&
-                    !uri.host.isNullOrEmpty() &&
-                    uri.userInfo == null
-            }
-        }
-    }
-
     @Volatile private var running = false
 
-    @Volatile private var updating = false
-    private var createdAt = System.currentTimeMillis()
-    private var sharingEnabled = false
-    private var lastActivity: WeakReference<AppActivity>? = null
+    // Only touched on Discord's store thread.
     private var owned: Activity? = null
-    private val displaced = mutableMapOf<ActivityType, Activity?>()
-    private val imageLock = Any()
-    private var imageGeneration = 0
-    private val imagePaths = mutableMapOf<String, String>()
-    private val imageFailures = mutableMapOf<String, Long>()
-    private val imageRequests = mutableSetOf<String>()
+    private var applying = false
+    private val displaced = HashMap<ActivityType, Activity?>()
+
+    /** Set when the settings page saves, so image errors from that save are shown once. */
+    @Volatile private var reportImageErrors = false
+
+    internal val images = ImageResolver(logger) { errors -> onImagesResolved(errors) }
+    private val wake = Runnable { refresh() }
 
     init {
-        settingsTab = SettingsTab(CustomRPCSettings::class.java, SettingsTab.Type.PAGE).withArgs(settings, this)
+        settingsTab = SettingsTab(CustomRPCSettings::class.java, SettingsTab.Type.PAGE).withArgs(this)
     }
 
-    fun isEnabled() = settings.getBool(ENABLED, false)
+    internal fun config() = RpcConfig(settings)
 
-    fun activityType(): ActivityType = runCatching {
-        ActivityType.valueOf(settings.getString(ACTIVITY_TYPE, "PLAYING") ?: "PLAYING")
-    }.getOrDefault(ActivityType.PLAYING).takeIf {
-        it in
-            types
-    }
-        ?: ActivityType.PLAYING
-
-    fun flags() = settings.getInt(ACTIVITY_FLAGS, 257)
-
-    fun value(key: String) = settings.getString(key, "")?.trim().orEmpty()
+    internal fun text(key: String) = settings.getString(key, "")?.trim().orEmpty()
 
     override fun start(context: Context) {
         running = true
-        createdAt = System.currentTimeMillis()
-        // FragmentActivity saves its fragments through ComponentActivity's saved-state registry.
-        // Plugin fragments cannot be restored before Aliucord loads the plugin after process death.
-        patcher.patch(
-            ComponentActivity::class.java.getDeclaredMethod("onSaveInstanceState", Bundle::class.java),
-            PreHook { frame ->
-                val activity = frame.thisObject as? AppActivity ?: return@PreHook
-                val manager = activity.supportFragmentManager
-                if (manager.isDestroyed) return@PreHook
-                manager.fragments.filterIsInstance<CustomRPCSettings>().forEach { sheet ->
-                    manager.beginTransaction().remove(sheet).commitNowAllowingStateLoss()
-                }
-            },
-        )
-        patcher.patch(
-            IconUtils::class.java.getDeclaredMethod(
-                "getAssetImage",
-                Long::class.javaObjectType,
-                String::class.java,
-                Int::class.javaPrimitiveType,
-            ),
-            PreHook { frame ->
-                publicImageUrl(frame.args[1] as? String)?.let { frame.result = it }
-            },
-        )
-        patcher.patch(
-            AppActivity::class.java.getDeclaredMethod("onResume"),
-            Hook { frame ->
-                lastActivity = WeakReference(frame.thisObject as AppActivity)
-                if (isEnabled()) enableActivitySharing(frame.thisObject as AppActivity)
-                refresh()
-            },
-        )
-        for (clazz in listOf(StoreGatewayConnection::class.java, GatewaySocket::class.java)) {
-            patcher.patch(
-                clazz.getDeclaredMethod(
-                    "presenceUpdate",
-                    ClientStatus::class.java,
-                    Long::class.javaObjectType,
-                    List::class.java,
-                    Boolean::class.javaObjectType,
-                ),
-                PreHook { frame ->
-                    if (running && isEnabled()) {
-                        val activities = (frame.args[2] as? List<*>)?.filterIsInstance<Activity>().orEmpty()
-                        frame.args[2] = activities.filterNot { it.p() == activityType() } + createActivity()
-                    }
-                },
-            )
-        }
+        migrateSettings()
+
+        // While CustomRPC owns an activity type, keep other sources (Spotify, game detection) from replacing it.
+        // What they set is remembered and restored when CustomRPC is turned off or switches type.
         patcher.patch(
             StoreUserPresence::class.java.getDeclaredMethod(
                 "updateActivity",
@@ -162,160 +55,225 @@ class CustomRPC : Plugin() {
                 Activity::class.java,
                 Boolean::class.javaPrimitiveType,
             ),
-            Hook { frame ->
-                if (!updating && running && isEnabled()) {
-                    val type = frame.args[0] as ActivityType
-                    if (type == activityType()) displaced[type] = frame.args[1] as? Activity
-                    refresh()
-                }
+            PreHook { frame ->
+                if (applying) return@PreHook
+                val active = owned ?: return@PreHook
+                val type = frame.args[0] as? ActivityType ?: return@PreHook
+                if (type != active.p()) return@PreHook
+                displaced[type] = frame.args[1] as? Activity
+                frame.result = null
             },
         )
-        for ((method, argument) in listOf(
-            "handleConnectionOpen" to ModelPayload::class.java,
-            "handleUserSettingsUpdate" to ModelUserSettings::class.java,
-            "handleSessionsReplace" to List::class.java,
-        )) {
-            patcher.patch(
-                StoreUserPresence::class.java.getDeclaredMethod(method, argument),
-                Hook { if (!updating) refresh() },
-            )
-        }
-        patcher.patch(StoreConnectionOpen::class.java.getDeclaredMethod("handleConnectionOpen"), Hook { refresh() })
-        if (isEnabled()) enableActivitySharing(context)
+
+        // A new gateway session starts without any activity, and Discord only resends presence when it changes.
+        patcher.patch(
+            StoreUserPresence::class.java.getDeclaredMethod("handleConnectionOpen", ModelPayload::class.java),
+            Hook { frame ->
+                val active = owned ?: return@Hook
+                val store = frame.thisObject as StoreUserPresence
+                applying = true
+                try {
+                    store.updateActivity(active.p(), active, true)
+                } finally {
+                    applying = false
+                }
+                Utils.mainThread.post { refresh() }
+            },
+        )
+
         refresh()
     }
 
     override fun stop(context: Context) {
         running = false
-        sharingEnabled = false
+        Utils.mainThread.removeCallbacks(wake)
         patcher.unpatchAll()
-        clearImageCache()
-        lastActivity = null
-        reconcile()
+        images.clear()
+        refresh()
     }
 
-    fun enableActivitySharing(context: Context?) {
-        val activity = context as? AppActivity ?: lastActivity?.get()
-        if (activity != null) lastActivity = WeakReference(activity)
-        if (!sharingEnabled) {
-            StoreStream.getUserSettings().setIsShowCurrentGameEnabled(activity, true)
-            sharingEnabled = activity != null
+    private fun migrateSettings() {
+        for ((old, new) in listOf(
+            Keys.OLD_LARGE_IMAGE_URL to Keys.LARGE_IMAGE,
+            Keys.OLD_SMALL_IMAGE_URL to Keys.SMALL_IMAGE,
+        )) {
+            if (!settings.exists(old)) continue
+            val url = settings.getString(old, "")?.trim().orEmpty()
+            if (url.isNotEmpty()) settings.setString(new, url)
+            settings.remove(old)
         }
+        for (key in Keys.REMOVED) if (settings.exists(key)) settings.remove(key)
+        if (!settings.exists(Keys.STARTED_AT)) settings.setLong(Keys.STARTED_AT, System.currentTimeMillis())
+        // A random party ID, so Discord doesn't group different CustomRPC users into one party.
+        if (text(Keys.PARTY_ID).isEmpty()) settings.setString(Keys.PARTY_ID, "customrpc-" + UUID.randomUUID())
     }
 
-    fun setEnabled(enabled: Boolean) {
-        if (enabled && !isEnabled()) createdAt = System.currentTimeMillis()
-        settings.setBool(ENABLED, enabled)
-        if (!enabled) sharingEnabled = false
-        if (enabled) enableActivitySharing(null)
-        refresh()
-    }
-
-    fun setType(type: ActivityType) {
-        if (type !in types) return
-        settings.setString(ACTIVITY_TYPE, type.name)
-        refresh()
-    }
-
-    fun setFlags(flags: Int) {
-        settings.setInt(ACTIVITY_FLAGS, flags)
-        refresh()
-    }
-
-    fun save(values: Map<String, String>) {
-        val imagesChanged = listOf(APPLICATION_ID, LARGE_IMAGE_URL, SMALL_IMAGE_URL).any {
-            values[it]?.trim() !=
-                value(it)
-        }
-        values.forEach { (key, value) -> settings.setString(key, value.trim()) }
-        if (imagesChanged) clearImageCache()
-        refresh()
-    }
-
-    private fun refresh() {
-        if (running && isEnabled()) requestImages()
-        reconcile()
-    }
-
-    // Read the latest settings inside the dispatcher, so queued edits cannot resurrect stale activities.
-    private fun reconcile() {
-        StoreStream.getDispatcherYesThisIsIntentional().schedule {
-            updating = true
+    internal fun setEnabled(enabled: Boolean, host: AppActivity?) {
+        if (enabled == settings.getBool(Keys.ENABLED, false)) return
+        if (enabled) {
+            settings.setLong(Keys.STARTED_AT, System.currentTimeMillis())
+            // Make sure Discord's "Display current activity" privacy setting is on, or nobody sees the activity.
             try {
-                val store = StoreStream.getPresences()
-                val next = if (running && isEnabled()) createActivity() else null
-                val previous = owned
-                if (previous != null && previous.p() != next?.p()) {
-                    val current = store
-                        .`getLocalPresence$app_productionGoogleRelease`()
-                        .activities
-                        .orEmpty()
-                        .firstOrNull {
-                            it.p() ==
-                                previous.p()
-                        }
-                    if (current == previous) store.updateActivity(previous.p(), displaced[previous.p()], true)
-                    displaced.remove(previous.p())
-                    owned = null
-                }
-                if (next != null) {
-                    val current = store
-                        .`getLocalPresence$app_productionGoogleRelease`()
-                        .activities
-                        .orEmpty()
-                        .firstOrNull { it.p() == next.p() }
-                    if (owned == null || current != owned) displaced[next.p()] = current
-                    store.updateActivity(next.p(), next, false)
-                    owned = next
-                }
-                // StoreUserPresence marks its snapshot changed and sends the presence itself.
-            } catch (error: Exception) {
-                logger.error("Failed to update CustomRPC presence", error)
-            } finally {
-                updating = false
+                StoreStream.getUserSettings().setIsShowCurrentGameEnabled(host ?: Utils.appActivity, true)
+            } catch (e: Throwable) {
+                logger.error("Failed to turn on activity sharing", e)
             }
         }
+        settings.setBool(Keys.ENABLED, enabled)
+        refresh()
     }
 
-    private fun createActivity(): Activity {
-        val appId = value(APPLICATION_ID).toLongOrNull()?.takeIf { it > 0 }
+    /** Called on the main thread whenever the preview card should be redrawn. Set by the settings page. */
+    internal var onPreviewChanged: (() -> Unit)? = null
 
-        fun optional(key: String) = value(key).takeIf { it.isNotEmpty() }
+    internal fun setText(key: String, value: String) = edit { settings.setString(key, value.trim()) }
 
-        fun image(key: String, urlKey: String): String? {
-            val url = publicImageUrl(optional(urlKey)) ?: return optional(key).takeIf { appId != null }
-            return synchronized(imageLock) { imagePaths["$appId:$url"] } ?: url
+    internal fun setType(type: ActivityType, streamUrl: String? = null) = edit {
+        settings.setString(Keys.TYPE, type.name)
+        if (streamUrl != null) settings.setString(Keys.STREAM_URL, streamUrl.trim())
+    }
+
+    /** [duration] restarts the custom elapsed/remaining timer from now. */
+    internal fun setTimestamp(mode: TimestampMode, durationText: String? = null) = edit {
+        settings.setString(Keys.TIMESTAMP_MODE, mode.name)
+        val duration = durationText?.let { Validation.parseDuration(it) }
+        if (mode.needsDuration && duration != null) {
+            settings.setString(Keys.TIMESTAMP_DURATION, durationText.trim())
+            val now = System.currentTimeMillis()
+            settings.setLong(Keys.TIMESTAMP_ANCHOR, if (mode == TimestampMode.ELAPSED) now - duration else now + duration)
         }
-        val large = image(LARGE_IMAGE, LARGE_IMAGE_URL)
-        val small = image(SMALL_IMAGE, SMALL_IMAGE_URL)
-        val assets = if (large != null ||
-            small != null
-        ) {
-            ActivityAssets(
-                large,
-                optional(LARGE_IMAGE_TEXT).takeIf { large != null },
-                small,
-                optional(SMALL_IMAGE_TEXT).takeIf {
-                    small !=
-                        null
-                },
-            )
-        } else {
-            null
+    }
+
+    /** Applies a settings change right away and updates the presence and the preview. */
+    internal fun edit(block: () -> Unit) {
+        block()
+        images.forgetErrors()
+        reportImageErrors = true
+        refresh()
+        onPreviewChanged?.invoke()
+    }
+
+    /** What the activity looks like with the current settings, whether or not it's shown. */
+    internal fun preview(): Activity = build(config())
+
+    /** A URL the preview card can load for an image field: the resolved asset, or the raw link while resolving. */
+    internal fun previewImage(value: String?): String? {
+        val v = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val appId = config().applicationId ?: return null
+        images.path(appId, v)?.let { return IconUtils.INSTANCE.getAssetImage(appId, it, 160) }
+        val url = if (v.startsWith("www.")) "https://$v" else v
+        return url.takeIf { Validation.isWebUrl(it) }
+    }
+
+    /** Re-reads the settings, resolves images that need it and updates the presence. */
+    internal fun refresh() {
+        Utils.mainThread.removeCallbacks(wake)
+        val config = config()
+        val active = running && config.enabled
+        val appId = config.applicationId
+        // Images are resolved even while hidden, so the settings preview can show them.
+        val requested = running && appId != null && images.request(appId, config.imageValues)
+        // Nothing to wait for, so there are no new errors to report.
+        if (!requested) reportImageErrors = false
+
+        StoreStream.getDispatcherYesThisIsIntentional().schedule {
+            try {
+                val next = if (running) config().takeIf { it.enabled }?.let { build(it) } else null
+                apply(next)
+            } catch (e: Exception) {
+                logger.error("Failed to update the CustomRPC activity", e)
+            }
         }
-        return Activity(
-            optional(NAME) ?: "Custom RPC",
-            activityType(),
+        if (active) scheduleWake(config)
+    }
+
+    private fun scheduleWake(config: RpcConfig) {
+        val now = System.currentTimeMillis()
+        var next = config.applicationId?.let { images.nextWake(it, config.imageValues) } ?: Long.MAX_VALUE
+        if (config.timestampMode == TimestampMode.REMAINING && config.timestampAnchor > now) {
+            next = minOf(next, config.timestampAnchor + 1000)
+        }
+        if (next == Long.MAX_VALUE) return
+        Utils.mainThread.postDelayed(wake, (next - now).coerceIn(5_000L, 6 * 60 * 60 * 1000L))
+    }
+
+    private fun onImagesResolved(errors: Map<String, String>) {
+        if (!running) return
+        if (reportImageErrors) {
+            reportImageErrors = false
+            val config = config()
+            val messages = ArrayList<String>()
+            config.largeImage?.let { v -> errors[v]?.let { messages += "Large image: $it" } }
+            config.smallImage?.let { v -> errors[v]?.let { messages += "Small image: $it" } }
+            if (messages.isNotEmpty()) Utils.showToast(messages.joinToString("\n"), true)
+        }
+        refresh()
+        onPreviewChanged?.invoke()
+    }
+
+    /** The error for an image field, if resolving it failed. */
+    internal fun imageError(value: String): String? {
+        val appId = config().applicationId ?: return null
+        return value.trim().takeIf { it.isNotEmpty() }?.let { images.error(appId, it) }
+    }
+
+    // Runs on the store thread.
+    private fun apply(next: Activity?) {
+        val store = StoreStream.getPresences()
+        val previous = owned
+        applying = true
+        try {
+            if (previous != null && previous.p() != next?.p()) {
+                store.updateActivity(previous.p(), displaced.remove(previous.p()), true)
+            }
+            if (next != null) {
+                if (previous?.p() != next.p()) {
+                    displaced[next.p()] = store.`getLocalPresence$app_productionGoogleRelease`()
+                        .activities
+                        ?.firstOrNull { it.p() == next.p() }
+                }
+                store.updateActivity(next.p(), next, false)
+            }
+            owned = next
+        } finally {
+            applying = false
+        }
+    }
+
+    private fun build(config: RpcConfig): Activity {
+        val appId = config.applicationId
+        val large = if (appId != null) config.largeImage?.let { images.path(appId, it) } else null
+        // Discord only shows the small image on top of a large one.
+        val small = if (appId != null && large != null) config.smallImage?.let { images.path(appId, it) } else null
+        val assets = if (large != null) ActivityAssets(large, config.largeText, small, config.smallText.takeIf { small != null }) else null
+
+        val now = System.currentTimeMillis()
+        val timestamps = when (config.timestampMode) {
+            TimestampMode.SINCE_ENABLED -> ActivityTimestamps(config.startedAt.toString(), null)
+            TimestampMode.ELAPSED -> config.timestampAnchor.takeIf { it > 0 }?.let { ActivityTimestamps(it.toString(), null) }
+            TimestampMode.REMAINING -> config.timestampAnchor.takeIf { it > now }?.let { ActivityTimestamps(null, it.toString()) }
+            TimestampMode.OFF -> null
+        }
+
+        // Buttons need an application: other clients fetch the button links through it.
+        val buttons = if (appId != null) config.buttons else emptyList()
+
+        // A party shows "(2 of 4)" after the state.
+        val party = config.partySizes?.let { ActivityParty(config.partyId ?: "customrpc", it) }
+
+        val activity = Activity(
+            config.name,
+            config.type,
             null,
-            createdAt,
-            null,
+            config.startedAt,
+            timestamps,
             appId,
-            optional(DETAILS),
-            optional(STATE),
+            config.details,
+            config.state,
             null,
-            null,
+            party,
             assets,
-            flags(),
+            null,
             null,
             null,
             null,
@@ -323,83 +281,58 @@ class CustomRPC : Plugin() {
             null,
             null,
         )
-    }
-
-    private fun clearImageCache() = synchronized(imageLock) {
-        imageGeneration++
-        imagePaths.clear()
-        imageFailures.clear()
-        imageRequests.clear()
-    }
-
-    private fun requestImages() {
-        val id = value(APPLICATION_ID).toLongOrNull()?.takeIf { it > 0 } ?: return
-        val urls = listOf(LARGE_IMAGE_URL, SMALL_IMAGE_URL).mapNotNull { publicImageUrl(value(it)) }.distinct()
-        val generation: Int
-        val pending: List<String>
-        synchronized(imageLock) {
-            generation = imageGeneration
-            pending = urls.filter { url ->
-                val key = "$id:$url"
-                key !in imagePaths &&
-                    System.currentTimeMillis() - (imageFailures[key] ?: 0) >= 60_000 &&
-                    imageRequests.add(key)
-            }
+        // Discord's constructor drops these, so set the fields directly. Gson sends them as url, buttons and
+        // metadata.button_urls.
+        config.streamUrl?.let { setField(activity, "url", it) }
+        if (buttons.isNotEmpty()) {
+            setField(activity, "buttons", buttons.map { it.label })
+            setField(activity, "metadata", metadata(buttons.map { it.url }))
         }
-        if (pending.isEmpty()) return
-        Utils.threadPool.execute {
-            val resolved = mutableMapOf<String, String>()
+        return activity
+    }
+
+    private fun setField(target: Any, name: String, value: Any?) {
+        try {
+            target.javaClass.getDeclaredField(name).apply { isAccessible = true }.set(target, value)
+        } catch (e: Exception) {
+            logger.error("Failed to set Activity.$name", e)
+        }
+    }
+
+    private fun metadata(buttonUrls: List<String>): ActivityMetadata? {
+        val metadata = newInstance(ActivityMetadata::class.java) as? ActivityMetadata ?: return null
+        setField(metadata, "buttonUrls", buttonUrls)
+        return metadata
+    }
+
+    private fun newInstance(clazz: Class<*>): Any? {
+        for (constructor in clazz.declaredConstructors) {
             try {
-                Http.Request.newDiscordRNRequest("/applications/$id/external-assets", "POST").use { request ->
-                    request.setRequestTimeout(10_000)
-                    request.setHeader("Content-Type", "application/json")
-                    val response = request.executeWithBody(JSONObject().put("urls", JSONArray(pending)).toString())
-                    check(response.ok()) { "External images: HTTP ${response.statusCode}" }
-                    val assets = JSONArray(response.text())
-                    for (i in 0 until assets.length()) {
-                        val asset = assets.optJSONObject(i) ?: continue
-                        val url = asset.optString("url").trim().ifEmpty {
-                            if (assets.length() ==
-                                pending.size
-                            ) {
-                                pending[i]
-                            } else {
-                                ""
-                            }
-                        }
-                        val path = asset
-                            .optString(
-                                "external_asset_path",
-                            ).trim()
-                            .removePrefix("https://media.discordapp.net/")
-                            .trimStart('/')
-                        if (url in pending &&
-                            path.isNotEmpty()
-                        ) {
-                            resolved["$id:$url"] = if (path.startsWith("mp:")) path else "mp:$path"
-                        }
-                    }
-                }
-            } catch (error: Exception) {
-                logger.error("Failed to proxy CustomRPC images", error)
-            }
-            synchronized(imageLock) {
-                if (generation == imageGeneration && running) {
-                    imagePaths.putAll(resolved)
-                    pending.forEach { url ->
-                        val key = "$id:$url"
-                        imageRequests.remove(key)
-                        if (key !in
-                            resolved
-                        ) {
-                            imageFailures[key] = System.currentTimeMillis()
-                        } else {
-                            imageFailures.remove(key)
-                        }
-                    }
-                    if (resolved.isNotEmpty()) Utils.mainThread.post { if (running && isEnabled()) refresh() }
-                }
+                constructor.isAccessible = true
+                val args = constructor.parameterTypes.map { defaultValue(it) }.toTypedArray()
+                return constructor.newInstance(*args)
+            } catch (_: Throwable) {
             }
         }
+        return try {
+            val unsafeClass = Class.forName("sun.misc.Unsafe")
+            val unsafe = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
+            unsafeClass.getMethod("allocateInstance", Class::class.java).invoke(unsafe, clazz)
+        } catch (e: Throwable) {
+            logger.error("Failed to create ${clazz.simpleName}", e)
+            null
+        }
+    }
+
+    private fun defaultValue(type: Class<*>): Any? = when (type) {
+        java.lang.Boolean.TYPE -> false
+        java.lang.Integer.TYPE -> 0
+        java.lang.Long.TYPE -> 0L
+        java.lang.Short.TYPE -> 0.toShort()
+        java.lang.Byte.TYPE -> 0.toByte()
+        java.lang.Character.TYPE -> Character.MIN_VALUE
+        java.lang.Float.TYPE -> 0f
+        java.lang.Double.TYPE -> 0.0
+        else -> null
     }
 }
