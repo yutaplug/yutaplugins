@@ -28,6 +28,12 @@ import com.discord.widgets.media.WidgetMedia
 class GroupMedia : Plugin() {
     private val gridId = View.generateViewId()
 
+    /** Each grid tile's "open fullscreen" action, weakly keyed so recycled tiles can be collected. */
+    private val tileClicks = java.util.WeakHashMap<InlineMediaView, View.OnClickListener>()
+
+    private fun playButton(tile: InlineMediaView): View? =
+        tile.findViewById(Utils.getResId("inline_media_play_button", "id"))
+
     init {
         settingsTab = SettingsTab(GroupMediaSettings::class.java, SettingsTab.Type.PAGE).withArgs(settings)
     }
@@ -72,6 +78,18 @@ class GroupMedia : Plugin() {
                 },
             )
         }
+
+        // InlineMediaView redraws itself (on attach, resume, visibility change) and each redraw
+        // sets the play button back to inline playback, so put the fullscreen action back after it.
+        val updateUI = InlineMediaView::class.java.declaredMethods.first { it.name == "updateUI" }
+        patcher.patch(
+            updateUI,
+            Hook { call ->
+                val tile = call.thisObject as InlineMediaView
+                val open = tileClicks[tile] ?: return@Hook
+                playButton(tile)?.setOnClickListener(open)
+            },
+        )
 
         MediaGallery.patch(patcher) { settings.getBool(KEY_ARROWS, true) }
 
@@ -126,8 +144,8 @@ class GroupMedia : Plugin() {
             val openFullscreen = View.OnClickListener { MediaGallery.open(it.context, group, index) }
             tile.setOnClickListener(openFullscreen)
             // The play button would play the video inside the small tile; open it fullscreen instead.
-            tile.findViewById<View>(Utils.getResId("inline_media_play_button", "id"))
-                ?.setOnClickListener(openFullscreen)
+            tileClicks[tile] = openFullscreen
+            playButton(tile)?.setOnClickListener(openFullscreen)
             tile.setOnLongClickListener {
                 root.performLongClick()
                 true

@@ -1,9 +1,12 @@
-version = "1.0.2"
+version = "1.0.3"
 description = "Groups several images and videos sent in one message into a grid, and lets you swipe between them in fullscreen."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.3
+        * The play button on videos in the grid now always opens them fullscreen instead of playing in the small tile
+
         # 1.0.2
         * Renamed from GroupImages to GroupMedia; the old GroupImages plugin is uninstalled automatically
         * Tapping a video's play button in the grid now opens it fullscreen
