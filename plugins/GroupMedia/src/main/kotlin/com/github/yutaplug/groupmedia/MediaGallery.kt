@@ -7,6 +7,7 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.net.Uri
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -19,6 +20,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.cardview.widget.CardView
 import androidx.core.content.ContextCompat
+import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.api.PatcherAPI
 import com.aliucord.patcher.Hook
@@ -29,12 +31,19 @@ import com.discord.player.MediaType
 import com.discord.utilities.embed.EmbedResourceUtils
 import com.discord.utilities.images.MGImages
 import com.discord.widgets.media.WidgetMedia
+import com.facebook.common.references.CloseableReference
+import com.facebook.datasource.DataSource
 import com.facebook.drawee.view.SimpleDraweeView
 import com.facebook.samples.zoomable.ZoomableDraweeView
 import com.google.android.exoplayer2.ui.PlayerView
+import java.util.concurrent.Executor
 import kotlin.math.abs
 import b.a.d.j as AppScreens
 import b.c.a.a0.d as MediaSources
+import b.f.e.f as DataSubscriber
+import b.f.g.a.a.b as FrescoHolder
+import b.f.j.j.c as CloseableImage
+import com.facebook.imagepipeline.request.ImageRequest.c as RequestLevel
 
 /** Adds previous/next arrows, swiping and an "x/x" counter to Discord's fullscreen viewer for grouped media. */
 object MediaGallery {
@@ -45,6 +54,7 @@ object MediaGallery {
     private const val EXTRA_VIDEOS = "GROUPMEDIA_VIDEOS"
     private const val EXTRA_INDEX = "GROUPMEDIA_INDEX"
     private const val OVERLAY_TAG = "GroupMediaOverlay"
+    private val logger = Logger("GroupMedia")
 
     private class Gallery(
         val titles: Array<String>,
@@ -269,6 +279,64 @@ object MediaGallery {
         image?.setOnTouchListener(swipeListener)
         root.findViewById<PlayerView>(Utils.getResId("media_player_view", "id"))
             ?.videoSurfaceView?.setOnTouchListener(swipeListener)
+
+        prefetch(fragment, gallery, index)
+    }
+
+    private val formattedUrlMethod by lazy {
+        WidgetMedia::class.java.getDeclaredMethod("getFormattedUrl", Context::class.java, Uri::class.java)
+            .apply { isAccessible = true }
+    }
+
+    /**
+     * Loads the other images into Fresco's caches now, nearest first, so swiping to them shows them right away.
+     * Uses the viewer's own getFormattedUrl (with Aliucord's fixes) so the request matches the one it makes later.
+     */
+    private fun prefetch(fragment: WidgetMedia, gallery: Gallery, index: Int) {
+        try {
+            val context = fragment.context ?: return
+            val pipeline = FrescoHolder.a?.b ?: return
+            val intent = fragment.mostRecentIntent
+            val width = intent.getIntExtra("INTENT_MEDIA_WIDTH", 0)
+            val height = intent.getIntExtra("INTENT_MEDIA_HEIGHT", 0)
+            val targets = (0 until gallery.size)
+                .filter { it != index && !gallery.videos[it] }
+                .sortedBy { abs(it - index) }
+            val urls = try {
+                targets.map {
+                    // getFormattedUrl sizes the URL from the intent's width and height.
+                    intent.putExtra("INTENT_MEDIA_WIDTH", gallery.widths[it])
+                    intent.putExtra("INTENT_MEDIA_HEIGHT", gallery.heights[it])
+                    formattedUrlMethod.invoke(fragment, context, Uri.parse(gallery.urls[it])) as String
+                }
+            } finally {
+                intent.putExtra("INTENT_MEDIA_WIDTH", width)
+                intent.putExtra("INTENT_MEDIA_HEIGHT", height)
+            }
+            for (url in urls) {
+                val request = MGImages.getImageRequest(url, 0, 0, false).a()
+                val source = pipeline.a(request, null, RequestLevel.j /* FULL_FETCH */, null, null)
+                // Closing the finished source only drops our reference; the image stays cached.
+                source.f(
+                    object : DataSubscriber<CloseableReference<CloseableImage>> {
+                        override fun onNewResult(ds: DataSource<CloseableReference<CloseableImage>>) {
+                            if (ds.c()) ds.close()
+                        }
+
+                        override fun onFailure(ds: DataSource<CloseableReference<CloseableImage>>) {
+                            ds.close()
+                        }
+
+                        override fun onCancellation(ds: DataSource<CloseableReference<CloseableImage>>) {}
+
+                        override fun onProgressUpdate(ds: DataSource<CloseableReference<CloseableImage>>) {}
+                    },
+                    Executor { it.run() },
+                )
+            }
+        } catch (e: Throwable) {
+            logger.error("Failed to preload gallery images", e)
+        }
     }
 
     /** A row of small previews of every item; the current one is wider and fully opaque, tapping another opens it. */
