@@ -367,7 +367,8 @@ internal class ProfileOverlay private constructor(
                 val bottom = view.layer.anchor == Anchor.BOTTOM
                 val topMargin = if (bottom) {
                     0
-                } else if (view.layer.rail) {
+                } else if (view.layer.rail || view.layer.border) {
+                    // Rails and borders start at the card's top edge; staples sit above it.
                     topOverflow + railTop
                 } else {
                     0

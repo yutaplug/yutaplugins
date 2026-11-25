@@ -96,16 +96,17 @@ internal class EffectOverlay(context: Context, private val log: (String, Throwab
         canvas.clipRect(0, 0, width, height)
         super.dispatchDraw(canvas)
         if (width > 0) {
-            val scale = width.toFloat() / EFFECT_WIDTH
+            // As on Discord: every layer is the card's full width, as tall as its image's shape
+            // allows, offset by its position in plain pixels.
+            val density = resources.displayMetrics.density
+            val layerWidth = width.toFloat()
             for (player in players) {
                 if (!player.visible || !player.hasFrame) continue
                 val layer = player.layer
-                layerRect.set(
-                    layer.x * scale,
-                    layer.y * scale,
-                    (layer.x + layer.width) * scale,
-                    (layer.y + layer.height) * scale,
-                )
+                val left = layer.x * density
+                val top = layer.y * density
+                val aspect = player.bitmap.height.toFloat() / player.bitmap.width
+                layerRect.set(left, top, left + layerWidth, top + layerWidth * aspect)
                 canvas.drawBitmap(player.bitmap, null, layerRect, paint)
             }
         }
@@ -118,7 +119,22 @@ internal class EffectOverlay(context: Context, private val log: (String, Throwab
         if (disposed || windowToken == null) return
         built = true
         showStatic(effect.source)
-        if (animate && effect.layers.isNotEmpty()) load(effect.layers)
+        if (animate && effect.layers.isNotEmpty()) load(withVariant(effect.layers))
+    }
+
+    /**
+     * Some effects come in variants. Like Discord, pick one index below the smallest variant count
+     * and use it on every layer that has variants, so the layers stay matched.
+     */
+    private fun withVariant(layers: List<EffectLayer>): List<EffectLayer> {
+        var count = 0
+        for (layer in layers) {
+            val size = layer.variants.size
+            if (size > 0) count = if (count == 0) size else minOf(count, size)
+        }
+        if (count == 0) return layers
+        val index = (Math.random() * count).toInt().coerceIn(0, count - 1)
+        return layers.map { if (it.variants.isEmpty()) it else it.copy(source = it.variants[index]) }
     }
 
     private fun load(layers: List<EffectLayer>) {
@@ -157,8 +173,8 @@ internal class EffectOverlay(context: Context, private val log: (String, Throwab
     private fun prepare(cacheDir: File, layer: EffectLayer, surfaceWidth: Int): Prepared {
         val image = ApngImage.parse(EffectAssets.load(cacheDir, layer.source))
             ?: throw IllegalStateException("Unsupported image")
-        val scale = surfaceWidth.toFloat() / EFFECT_WIDTH
-        val fit = maxOf(layer.width * scale / image.width, layer.height * scale / image.height)
+        // Layers are drawn at the card's width (see dispatchDraw).
+        val fit = (surfaceWidth.toFloat() / image.width)
             .coerceIn(1f / 64, 1f)
         val width = ceil(image.width * fit).toInt().coerceIn(1, MAX_BITMAP_SIZE)
         val height = ceil(image.height * fit).toInt().coerceIn(1, MAX_BITMAP_SIZE)
@@ -188,14 +204,16 @@ internal class EffectOverlay(context: Context, private val log: (String, Throwab
         stopLayers()
         removeStatic()
         running = true
-        for (player in players) later(player.layer.start) { playLayer(player) }
+        // Discord starts the timeline 500 ms after the effect appears.
+        for (player in players) later(INTRO_DELAY + player.layer.start) { playLayer(player) }
     }
 
     private fun playLayer(player: EffectLayerPlayer) {
         if (!running) return
         player.play()
         val layer = player.layer
-        if (layer.duration <= 0) return
+        // A looping layer without a delay stays up and its image loops by itself, as on Discord.
+        if (layer.duration <= 0 || (layer.loop && layer.loopDelay <= 0)) return
         later(layer.duration) {
             player.stop()
             invalidate()
@@ -284,5 +302,7 @@ internal class EffectOverlay(context: Context, private val log: (String, Throwab
     private companion object {
         /** Stays under the GPU texture limit of older devices. */
         const val MAX_BITMAP_SIZE = 4096
+
+        const val INTRO_DELAY = 500L
     }
 }

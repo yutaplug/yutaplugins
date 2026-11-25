@@ -17,6 +17,17 @@ import com.discord.utilities.guilds.RoleUtils
 import java.util.WeakHashMap
 import kotlin.math.max
 
+/** Evenly spaced gradient stops from 10% to 90%, as Discord places them. */
+private fun stopPositions(count: Int): FloatArray {
+    val positions = FloatArray(count)
+    var i = 0
+    while (i < count) {
+        positions[i] = 0.1f + 0.8f * i / (count - 1)
+        i++
+    }
+    return positions
+}
+
 /** Draws one run of a styled name. Gradients span the measured width of the whole name. */
 internal class NameSpan(
     private val typeface: Typeface?,
@@ -30,15 +41,19 @@ internal class NameSpan(
     private val name: String,
     /** Size relative to the name's own, for fonts Discord draws smaller or larger. */
     private val scale: Float = 1f,
+    /** Extra letter spacing, in em. */
+    private val spacing: Float = 0f,
 ) : MetricAffectingSpan() {
     override fun updateMeasureState(paint: TextPaint) {
         if (typeface != null) paint.typeface = typeface
         if (scale != 1f) paint.textSize *= scale
+        if (spacing != 0f) paint.letterSpacing += spacing
     }
 
     override fun updateDrawState(paint: TextPaint) {
         if (typeface != null) paint.typeface = typeface
         if (scale != 1f) paint.textSize *= scale
+        if (spacing != 0f) paint.letterSpacing += spacing
         if (fill != 0) paint.color = fill
         val stops = colors
         if (stops != null && stops.size > 1) {
@@ -46,7 +61,8 @@ internal class NameSpan(
             paint.shader = if (vertical) {
                 LinearGradient(0f, 0f, 0f, max(paint.textSize * 1.2f, 1f), stops, null, Shader.TileMode.CLAMP)
             } else {
-                LinearGradient(0f, 0f, max(paint.measureText(name), 1f), 0f, stops, null, Shader.TileMode.CLAMP)
+                // Discord spreads the stops between 10% and 90% of the name.
+                LinearGradient(0f, 0f, max(paint.measureText(name), 1f), 0f, stops, stopPositions(stops.size), Shader.TileMode.CLAMP)
             }
         }
         if (shadowRadius > 0f) paint.setShadowLayer(shadowRadius, shadowDx, shadowDy, shadowColor)
@@ -67,14 +83,22 @@ internal class NameRenderer(
         val guildId: Long?,
         val roles: List<Long>?,
         val roleColors: Boolean,
+        /** In the friend list, the DM list or a DM, where colors follow [Prefs.nameColorsInLists]. */
         val list: Boolean,
+        /** The user object the view was bound with, which carries the style even when the store lacks the user. */
+        val model: Any?,
     )
 
     private val targets = WeakHashMap<TextView, Target>()
 
     fun refreshAll() {
+        // Detached rows too: lists re-attach cached rows without binding them again.
         for ((view, target) in ArrayList(targets.entries)) {
-            if (view.isAttachedToWindow) style(view, target)
+            try {
+                style(view, target)
+            } catch (error: Throwable) {
+                log("Could not restyle the name of ${target.userId}", error)
+            }
         }
     }
 
@@ -110,8 +134,9 @@ internal class NameRenderer(
         roles: List<Long>?,
         roleColors: Boolean,
         list: Boolean = false,
+        model: Any? = null,
     ) {
-        val target = Target(userId, guildId?.takeIf { it > 0 }, roles, roleColors, list)
+        val target = Target(userId, guildId?.takeIf { it > 0 }, roles, roleColors, list, model)
         targets[view] = target
         try {
             style(view, target)
@@ -129,13 +154,14 @@ internal class NameRenderer(
         }
         if (text.isEmpty() || target.userId <= 0) return
 
-        val style = NameStyles.style(target.userId, target.guildId)
+        val style = NameStyles.style(target.userId, target.guildId, target.model)
         val typeface = if (prefs.nameFonts && style != null && style.fontId != NameStyle.FONT_DEFAULT) {
             NameFonts.get(view.context, style.fontId)
         } else {
             null
         }
         val fontScale = if (typeface != null) capScale(view, typeface) else 1f
+        val fontSpacing = if (typeface != null) NameFonts.spacing(style!!.fontId) else 0f
         val density = view.resources.displayMetrics.density
         val name = text.toString()
         val spans = ArrayList<Triple<Int, Int, NameSpan>>()
@@ -147,12 +173,12 @@ internal class NameRenderer(
         val colorsShown = prefs.nameColors && (!target.list || prefs.nameColorsInLists)
         val styleColors = style?.colors?.takeIf { colorsShown && it.isNotEmpty() }
         if (role == null && styleColors != null) {
-            effectSpans(style.effectId, styleColors, typeface, fontScale, name, density, spans)
+            effectSpans(style.effectId, styleColors, typeface, fontScale, fontSpacing, name, density, spans)
         } else {
             // Without a gradient, Discord's own text color (the role color) stays.
             val gradient = if (role != null && prefs.roleGradients) roleGradient(target.guildId!!, role) else null
             if (gradient != null || typeface != null) {
-                spans.add(Triple(0, name.length, NameSpan(typeface, 0, gradient, false, 0f, 0f, 0f, 0, name, fontScale)))
+                spans.add(Triple(0, name.length, NameSpan(typeface, 0, gradient, false, 0f, 0f, 0f, 0, name, fontScale, fontSpacing)))
             }
         }
         if (spans.isEmpty()) return
@@ -174,6 +200,7 @@ internal class NameRenderer(
         colors: IntArray,
         typeface: Typeface?,
         fontScale: Float,
+        fontSpacing: Float,
         name: String,
         density: Float,
         out: MutableList<Triple<Int, Int, NameSpan>>,
@@ -189,7 +216,7 @@ internal class NameRenderer(
             dx: Float = 0f,
             dy: Float = 0f,
             shadow: Int = 0,
-        ) = NameSpan(typeface, fill, stops, vertical, radius, dx, dy, shadow, name, fontScale)
+        ) = NameSpan(typeface, fill, stops, vertical, radius, dx, dy, shadow, name, fontScale, fontSpacing)
 
         when (effect) {
             NameStyle.EFFECT_GRADIENT, NameStyle.EFFECT_PRISM -> {

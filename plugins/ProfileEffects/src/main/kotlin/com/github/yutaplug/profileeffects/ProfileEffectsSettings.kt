@@ -50,8 +50,8 @@ class ProfileEffectsSettings(private val settings: SettingsAPI) : SettingsPage()
         )
         toggle(
             Prefs.NAME_COLORS_IN_LISTS,
-            "Display name colors in lists",
-            "Show display name colors in the friend list and DM list. When off, those names keep the normal text color but still use their font.",
+            "Display name colors in lists and DMs",
+            "Show display name colors in the friend list, the DM list and DMs. When off, those names keep the normal text color but still use their font. Profiles always show colors.",
         )
     }
 

@@ -24,10 +24,15 @@ import com.discord.widgets.channels.memberlist.adapter.ChannelMembersListViewHol
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.MessageEntry
+import com.discord.stores.StoreMessageReplies
 import com.discord.models.member.GuildMember as ModelGuildMember
 import com.discord.models.user.User as ModelUser
 import com.discord.widgets.friends.FriendsListViewModel
 import com.discord.widgets.friends.WidgetFriendsListAdapter
+import com.discord.databinding.WidgetHomeBinding
+import com.discord.widgets.home.WidgetHome
+import com.discord.widgets.home.WidgetHomeHeaderManager
+import com.discord.widgets.home.WidgetHomeModel
 import com.discord.widgets.user.profile.UserProfileHeaderView
 import com.discord.widgets.user.profile.UserProfileHeaderViewModel
 import com.discord.widgets.user.usersheet.WidgetUserSheet
@@ -74,6 +79,7 @@ class ProfileEffects : Plugin() {
         )
         this.names = names
         NameFonts.setListener(::queueNameRefresh)
+        NameFonts.log = { message, error -> logger.error(message, error) }
         // Styles usually arrive just before Discord binds the views, but a profile or role fetch can finish later.
         NameStyles.onChange = {
             if (stylesPending.compareAndSet(false, true)) {
@@ -89,6 +95,7 @@ class ProfileEffects : Plugin() {
         }
         patchSheets()
         patchNames()
+        patchHeader()
         removeReplacedPlugins()
     }
 
@@ -119,7 +126,7 @@ class ProfileEffects : Plugin() {
                 val id = state.user.id
                 val guild = state.guildMember?.guildId?.takeIf { it > 0 }
                     ?: bindings[header]?.key?.takeIf { it.userId == id }?.guildId
-                styleHeaderName(header, id, guild)
+                styleHeaderName(header, id, guild, state.user)
                 if (!header.hasResourceName("user_sheet_profile_header_view")) return@Hook
                 bind(header, ProfileKey(id, guild), !state.reducedMotionEnabled || state.allowAnimationInReducedMotion)
             },
@@ -179,34 +186,32 @@ class ProfileEffects : Plugin() {
                 val author = message.author ?: return@Hook
                 val member = entry.author
                 val guild = member?.guildId?.takeIf { it > 0 } ?: message.guildId
-                names?.apply(view, author.id, guild, member?.roles, true)
+                // Messages without a guild are in DMs, which follow the DM color setting.
+                names?.apply(view, author.id, guild, member?.roles, true, guild == null, author)
             },
         )
-        // Reply previews: the replied-to author's name above the message.
+        // Reply previews: the replied-to author's name above the message. configureReplyAuthor is a
+        // private method that compiled code inlines, so hooking it only works some of the time;
+        // style the name from onConfigure, which always runs, by finding the author the same way.
         val replyName = Utils.getResId("chat_list_adapter_item_text_decorator_reply_name", "id")
         patcher.patch(
             WidgetChatListAdapterItemMessage::class.java,
             "onConfigure",
             arrayOf(Int::class.javaPrimitiveType!!, ChatListEntry::class.java),
-            PreHook { call ->
-                // A recycled row may now show a reply without an author (or none); configureReplyAuthor
-                // styles the name again when there is one.
-                val item = call.thisObject as WidgetChatListAdapterItemMessage
-                item.itemView.findViewById<TextView>(replyName)?.let { names?.forget(it) }
-            },
-        )
-        patcher.patch(
-            WidgetChatListAdapterItemMessage::class.java,
-            "configureReplyAuthor",
-            arrayOf(ModelUser::class.java, ModelGuildMember::class.java, MessageEntry::class.java),
             Hook { call ->
+                val entry = call.args[1] as? MessageEntry ?: return@Hook
                 val item = call.thisObject as WidgetChatListAdapterItemMessage
                 val view = item.itemView.findViewById<TextView>(replyName) ?: return@Hook
-                val user = call.args[0] as ModelUser
-                val member = call.args[1] as? ModelGuildMember
-                val entry = call.args[2] as MessageEntry
-                val guild = member?.guildId?.takeIf { it > 0 } ?: entry.message.guildId
-                names?.apply(view, user.id, guild, member?.roles, true)
+                val names = names ?: return@Hook
+                val reply = replyAuthor(entry)
+                if (reply == null) {
+                    // A recycled row may now show a reply without an author, or none.
+                    names.forget(view)
+                    return@Hook
+                }
+                val (user, member, message) = reply
+                val guild = member?.guildId?.takeIf { it > 0 } ?: message.guildId
+                names.apply(view, user.id, guild, member?.roles, true, guild == null, user)
             },
         )
         patcher.patch(
@@ -232,7 +237,7 @@ class ProfileEffects : Plugin() {
                 val item = call.args[1] as? ChannelListItemPrivate ?: return@Hook
                 val binding = dmBinding[call.thisObject] as WidgetChannelsListItemChannelPrivateBinding
                 val recipient = ChannelUtils.a(item.channel)
-                styleListName(binding.f, recipient?.id)
+                styleListName(binding.f, recipient?.id, recipient)
             },
         )
 
@@ -246,7 +251,7 @@ class ProfileEffects : Plugin() {
             Hook { call ->
                 val item = call.args[1] as? FriendsListViewModel.Item.Friend ?: return@Hook
                 val binding = friendBinding[call.thisObject] as WidgetFriendsListAdapterItemFriendBinding
-                styleListName(binding.f, item.user.id)
+                styleListName(binding.f, item.user.id, item.user)
             },
         )
         val pendingBinding = WidgetFriendsListAdapter.ItemPendingUser::class.java.getDeclaredField("binding")
@@ -258,7 +263,51 @@ class ProfileEffects : Plugin() {
             Hook { call ->
                 val item = call.args[1] as? FriendsListViewModel.Item.PendingFriendRequest ?: return@Hook
                 val binding = pendingBinding[call.thisObject] as WidgetFriendsListAdapterItemPendingBinding
-                styleListName(binding.f, item.user.id)
+                styleListName(binding.f, item.user.id, item.user)
+            },
+        )
+    }
+
+    /**
+     * The author whose name a message's reply preview shows, found the way Discord's
+     * configureReplyPreview does: the command user for interactions, otherwise the replied-to
+     * message's author when that message is loaded, not blocked and not a system message.
+     */
+    private fun replyAuthor(entry: MessageEntry): Triple<com.discord.api.user.User, ModelGuildMember?, com.discord.models.message.Message>? {
+        val message = entry.message
+        if (message.isInteraction) {
+            val user = message.interaction?.c() ?: return null
+            return Triple(user, entry.interactionAuthor, message)
+        }
+        val reply = entry.replyData ?: return null
+        if (message.type != REPLY_TYPE || reply.isRepliedUserBlocked) return null
+        if (reply.messageState !is StoreMessageReplies.MessageState.Loaded) return null
+        val replied = reply.messageEntry ?: return null
+        val type = replied.message.type
+        if (type == USER_JOIN_TYPE || type == ROLE_SUBSCRIPTION_TYPE) return null
+        val user = replied.message.author ?: return null
+        return Triple(user, replied.author, replied.message)
+    }
+
+    /** The chat header's title: the other person's name in a one-on-one DM. */
+    private fun patchHeader() {
+        patcher.patch(
+            WidgetHomeHeaderManager::class.java,
+            "configure",
+            arrayOf(WidgetHome::class.java, WidgetHomeModel::class.java, WidgetHomeBinding::class.java),
+            Hook { call ->
+                val home = call.args[0] as WidgetHome
+                val model = call.args[1] as WidgetHomeModel
+                val title = home.actionBarTitleLayout?.title ?: return@Hook
+                val channel = model.channel
+                // The same title shows channel and group names, which must not keep a user's style.
+                val recipient = if (channel != null && ChannelUtils.m(channel)) ChannelUtils.a(channel) else null
+                if (recipient == null) {
+                    listTokens.remove(title)
+                    names?.forget(title)
+                } else {
+                    styleListName(title, recipient.id, recipient)
+                }
             },
         )
     }
@@ -267,7 +316,7 @@ class ProfileEffects : Plugin() {
      * Aliucord's RNAPI replaces these names with the global name in hooks that run after this
      * plugin's, so style them once the bind (and every hook on it) has finished.
      */
-    private fun styleListName(view: TextView, userId: Long?) {
+    private fun styleListName(view: TextView, userId: Long?, model: Any? = null) {
         val names = names ?: return
         if (userId == null) {
             // Cancel a style still queued from this row's previous (one-on-one) DM.
@@ -278,17 +327,17 @@ class ProfileEffects : Plugin() {
         val token = Any()
         listTokens[view] = token
         view.post {
-            if (listTokens[view] === token && this.names === names) names.apply(view, userId, null, null, false, true)
+            if (listTokens[view] === token && this.names === names) names.apply(view, userId, null, null, false, true, model)
         }
     }
 
     private val listTokens = java.util.WeakHashMap<TextView, Any>()
 
-    private fun styleHeaderName(header: UserProfileHeaderView, userId: Long, guildId: Long?) {
+    private fun styleHeaderName(header: UserProfileHeaderView, userId: Long, guildId: Long?, model: Any? = null) {
         val nameView = header.findViewById<View>(Utils.getResId("user_profile_header_primary_name", "id")) ?: return
         val text = usernameText(nameView) ?: return
         // Discord 126.21 never colors profile names by role, so only display name styles apply here.
-        names?.apply(text, userId, guildId, null, false)
+        names?.apply(text, userId, guildId, null, false, false, model)
     }
 
     private fun usernameText(root: View): TextView? = root.findViewById(Utils.getResId("username_text", "id"))
@@ -411,6 +460,7 @@ class ProfileEffects : Plugin() {
         names?.clear()
         names = null
         NameFonts.setListener(null)
+        NameFonts.log = null
         NameStyles.onChange = null
         stylesPending.set(false)
         NameStyles.clear()
@@ -419,6 +469,11 @@ class ProfileEffects : Plugin() {
 
     companion object {
         private var instance: ProfileEffects? = null
+
+        // Discord message types.
+        private const val USER_JOIN_TYPE = 7
+        private const val REPLY_TYPE = 19
+        private const val ROLE_SUBSCRIPTION_TYPE = 25
 
         internal fun settingsChanged() {
             instance?.let { plugin -> plugin.main.post { if (plugin.repository != null) plugin.onSettingsChanged() } }

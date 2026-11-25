@@ -52,6 +52,8 @@ internal data class EffectLayer(
     val width: Long,
     val height: Long,
     val zIndex: Long,
+    /** Alternative images; Discord shows one variant (the same index on every layer) per view. */
+    val variants: List<String> = emptyList(),
 )
 
 internal data class FrameMetrics(
@@ -73,6 +75,8 @@ internal data class FrameLayer(
     val front: Boolean,
     val anchor: Int,
     val rail: Boolean,
+    /** Spans the card from its top edge, clipped to it, instead of sitting above it like a staple. */
+    val border: Boolean = false,
 )
 
 /** Tolerate older named enums and newer numeric enums without rounding Discord snowflakes. */
@@ -169,10 +173,17 @@ internal object ProfileData {
                     size(item["width"], EFFECT_WIDTH.toLong()),
                     size(item["height"], 880),
                     integer(item["zIndex"] ?: item["z_index"]) ?: 0,
+                    variants(item["randomizedSources"] ?: item["randomized_sources"]),
                 ),
             )
         }
         result.sortWith(Comparator { left, right -> left.zIndex.compareTo(right.zIndex) })
+        return result
+    }
+
+    private fun variants(raw: Any?): List<String> {
+        val result = ArrayList<String>()
+        for (value in list(raw)) imageUrl((value as? Map<*, *>)?.get("src") ?: value)?.let { result.add(it) }
         return result
     }
 
@@ -195,7 +206,9 @@ internal object ProfileData {
                     id,
                     order == "front" || order == "0",
                     anchor,
-                    boolean(item["responsive"]) || type == "rail" || anchor == Anchor.CENTER,
+                    // Discord types layers as staple, rail or border; older data only marked rails as responsive.
+                    type == "rail" || (type != "staple" && type != "border" && (boolean(item["responsive"]) || anchor == Anchor.CENTER)),
+                    type == "border",
                 ),
             )
         }

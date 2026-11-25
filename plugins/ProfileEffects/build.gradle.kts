@@ -1,8 +1,16 @@
-version = "1.1.1"
+version = "1.1.2"
 description = "Backports Discord profile effects, profile frames, profile themes, role gradients, and display name fonts and colors."
 aliucord {
     changelog.set(
         """
+        # 1.1.2
+        * Fix display name styles in reply previews only showing some of the time
+        * Fix display name styles missing for users Discord hadn't cached
+        * Show display name styles in the DM header
+        * The list color setting now also covers messages in DMs
+        * Match Discord's font weights, letter spacing and gradients for display names
+        * Show random profile effect variants and match Discord's effect timing and sizing
+        * Place border-type profile frame layers correctly
         # 1.1.1
         * Show display name styles in reply previews
         * Role colors now win over display name style colors, as on Discord; the font still shows

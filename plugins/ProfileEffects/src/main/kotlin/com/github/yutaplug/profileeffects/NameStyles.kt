@@ -100,8 +100,8 @@ internal object NameStyles {
     @Synchronized fun user(userId: Long): NameStyle? = users[userId]
 
     /** The guild style wins over the global one, as on Discord. */
-    fun style(userId: Long, guildId: Long?): NameStyle? =
-        member(userId, guildId) ?: ModelStyles.style(userId) ?: user(userId)
+    fun style(userId: Long, guildId: Long?, model: Any? = null): NameStyle? =
+        member(userId, guildId) ?: ModelStyles.style(userId, model) ?: user(userId)
 
     fun setRole(roleId: Long, colors: Map<*, *>?) {
         if (roleId <= 0) return
