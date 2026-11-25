@@ -1,8 +1,14 @@
-version = "1.1.0"
+version = "1.1.1"
 description = "Backports Discord profile effects, profile frames, profile themes, role gradients, and display name fonts and colors."
 aliucord {
     changelog.set(
         """
+        # 1.1.1
+        * Show display name styles in reply previews
+        * Role colors now win over display name style colors, as on Discord; the font still shows
+        * Draw display name fonts bold and at Discord's size
+        * Use the default font for the fonts Discord retired
+        * Add a setting to hide display name colors in the friend and DM lists
         # 1.1.0
         * Rewrite the plugin
         * Show profile theme gradients on profiles

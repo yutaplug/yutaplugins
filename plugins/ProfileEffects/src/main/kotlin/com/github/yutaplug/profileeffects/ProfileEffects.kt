@@ -24,6 +24,8 @@ import com.discord.widgets.channels.memberlist.adapter.ChannelMembersListViewHol
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.MessageEntry
+import com.discord.models.member.GuildMember as ModelGuildMember
+import com.discord.models.user.User as ModelUser
 import com.discord.widgets.friends.FriendsListViewModel
 import com.discord.widgets.friends.WidgetFriendsListAdapter
 import com.discord.widgets.user.profile.UserProfileHeaderView
@@ -180,6 +182,33 @@ class ProfileEffects : Plugin() {
                 names?.apply(view, author.id, guild, member?.roles, true)
             },
         )
+        // Reply previews: the replied-to author's name above the message.
+        val replyName = Utils.getResId("chat_list_adapter_item_text_decorator_reply_name", "id")
+        patcher.patch(
+            WidgetChatListAdapterItemMessage::class.java,
+            "onConfigure",
+            arrayOf(Int::class.javaPrimitiveType!!, ChatListEntry::class.java),
+            PreHook { call ->
+                // A recycled row may now show a reply without an author (or none); configureReplyAuthor
+                // styles the name again when there is one.
+                val item = call.thisObject as WidgetChatListAdapterItemMessage
+                item.itemView.findViewById<TextView>(replyName)?.let { names?.forget(it) }
+            },
+        )
+        patcher.patch(
+            WidgetChatListAdapterItemMessage::class.java,
+            "configureReplyAuthor",
+            arrayOf(ModelUser::class.java, ModelGuildMember::class.java, MessageEntry::class.java),
+            Hook { call ->
+                val item = call.thisObject as WidgetChatListAdapterItemMessage
+                val view = item.itemView.findViewById<TextView>(replyName) ?: return@Hook
+                val user = call.args[0] as ModelUser
+                val member = call.args[1] as? ModelGuildMember
+                val entry = call.args[2] as MessageEntry
+                val guild = member?.guildId?.takeIf { it > 0 } ?: entry.message.guildId
+                names?.apply(view, user.id, guild, member?.roles, true)
+            },
+        )
         patcher.patch(
             ChannelMembersListViewHolderMember::class.java,
             "bind",
@@ -243,13 +272,13 @@ class ProfileEffects : Plugin() {
         if (userId == null) {
             // Cancel a style still queued from this row's previous (one-on-one) DM.
             listTokens.remove(view)
-            names.apply(view, 0, null, null, false)
+            names.apply(view, 0, null, null, false, true)
             return
         }
         val token = Any()
         listTokens[view] = token
         view.post {
-            if (listTokens[view] === token && this.names === names) names.apply(view, userId, null, null, false)
+            if (listTokens[view] === token && this.names === names) names.apply(view, userId, null, null, false, true)
         }
     }
 

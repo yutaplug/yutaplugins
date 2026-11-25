@@ -2,6 +2,7 @@ package com.github.yutaplug.profileeffects
 
 import android.graphics.Color
 import android.graphics.LinearGradient
+import android.graphics.Rect
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.text.Spannable
@@ -27,13 +28,17 @@ internal class NameSpan(
     private val shadowDy: Float,
     private val shadowColor: Int,
     private val name: String,
+    /** Size relative to the name's own, for fonts Discord draws smaller or larger. */
+    private val scale: Float = 1f,
 ) : MetricAffectingSpan() {
     override fun updateMeasureState(paint: TextPaint) {
         if (typeface != null) paint.typeface = typeface
+        if (scale != 1f) paint.textSize *= scale
     }
 
     override fun updateDrawState(paint: TextPaint) {
         if (typeface != null) paint.typeface = typeface
+        if (scale != 1f) paint.textSize *= scale
         if (fill != 0) paint.color = fill
         val stops = colors
         if (stops != null && stops.size > 1) {
@@ -57,7 +62,13 @@ internal class NameRenderer(
     private val fetchRoles: (Long) -> Unit,
     private val log: (String, Throwable) -> Unit,
 ) {
-    private class Target(val userId: Long, val guildId: Long?, val roles: List<Long>?, val roleColors: Boolean)
+    private class Target(
+        val userId: Long,
+        val guildId: Long?,
+        val roles: List<Long>?,
+        val roleColors: Boolean,
+        val list: Boolean,
+    )
 
     private val targets = WeakHashMap<TextView, Target>()
 
@@ -65,6 +76,14 @@ internal class NameRenderer(
         for ((view, target) in ArrayList(targets.entries)) {
             if (view.isAttachedToWindow) style(view, target)
         }
+    }
+
+    /** Removes this view's style and stops restyling it, for views Discord now uses for something else. */
+    fun forget(view: TextView) {
+        targets.remove(view) ?: return
+        val text = view.text as? Spannable ?: return
+        val spans = text.getSpans(0, text.length, NameSpan::class.java)
+        for (span in spans) text.removeSpan(span)
     }
 
     /** Removes every style this renderer added, for when the plugin stops. */
@@ -84,8 +103,15 @@ internal class NameRenderer(
      * Main thread, right after Discord set the view's text and color.
      * [roleColors] is false where Discord itself never shows role colors (profile names).
      */
-    fun apply(view: TextView, userId: Long, guildId: Long?, roles: List<Long>?, roleColors: Boolean) {
-        val target = Target(userId, guildId?.takeIf { it > 0 }, roles, roleColors)
+    fun apply(
+        view: TextView,
+        userId: Long,
+        guildId: Long?,
+        roles: List<Long>?,
+        roleColors: Boolean,
+        list: Boolean = false,
+    ) {
+        val target = Target(userId, guildId?.takeIf { it > 0 }, roles, roleColors, list)
         targets[view] = target
         try {
             style(view, target)
@@ -109,19 +135,24 @@ internal class NameRenderer(
         } else {
             null
         }
+        val fontScale = if (typeface != null) capScale(view, typeface) else 1f
         val density = view.resources.displayMetrics.density
         val name = text.toString()
         val spans = ArrayList<Triple<Int, Int, NameSpan>>()
 
-        val styleColors = style?.colors?.takeIf { prefs.nameColors && it.isNotEmpty() }
-        if (styleColors != null) {
-            effectSpans(style.effectId, styleColors, typeface, name, density, spans)
+        // As on Discord's current apps, a colored role wins over the display name style's colors;
+        // the style still supplies the font.
+        val role = if (target.roleColors) colorRole(target) else null
+        // The friend and DM lists can show only the font, keeping Discord's own text color.
+        val colorsShown = prefs.nameColors && (!target.list || prefs.nameColorsInLists)
+        val styleColors = style?.colors?.takeIf { colorsShown && it.isNotEmpty() }
+        if (role == null && styleColors != null) {
+            effectSpans(style.effectId, styleColors, typeface, fontScale, name, density, spans)
         } else {
-            val gradient = if (prefs.roleGradients && target.roleColors) roleGradient(target) else null
-            if (gradient != null) {
-                spans.add(Triple(0, name.length, NameSpan(typeface, 0, gradient, false, 0f, 0f, 0f, 0, name)))
-            } else if (typeface != null) {
-                spans.add(Triple(0, name.length, NameSpan(typeface, 0, null, false, 0f, 0f, 0f, 0, name)))
+            // Without a gradient, Discord's own text color (the role color) stays.
+            val gradient = if (role != null && prefs.roleGradients) roleGradient(target.guildId!!, role) else null
+            if (gradient != null || typeface != null) {
+                spans.add(Triple(0, name.length, NameSpan(typeface, 0, gradient, false, 0f, 0f, 0f, 0, name, fontScale)))
             }
         }
         if (spans.isEmpty()) return
@@ -142,6 +173,7 @@ internal class NameRenderer(
         effect: Int,
         colors: IntArray,
         typeface: Typeface?,
+        fontScale: Float,
         name: String,
         density: Float,
         out: MutableList<Triple<Int, Int, NameSpan>>,
@@ -157,7 +189,7 @@ internal class NameRenderer(
             dx: Float = 0f,
             dy: Float = 0f,
             shadow: Int = 0,
-        ) = NameSpan(typeface, fill, stops, vertical, radius, dx, dy, shadow, name)
+        ) = NameSpan(typeface, fill, stops, vertical, radius, dx, dy, shadow, name, fontScale)
 
         when (effect) {
             NameStyle.EFFECT_GRADIENT, NameStyle.EFFECT_PRISM -> {
@@ -212,7 +244,8 @@ internal class NameRenderer(
         }
     }
 
-    private fun roleGradient(target: Target): IntArray? {
+    /** The member's highest role that has a color: the one Discord colors their name with. */
+    private fun colorRole(target: Target): GuildRole? {
         val guildId = target.guildId ?: return null
         val roleIds = target.roles ?: StoreStream.getGuilds().getMember(guildId, target.userId)?.roles ?: return null
         if (roleIds.isEmpty()) return null
@@ -223,12 +256,42 @@ internal class NameRenderer(
             if (role.b() == 0) continue
             if (RoleUtils.rankIsHigher(role, best)) best = role
         }
-        val role = best ?: return null
+        return best
+    }
+
+    private fun roleGradient(guildId: Long, role: GuildRole): IntArray? {
         if (!NameStyles.knowsRole(role.id)) {
             fetchRoles(guildId)
             return null
         }
         return NameStyles.role(role.id)?.colors
+    }
+
+    private val capScales = HashMap<Pair<Typeface?, Typeface>, Float>()
+    private val capPaint = TextPaint()
+    private val capBounds = Rect()
+
+    /**
+     * Discord sizes name fonts so their capital letters are as tall as its own font's: Playpen
+     * Sans, measured against the official app, comes out at the predicted ~0.86-0.88x. Do the same
+     * against the font this view would otherwise use.
+     */
+    private fun capScale(view: TextView, typeface: Typeface): Float {
+        val base = view.paint.typeface
+        val key = Pair(base, typeface)
+        capScales[key]?.let { return it }
+        val scale = (capHeight(base) / capHeight(typeface).coerceAtLeast(1f))
+            .takeIf { it.isFinite() && it > 0f }
+            ?.coerceIn(0.75f, 1.25f) ?: 1f
+        capScales[key] = scale
+        return scale
+    }
+
+    private fun capHeight(typeface: Typeface?): Float {
+        capPaint.typeface = typeface
+        capPaint.textSize = 200f
+        capPaint.getTextBounds("H", 0, 1, capBounds)
+        return capBounds.height().toFloat()
     }
 
     private fun withAlpha(color: Int, alpha: Int) = (color and 0xFFFFFF) or (alpha shl 24)
