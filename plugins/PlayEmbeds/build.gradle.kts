@@ -1,9 +1,15 @@
-version = "1.0.19"
+version = "1.0.20"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.20
+        * Captions button in YouTube players, including auto-generated captions; the language you pick turns on in later videos too
+        * Playback speed button in YouTube players, from 0.25x to 2x
+        * Fix a crash on vertical videos such as YouTube Shorts
+        * The debug log also goes to logcat (tag PlayEmbeds)
+
         # 1.0.19
         * Swiping on a player to open the channel list or member list works again; only drags on the seekbar stay with the player
 

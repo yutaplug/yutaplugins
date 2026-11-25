@@ -90,6 +90,12 @@ class PlayEmbeds : Plugin() {
     /** Quality picked in a YouTube player, by embed URL, so replaying the video keeps it. */
     private val youtubeQualityChoices = HashMap<String, Int>()
 
+    /** Speed and captions by ExoPlayer (`AppMediaPlayer.f`). */
+    private val playbackExtras = WeakHashMap<Any, PlaybackExtras>()
+
+    /** The caption language last picked in a YouTube player, turned on in the next ones too. */
+    private var captionLanguage: String? = null
+
     private var youtube: YoutubeResolver? = null
     private var soundCloud: SoundCloudResolver? = null
     private var spotify: SpotifyResolver? = null
@@ -645,6 +651,9 @@ class PlayEmbeds : Plugin() {
         // After a quality switch the download saves the quality that's playing.
         addDownloadButton((state.root as? ViewGroup)?.getChildAt(0), title, media.audioOnly) {
             quality?.media?.uri ?: media.uri
+        }
+        if (provider == HostedProvider.YOUTUBE && !media.audioOnly) {
+            ((state.root as? ViewGroup)?.getChildAt(0) as? PlayerView)?.let { addPlaybackControls(it, player, identity) }
         }
         val playerContainer = state.replacement?.wrapper ?: container
         // `players` holds its values weakly; the view's tag is the strong reference that
@@ -1304,7 +1313,9 @@ class PlayEmbeds : Plugin() {
         val duration = bar.findViewById<View>(id("exo_duration")) ?: return
         val start = bar.indexOfChild(duration) + 1
         if (start <= 0) return
-        val buttons = (start until bar.childCount).map { bar.getChildAt(it) }
+        // A plain loop: IntRange.map iterates Discord's stripped IntRange and crashes (ClassCastException).
+        val buttons = ArrayList<View>()
+        for (index in start until bar.childCount) buttons.add(bar.getChildAt(index))
         buttons.forEach { button ->
             val params = button.layoutParams
             bar.removeView(button)
@@ -1400,12 +1411,270 @@ class PlayEmbeds : Plugin() {
         control.state.media = media
         control.updateLabel()
         youtubeQualityChoices[control.url] = media.quality
+        // Loading the new stream can reset the speed.
+        playbackExtras[player.f as Any]?.speed?.takeIf { it != 1f }?.let { NativePlayers.setSpeed(player, it) }
     }
 
     private fun hideQualityLoading(control: QualityControl) {
         val card = control.loadingCard ?: return
         control.loadingCard = null
         (card.parent as? ViewGroup)?.removeView(card)
+    }
+
+    /** Speed and captions of a player, shared by every view that shows it (embed and fullscreen). */
+    private class PlaybackExtras {
+        var speed = 1f
+        var tracks: List<CaptionTrack>? = null
+        var loadingTracks = false
+        val trackWaiters = ArrayList<(List<CaptionTrack>?) -> Unit>()
+        var track: CaptionTrack? = null
+        var cues: List<CaptionCue>? = null
+
+        /** The track being loaded, so only the last pick is applied. */
+        var pendingTrack: CaptionTrack? = null
+    }
+
+    private fun extrasFor(player: AppMediaPlayer): PlaybackExtras {
+        val exo: Any = player.f
+        return playbackExtras[exo] ?: PlaybackExtras().also { playbackExtras[exo] = it }
+    }
+
+    /**
+     * Speed and captions buttons in a YouTube player's control bar (ExoPlayer's
+     * own icons), and the caption text over the video. [url] is the embed URL.
+     */
+    private fun addPlaybackControls(playerView: PlayerView, player: AppMediaPlayer, url: String) {
+        val extras = extrasFor(player)
+        var captionsButton: ImageButton? = null
+        captionsButton = addBarButton(playerView, "exo_ic_subtitle_off", "Captions") {
+            captionsButton?.let { showCaptionPicker(it, player, url) }
+        }
+        addBarButton(playerView, "exo_ic_speed", "Playback speed") { showSpeedPicker(playerView, player) }
+        addCaptionOverlay(playerView, player, captionsButton)
+        restoreCaptions(extras, url)
+    }
+
+    private fun showSpeedPicker(view: View, player: AppMediaPlayer) {
+        val extras = extrasFor(player)
+        SelectDialog().apply {
+            title = "Playback speed"
+            items = PLAYBACK_SPEEDS.map { speed ->
+                val label = if (speed == 1f) "Normal" else speedLabel(speed)
+                if (speed == extras.speed) "✓ $label" else label
+            }.toTypedArray()
+            onResultListener = { which ->
+                PLAYBACK_SPEEDS.getOrNull(which)?.let { speed ->
+                    if (NativePlayers.setSpeed(player, speed)) {
+                        extras.speed = speed
+                    } else {
+                        Utils.showToast("Couldn't change the speed", true)
+                    }
+                }
+            }
+        }.show(fragmentManagerFor(view.context), "PlayEmbedsSpeed")
+    }
+
+    /** 0.25 → "0.25x", 2 → "2x". */
+    private fun speedLabel(speed: Float): String =
+        if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
+
+    private fun showCaptionPicker(view: View, player: AppMediaPlayer, url: String) {
+        val extras = extrasFor(player)
+        val tracks = extras.tracks
+        if (tracks == null) {
+            Utils.showToast("Loading captions…")
+            loadCaptionTracks(extras, url) { loaded ->
+                when {
+                    loaded == null -> Utils.showToast("Couldn't load captions", true)
+                    loaded.isEmpty() -> Utils.showToast("This video has no captions")
+                    view.isAttachedToWindow -> showCaptionPicker(view, player, url)
+                }
+            }
+            return
+        }
+        if (tracks.isEmpty()) {
+            Utils.showToast("This video has no captions")
+            return
+        }
+        val current = extras.pendingTrack ?: extras.track
+        val names = listOf("Off") + tracks.map { it.name }
+        SelectDialog().apply {
+            title = "Captions"
+            items = names.mapIndexed { index, name ->
+                val selected = if (index == 0) current == null else tracks[index - 1] === current
+                if (selected) "✓ $name" else name
+            }.toTypedArray()
+            onResultListener = { which ->
+                if (which == 0) selectCaptions(extras, null) else tracks.getOrNull(which - 1)?.let { selectCaptions(extras, it) }
+            }
+        }.show(fragmentManagerFor(view.context), "PlayEmbedsCaptions")
+    }
+
+    /** Looks up [url]'s caption tracks once per player; [done] gets them (null when the lookup failed). */
+    private fun loadCaptionTracks(extras: PlaybackExtras, url: String, done: (List<CaptionTrack>?) -> Unit) {
+        extras.tracks?.let {
+            done(it)
+            return
+        }
+        val resolver = youtube ?: return done(null)
+        extras.trackWaiters.add(done)
+        if (extras.loadingTracks) return
+        extras.loadingTracks = true
+        Utils.threadPool.execute {
+            val tracks = try {
+                resolver.captionTracks(url)
+            } catch (_: Throwable) {
+                null
+            }
+            DebugLog.log("captions: ${tracks?.size ?: "no"} tracks")
+            Utils.mainThread.post {
+                extras.loadingTracks = false
+                // None found is asked again on the next tap, in case YouTube refused only for a while.
+                if (tracks != null && tracks.isNotEmpty()) extras.tracks = tracks
+                val waiters = ArrayList(extras.trackWaiters)
+                extras.trackWaiters.clear()
+                waiters.forEach { it(tracks) }
+            }
+        }
+    }
+
+    /** Shows [track] (or no captions); with [remember], later videos turn on the same language. */
+    private fun selectCaptions(extras: PlaybackExtras, track: CaptionTrack?, remember: Boolean = true) {
+        extras.pendingTrack = track
+        if (remember) captionLanguage = track?.languageCode
+        if (track == null) {
+            extras.track = null
+            extras.cues = null
+            return
+        }
+        Utils.threadPool.execute {
+            val cues = Captions.load(track)
+            Utils.mainThread.post {
+                if (extras.pendingTrack !== track) return@post
+                extras.pendingTrack = null
+                if (cues == null) {
+                    Utils.showToast("Couldn't load captions", true)
+                    return@post
+                }
+                extras.track = track
+                extras.cues = cues
+            }
+        }
+    }
+
+    /** Turns captions on in the language last picked, like YouTube remembers it. */
+    private fun restoreCaptions(extras: PlaybackExtras, url: String) {
+        val language = captionLanguage ?: return
+        if (extras.track != null || extras.pendingTrack != null) return
+        loadCaptionTracks(extras, url) { tracks ->
+            if (tracks == null || extras.track != null || extras.pendingTrack != null) return@loadCaptionTracks
+            val match = tracks.firstOrNull { it.languageCode == language && !it.auto }
+                ?: tracks.firstOrNull { it.languageCode == language }
+                ?: return@loadCaptionTracks
+            selectCaptions(extras, match, remember = false)
+        }
+    }
+
+    /**
+     * The current caption over the video, in ExoPlayer's overlay frame (under
+     * the controls), white on translucent black like YouTube's. It moves above
+     * the control bar while that's showing.
+     */
+    private fun addCaptionOverlay(playerView: PlayerView, player: AppMediaPlayer, button: ImageButton?) {
+        val context = playerView.context
+        val host = playerView.findViewById<FrameLayout>(id("exo_overlay")) ?: playerView
+        val duration = playerView.findViewById<TextView>(id("exo_duration"))
+        val caption = TextView(context).apply {
+            duration?.typeface?.let { typeface = it }
+            setTextColor(Color.WHITE)
+            setBackgroundColor(CAPTION_BACKGROUND)
+            gravity = Gravity.CENTER
+            val horizontal = dp(context, 6)
+            val vertical = dp(context, 2)
+            setPadding(horizontal, vertical, horizontal, vertical)
+            visibility = View.GONE
+        }
+        host.addView(
+            caption,
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                val side = dp(context, 16)
+                leftMargin = side
+                rightMargin = side
+            },
+        )
+        val exo: Any = player.f
+        val tick = object : Runnable {
+            override fun run() {
+                updateCaption(playerView, player, exo, caption, button)
+                caption.postDelayed(this, CAPTION_TICK_MS)
+            }
+        }
+        caption.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) {
+                view.removeCallbacks(tick)
+                view.post(tick)
+            }
+
+            override fun onViewDetachedFromWindow(view: View) {
+                view.removeCallbacks(tick)
+            }
+        })
+        if (caption.isAttachedToWindow) caption.post(tick)
+    }
+
+    private fun updateCaption(playerView: PlayerView, player: AppMediaPlayer, exo: Any, caption: TextView, button: ImageButton?) {
+        val extras = playbackExtras[exo]
+        if (button != null) {
+            val on = extras?.track != null
+            if (button.tag != on) {
+                button.tag = on
+                val iconId = Utils.getResId(if (on) "exo_ic_subtitle_on" else "exo_ic_subtitle_off", "drawable")
+                if (iconId > 0) button.setImageResource(iconId)
+                button.contentDescription = if (on) "Captions: ${extras?.track?.name}" else "Captions: off"
+            }
+        }
+        val cues = extras?.cues
+        // A view that handed the player to fullscreen (or back) shows nothing.
+        val text = if (cues == null || playerView.player !== exo) "" else Captions.textAt(cues, NativePlayers.position(player))
+        if (text.isEmpty()) {
+            if (caption.visibility != View.GONE) caption.visibility = View.GONE
+            return
+        }
+        if (caption.text.toString() != text) caption.text = text
+        val context = playerView.context
+        val size = (playerView.height * CAPTION_SIZE_FRACTION)
+            .coerceIn(dp(context, CAPTION_MIN_DP).toFloat(), dp(context, CAPTION_MAX_DP).toFloat())
+        if (caption.textSize != size) caption.setTextSize(TypedValue.COMPLEX_UNIT_PX, size)
+        val controlsTop = controlsTop(playerView)
+        val bottom = if (controlsTop != null) playerView.height - controlsTop + dp(context, 4) else dp(context, 12)
+        val params = caption.layoutParams as? FrameLayout.LayoutParams
+        if (params != null && params.bottomMargin != bottom) {
+            params.bottomMargin = bottom
+            caption.layoutParams = params
+        }
+        if (caption.visibility != View.VISIBLE) caption.visibility = View.VISIBLE
+    }
+
+    /** The top of the control bar (and the seekbar row above it) in [playerView], or null while it's hidden. */
+    private fun controlsTop(playerView: PlayerView): Int? {
+        val duration = playerView.findViewById<View>(id("exo_duration")) ?: return null
+        if (!duration.isShown) return null
+        val bar = duration.parent as? View ?: return null
+        val row = (bar.parent as? ViewGroup)?.findViewWithTag<View>(SEEKBAR_ROW_TAG)?.takeIf { it.isShown }
+        val barTop = offsetIn(bar, playerView) ?: return null
+        val rowTop = row?.let { offsetIn(it, playerView) }
+        return if (rowTop != null) minOf(barTop, rowTop) else barTop
+    }
+
+    /** [view]'s top within [ancestor]; parent offsets only, so it holds while the player is turned sideways. */
+    private fun offsetIn(view: View, ancestor: View): Int? {
+        var top = 0
+        var current: View? = view
+        while (current != null && current !== ancestor) {
+            top += current.top + current.translationY.toInt()
+            current = current.parent as? View
+        }
+        return if (current === ancestor) top else null
     }
 
     private fun updateYoutubeLoading(card: View, tracker: LoadProgress?, resolver: YoutubeResolver) {
@@ -1697,6 +1966,7 @@ class PlayEmbeds : Plugin() {
         session.previousSystemUiVisibility = decor.systemUiVisibility
         session.wasFullscreen = activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_FULLSCREEN != 0
         addDownloadButton(view, session.title, audioOnly = false) { session.media.uri }
+        if (session.provider == HostedProvider.YOUTUBE) addPlaybackControls(view, session.player, session.identity)
         addBarButton(view, "exo_icon_fullscreen_exit", "Exit fullscreen") {
             DebugLog.log("rotate: exit button tapped")
             exitRotatedFullscreen()
@@ -1890,6 +2160,7 @@ class PlayEmbeds : Plugin() {
         session.activity = activity
         session.overlay = overlay
         addDownloadButton(view, session.title, audioOnly = false) { session.media.uri }
+        if (session.provider == HostedProvider.YOUTUBE) addPlaybackControls(view, session.player, session.identity)
         addBarButton(view, "exo_icon_fullscreen_exit", "Exit fullscreen") {
             DebugLog.log("host: exit button tapped")
             closeHost(activity)
@@ -2206,6 +2477,8 @@ class PlayEmbeds : Plugin() {
         embedRowKeys.clear()
         searchEmbedClicks.clear()
         youtubeQualityChoices.clear()
+        playbackExtras.clear()
+        captionLanguage = null
         patcher.unpatchAll()
     }
 
@@ -2221,6 +2494,14 @@ class PlayEmbeds : Plugin() {
         private const val LOADING_TICK_MS = 500L
         private const val FULLSCREEN_BUTTON_TAG = "PlayEmbedsFullscreen"
         private const val SEEKBAR_ROW_TAG = "PlayEmbedsSeekbarRow"
+        private val PLAYBACK_SPEEDS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
+        private const val CAPTION_TICK_MS = 100L
+        private const val CAPTION_BACKGROUND = 0xBF000000.toInt()
+
+        /** Caption text height as a share of the player height, kept between these sizes. */
+        private const val CAPTION_SIZE_FRACTION = 0.045f
+        private const val CAPTION_MIN_DP = 11
+        private const val CAPTION_MAX_DP = 24
 
         /** The narrowest the seekbar may get in the control bar before it moves to its own row. */
         private const val MIN_SEEKBAR_DP = 64

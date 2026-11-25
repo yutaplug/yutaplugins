@@ -95,6 +95,9 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
     private val loads = ConcurrentHashMap<String, LoadProgress>()
     private val responses = ConcurrentHashMap<String, FutureTask<PlayerResponse?>>()
 
+    /** Caption tracks by cache key, with when (elapsedRealtime) their signed URLs should be looked up again. */
+    private val captionCache = ConcurrentHashMap<String, Pair<Long, List<CaptionTrack>>>()
+
     /** The last refusal reason from YouTube's player API, by cache key (without quality). */
     private val refusals = ConcurrentHashMap<String, String>()
     private var streamServer: StreamServer? = null
@@ -127,6 +130,7 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
 
     override fun onClose() {
         responses.clear()
+        captionCache.clear()
         synchronized(this) {
             streamServer?.close()
             streamServer = null
@@ -152,6 +156,62 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
      * bot check), or null when it didn't refuse or gave no reason.
      */
     fun refusal(url: String): String? = key(url)?.let { refusals[it] }
+
+    /**
+     * The caption tracks of [url]'s video, written and auto-generated. Blocks,
+     * so call it off the main thread. Null when every lookup failed.
+     *
+     * IOS_PRODUCER, which the streams usually come from, lists no captions at
+     * all, so [CAPTION_CLIENTS] and then the other stream clients are asked too.
+     */
+    fun captionTracks(url: String): List<CaptionTrack>? {
+        val base = key(url)
+        if (base == null) {
+            DebugLog.log("captions: not a YouTube video URL: $url")
+            return null
+        }
+        captionCache[base]?.takeIf { it.first > SystemClock.elapsedRealtime() }?.let {
+            DebugLog.log("captions: $base: ${it.second.size} tracks (cached)")
+            return it.second
+        }
+        val task = responseTask(base)
+        task.run()
+        val response = try {
+            task.get()
+        } catch (e: Throwable) {
+            DebugLog.log("captions: $base: stream lookup failed: $e")
+            null
+        }
+        var answered = response != null
+        var tracks = Captions.tracks(response?.data?.optJSONObject("captions"))
+        DebugLog.log(
+            "captions: $base: stream answer from " +
+                "${response?.clientIndex?.let { CLIENTS.getOrNull(it)?.name } ?: "none"} has ${tracks.size} tracks",
+        )
+        if (tracks.isEmpty()) {
+            val streamClient = response?.clientIndex?.let { CLIENTS.getOrNull(it) }
+            for (client in CAPTION_CLIENTS + CLIENTS) {
+                if (client === streamClient) continue
+                val data = try {
+                    player(client, base, recordRefusal = false)
+                } catch (e: Throwable) {
+                    DebugLog.log("captions: $base: ${client.name} failed: $e")
+                    null
+                } ?: continue
+                answered = true
+                tracks = Captions.tracks(data.optJSONObject("captions"))
+                if (tracks.isNotEmpty()) break
+            }
+        }
+        DebugLog.log(
+            "captions: $base: ${tracks.size} tracks" +
+                tracks.joinToString(prefix = if (tracks.isEmpty()) "" else ": ") { "${it.name} [${it.languageCode}]" },
+        )
+        if (!answered) return null
+        // An empty answer is looked up again next time, in case it was a passing refusal.
+        if (tracks.isNotEmpty()) captionCache[base] = SystemClock.elapsedRealtime() + CAPTION_TTL_MS to tracks
+        return tracks
+    }
 
     private fun qualityKey(url: String, quality: Int): String? = key(url)?.let { "$it|$quality" }
 
@@ -274,13 +334,15 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
             val trimmed = JSONObject()
                 .put("streamingData", streaming)
                 .put("videoDetails", JSONObject().put("videoId", videoId))
+            data.optJSONObject("captions")?.let { trimmed.put("captions", it) }
             val ttlMs = (expiresSeconds - URL_EXPIRY_MARGIN_S).coerceAtLeast(60L) * 1_000L
             return PlayerResponse(trimmed, index, SystemClock.elapsedRealtime() + ttlMs)
         }
         return null
     }
 
-    private fun player(client: Client, key: String): JSONObject? {
+    /** [recordRefusal] false keeps a caption lookup's refusal from replacing the reason a video can't play. */
+    private fun player(client: Client, key: String, recordRefusal: Boolean = true): JSONObject? {
         val clientJson = JSONObject()
             .put("clientName", client.name)
             .put("clientVersion", client.version)
@@ -306,16 +368,28 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
             request.setHeader("X-YouTube-Client-Version", client.version)
             request.setHeader("Origin", "https://www.youtube.com")
             request.executeWithBody(body.toString()).use { response ->
-                if (!response.ok()) return null
+                if (!response.ok()) {
+                    DebugLog.log("youtube: ${client.name} for $key: HTTP ${response.statusCode}")
+                    return null
+                }
                 JSONObject(response.text())
             }
         }
         val playability = data.optJSONObject("playabilityStatus")
         if (playability?.optString("status") != "OK") {
-            playability?.optString("reason")?.takeIf { it.trim().isNotEmpty() }?.let { refusals[key] = it }
+            DebugLog.log(
+                "youtube: ${client.name} for $key: ${playability?.optString("status")} " +
+                    "(${playability?.optString("reason").orEmpty()})",
+            )
+            if (recordRefusal) {
+                playability?.optString("reason")?.takeIf { it.trim().isNotEmpty() }?.let { refusals[key] = it }
+            }
             return null
         }
-        refusals.remove(key)
+        if (recordRefusal) refusals.remove(key)
+        val captionCount = data.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")
+            ?.optJSONArray("captionTracks")?.length() ?: 0
+        DebugLog.log("youtube: ${client.name} for $key: OK, $captionCount caption tracks")
         if (data.optJSONObject("videoDetails")?.optBoolean("isLive") == true) return null
         return data
     }
@@ -868,6 +942,7 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
         private const val MAX_RESPONSES = 32
         private const val URL_EXPIRY_MARGIN_S = 600L
         private const val FILE_TTL_MS = 3_600_000L
+        private const val CAPTION_TTL_MS = 3_600_000L
         private const val MIN_BUFFER_BYTES = 1024 * 1024
         private const val COPY_BUFFER_BYTES = 64 * 1024
         private const val MIN_RATE_SAMPLE_MS = 1_000L
@@ -912,6 +987,37 @@ internal class YoutubeResolver(private val cacheDir: File) : CachedResolver<Reso
                     "androidSdkVersion" to 32,
                     "osName" to "Android",
                     "osVersion" to "12L",
+                ),
+            ),
+        )
+
+        /**
+         * Asked only for caption tracks, which IOS_PRODUCER never lists. Their streams
+         * need a PO token, but their caption URLs download without one (tested Nov
+         * 2026), and they answered where VISIONOS and ANDROID_VR got a bot check.
+         */
+        private val CAPTION_CLIENTS = listOf(
+            Client(
+                name = "IOS",
+                id = 5,
+                version = "20.10.4",
+                userAgent = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+                extra = mapOf(
+                    "deviceMake" to "Apple",
+                    "deviceModel" to "iPhone16,2",
+                    "osName" to "iPhone",
+                    "osVersion" to "18.3.2.22D82",
+                ),
+            ),
+            Client(
+                name = "ANDROID",
+                id = 3,
+                version = "20.10.38",
+                userAgent = "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
+                extra = mapOf(
+                    "androidSdkVersion" to 30,
+                    "osName" to "Android",
+                    "osVersion" to "11",
                 ),
             ),
         )

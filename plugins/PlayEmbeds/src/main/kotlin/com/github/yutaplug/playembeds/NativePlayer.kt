@@ -203,6 +203,43 @@ internal object NativePlayers {
         }
     }
 
+    /**
+     * Plays at [speed] with the pitch kept, through ExoPlayer's Sonic audio processor.
+     * R8 removed `SimpleExoPlayer.setPlaybackParameters`, but the internal player
+     * still handles it: `SimpleExoPlayer` (`k2`) `.e` is `ExoPlayerImpl` (`f1`), whose
+     * `.i` is `ExoPlayerImplInternal` (`h1`), whose handler (`q`) runs message 4 with a
+     * `PlaybackParameters` (`x1(speed, pitch)`) as `setPlaybackParameters`.
+     */
+    fun setSpeed(player: AppMediaPlayer, speed: Float): Boolean = try {
+        val exo: Any = player.f
+        val internal = field(field(exo, "e"), "i")
+        val handler = field(internal, "q")
+        val floatType = Float::class.javaPrimitiveType
+        val params = Class.forName("b.i.a.c.x1").getConstructor(floatType, floatType).newInstance(speed, 1f)
+        val message = Class.forName("b.i.a.c.f3.o")
+            .getMethod("i", Int::class.javaPrimitiveType, Any::class.java)
+            .invoke(handler, SET_PLAYBACK_PARAMETERS, params)
+        message!!.javaClass.getMethod("b").apply { isAccessible = true }.invoke(message)
+        true
+    } catch (e: Throwable) {
+        DebugLog.log("speed: couldn't set ${speed}x: $e")
+        false
+    }
+
+    private fun field(owner: Any, name: String): Any {
+        var type: Class<*>? = owner.javaClass
+        while (type != null) {
+            try {
+                return type.getDeclaredField(name).apply { isAccessible = true }.get(owner)!!
+            } catch (_: NoSuchFieldException) {
+                type = type.superclass
+            }
+        }
+        throw NoSuchFieldException(name)
+    }
+
+    private const val SET_PLAYBACK_PARAMETERS = 4
+
     fun release(player: AppMediaPlayer) {
         try {
             player.c()

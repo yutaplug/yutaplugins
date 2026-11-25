@@ -3,6 +3,7 @@ package com.github.yutaplug.playembeds
 import android.app.Activity
 import android.os.Build
 import android.os.SystemClock
+import android.util.Log
 import java.util.Locale
 
 /**
@@ -11,10 +12,13 @@ import java.util.Locale
  */
 internal object DebugLog {
     private const val MAX_LINES = 300
+    private const val TAG = "PlayEmbeds"
     private val lines = java.util.ArrayDeque<String>()
 
     @Synchronized
     fun log(message: String) {
+        // Also to Android's log (tag PlayEmbeds), so the Logcat plugin shows it live.
+        Log.i(TAG, message)
         val seconds = SystemClock.uptimeMillis() / 1000.0
         lines.addLast(String.format(Locale.US, "%.3f %s", seconds, message))
         while (lines.size > MAX_LINES) lines.removeFirst()
