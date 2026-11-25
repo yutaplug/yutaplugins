@@ -1,9 +1,12 @@
-version = "1.0.18"
+version = "1.0.19"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.19
+        * Swiping on a player to open the channel list or member list works again; only drags on the seekbar stay with the player
+
         # 1.0.18
         * On narrow (portrait) videos, the fullscreen, download and quality buttons move up beside the seekbar instead of being cut off
 

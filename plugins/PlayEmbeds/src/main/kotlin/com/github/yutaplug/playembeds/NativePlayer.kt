@@ -2,6 +2,7 @@ package com.github.yutaplug.playembeds
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.util.Xml
@@ -238,9 +239,15 @@ internal class FullscreenOverlay(context: Context, private val onBack: () -> Uni
  * Some Discord/device-specific parent containers don't reliably propagate
  * disallow-intercept through the hierarchy. Request it from every ancestor so
  * seekbar drags stay with the player instead of becoming panel/chat swipes.
+ * Only gestures that start on the seekbar are guarded: a swipe that starts
+ * anywhere else on the player still opens the channel list or member panel.
  */
 internal class TouchGuardLayout(context: Context) : FrameLayout(context) {
+    private var guarding = false
+
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) guarding = startsOnSeekbar(event)
+        if (!guarding) return super.dispatchTouchEvent(event)
         val finished = event.actionMasked == MotionEvent.ACTION_UP ||
             event.actionMasked == MotionEvent.ACTION_CANCEL
         requestAncestorsDisallowIntercept(!finished)
@@ -249,7 +256,25 @@ internal class TouchGuardLayout(context: Context) : FrameLayout(context) {
         } finally {
             // Reassert after the child's own dispatch; release only once the gesture ends.
             requestAncestorsDisallowIntercept(!finished)
+            if (finished) guarding = false
         }
+    }
+
+    private fun startsOnSeekbar(event: MotionEvent): Boolean {
+        val seekbarId = Utils.getResId("exo_progress", "id")
+        if (seekbarId <= 0) return true
+        val seekbar = findViewById<View>(seekbarId) ?: return false
+        if (!seekbar.isShown) return false
+        val bounds = Rect()
+        if (!seekbar.getGlobalVisibleRect(bounds)) return false
+        // A little slack above and below, since the bar itself is thin.
+        val slack = (SEEKBAR_TOUCH_SLACK_DP * resources.displayMetrics.density).toInt()
+        bounds.inset(0, -slack)
+        return bounds.contains(event.rawX.toInt(), event.rawY.toInt())
+    }
+
+    private companion object {
+        const val SEEKBAR_TOUCH_SLACK_DP = 12
     }
 
     private fun requestAncestorsDisallowIntercept(disallow: Boolean) {
