@@ -1,8 +1,15 @@
-version = "1.0.11"
-description = "Backports viewing Discord Nitro profile effects and profile frames."
+version = "1.1.0"
+description = "Backports Discord profile effects, profile frames, profile themes, role gradients, and display name fonts and colors."
 aliucord {
     changelog.set(
         """
+        # 1.1.0
+        * Rewrite the plugin
+        * Show profile theme gradients on profiles
+        * Show role gradients on names in chat and the member list
+        * Show display name fonts, colors and effects in chat, the member list, profiles, the DM list and the friend list
+        * Add settings to turn each feature on or off, including profile effects and frames
+        * Uninstall ModernUserStyles and ModernProfiles, which this plugin replaces
         # 1.0.11
         * Replace the effect WebView with a native APNG renderer that decodes one frame at a time
         * Lower memory use and improve compatibility with older Android versions

@@ -1,0 +1,246 @@
+package com.github.yutaplug.profileeffects
+
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextPaint
+import android.text.style.MetricAffectingSpan
+import android.widget.TextView
+import com.discord.api.role.GuildRole
+import com.discord.stores.StoreStream
+import com.discord.utilities.guilds.RoleUtils
+import java.util.WeakHashMap
+import kotlin.math.max
+
+/** Draws one run of a styled name. Gradients span the measured width of the whole name. */
+internal class NameSpan(
+    private val typeface: Typeface?,
+    private val fill: Int,
+    private val colors: IntArray?,
+    private val vertical: Boolean,
+    private val shadowRadius: Float,
+    private val shadowDx: Float,
+    private val shadowDy: Float,
+    private val shadowColor: Int,
+    private val name: String,
+) : MetricAffectingSpan() {
+    override fun updateMeasureState(paint: TextPaint) {
+        if (typeface != null) paint.typeface = typeface
+    }
+
+    override fun updateDrawState(paint: TextPaint) {
+        if (typeface != null) paint.typeface = typeface
+        if (fill != 0) paint.color = fill
+        val stops = colors
+        if (stops != null && stops.size > 1) {
+            paint.color = Color.BLACK
+            paint.shader = if (vertical) {
+                LinearGradient(0f, 0f, 0f, max(paint.textSize * 1.2f, 1f), stops, null, Shader.TileMode.CLAMP)
+            } else {
+                LinearGradient(0f, 0f, max(paint.measureText(name), 1f), 0f, stops, null, Shader.TileMode.CLAMP)
+            }
+        }
+        if (shadowRadius > 0f) paint.setShadowLayer(shadowRadius, shadowDx, shadowDy, shadowColor)
+    }
+}
+
+/**
+ * Applies display name styles (font, colors, effects) and role gradients to name TextViews, and
+ * re-applies them to the views it styled when a font or late data arrives.
+ */
+internal class NameRenderer(
+    private val prefs: Prefs,
+    private val fetchRoles: (Long) -> Unit,
+    private val log: (String, Throwable) -> Unit,
+) {
+    private class Target(val userId: Long, val guildId: Long?, val roles: List<Long>?, val roleColors: Boolean)
+
+    private val targets = WeakHashMap<TextView, Target>()
+
+    fun refreshAll() {
+        for ((view, target) in ArrayList(targets.entries)) {
+            if (view.isAttachedToWindow) style(view, target)
+        }
+    }
+
+    /** Removes every style this renderer added, for when the plugin stops. */
+    fun clear() {
+        for (view in ArrayList(targets.keys)) {
+            val text = view.text as? Spannable ?: continue
+            val spans = text.getSpans(0, text.length, NameSpan::class.java)
+            if (spans.isEmpty()) continue
+            for (span in spans) text.removeSpan(span)
+            view.requestLayout()
+            view.invalidate()
+        }
+        targets.clear()
+    }
+
+    /**
+     * Main thread, right after Discord set the view's text and color.
+     * [roleColors] is false where Discord itself never shows role colors (profile names).
+     */
+    fun apply(view: TextView, userId: Long, guildId: Long?, roles: List<Long>?, roleColors: Boolean) {
+        val target = Target(userId, guildId?.takeIf { it > 0 }, roles, roleColors)
+        targets[view] = target
+        try {
+            style(view, target)
+        } catch (error: Throwable) {
+            log("Could not style the name of $userId", error)
+            return
+        }
+    }
+
+    private fun style(view: TextView, target: Target) {
+        val text = view.text ?: return
+        if (text is Spanned) {
+            val old = text.getSpans(0, text.length, NameSpan::class.java)
+            if (old.isNotEmpty() && text is Spannable) for (span in old) text.removeSpan(span)
+        }
+        if (text.isEmpty() || target.userId <= 0) return
+
+        val style = NameStyles.style(target.userId, target.guildId)
+        val typeface = if (prefs.nameFonts && style != null && style.fontId != NameStyle.FONT_DEFAULT) {
+            NameFonts.get(view.context, style.fontId)
+        } else {
+            null
+        }
+        val density = view.resources.displayMetrics.density
+        val name = text.toString()
+        val spans = ArrayList<Triple<Int, Int, NameSpan>>()
+
+        val styleColors = style?.colors?.takeIf { prefs.nameColors && it.isNotEmpty() }
+        if (styleColors != null) {
+            effectSpans(style.effectId, styleColors, typeface, name, density, spans)
+        } else {
+            val gradient = if (prefs.roleGradients && target.roleColors) roleGradient(target) else null
+            if (gradient != null) {
+                spans.add(Triple(0, name.length, NameSpan(typeface, 0, gradient, false, 0f, 0f, 0f, 0, name)))
+            } else if (typeface != null) {
+                spans.add(Triple(0, name.length, NameSpan(typeface, 0, null, false, 0f, 0f, 0f, 0, name)))
+            }
+        }
+        if (spans.isEmpty()) return
+
+        val spannable = text as? Spannable ?: SpannableString(text)
+        for ((start, end, span) in spans) {
+            spannable.setSpan(span, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        if (spannable !== text) {
+            view.setText(spannable, TextView.BufferType.SPANNABLE)
+        } else {
+            view.requestLayout()
+            view.invalidate()
+        }
+    }
+
+    private fun effectSpans(
+        effect: Int,
+        colors: IntArray,
+        typeface: Typeface?,
+        name: String,
+        density: Float,
+        out: MutableList<Triple<Int, Int, NameSpan>>,
+    ) {
+        val first = colors[0]
+        val all = if (colors.size > 1) colors else null
+        val end = name.length
+        fun span(
+            fill: Int,
+            stops: IntArray? = null,
+            vertical: Boolean = false,
+            radius: Float = 0f,
+            dx: Float = 0f,
+            dy: Float = 0f,
+            shadow: Int = 0,
+        ) = NameSpan(typeface, fill, stops, vertical, radius, dx, dy, shadow, name)
+
+        when (effect) {
+            NameStyle.EFFECT_GRADIENT, NameStyle.EFFECT_PRISM -> {
+                out.add(Triple(0, end, span(first, all)))
+            }
+
+            NameStyle.EFFECT_GLOW -> {
+                out.add(Triple(0, end, span(first, all, radius = 4f * density, shadow = withAlpha(first, 0xB0))))
+            }
+
+            NameStyle.EFFECT_NEON -> {
+                out.add(Triple(0, end, span(mix(first, Color.WHITE, 0.55f), radius = 5f * density, shadow = first)))
+            }
+
+            NameStyle.EFFECT_TOON -> {
+                val stops = intArrayOf(mix(first, Color.WHITE, 0.45f), first)
+                out.add(
+                    Triple(
+                        0,
+                        end,
+                        span(first, stops, true, 1.2f * density, 0f, 1f * density, mix(first, Color.BLACK, 0.65f)),
+                    ),
+                )
+            }
+
+            NameStyle.EFFECT_POP -> {
+                out.add(
+                    Triple(
+                        0,
+                        end,
+                        span(first, radius = 0.01f, dx = 1.5f * density, dy = 1.5f * density, shadow = mix(first, Color.BLACK, 0.55f)),
+                    ),
+                )
+            }
+
+            NameStyle.EFFECT_GUMMY -> {
+                // Each letter takes the next color of the pattern.
+                var index = 0
+                var letter = 0
+                while (index < end) {
+                    val next = index + Character.charCount(name.codePointAt(index))
+                    val color = colors[letter % colors.size]
+                    out.add(Triple(index, next, span(color, radius = 0.01f, dy = 1f * density, shadow = mix(color, Color.BLACK, 0.5f))))
+                    if (!Character.isWhitespace(name.codePointAt(index))) letter++
+                    index = next
+                }
+            }
+
+            else -> {
+                out.add(Triple(0, end, span(first)))
+            }
+        }
+    }
+
+    private fun roleGradient(target: Target): IntArray? {
+        val guildId = target.guildId ?: return null
+        val roleIds = target.roles ?: StoreStream.getGuilds().getMember(guildId, target.userId)?.roles ?: return null
+        if (roleIds.isEmpty()) return null
+        val guildRoles = StoreStream.getGuilds().roles[guildId] ?: return null
+        var best: GuildRole? = null
+        for (id in roleIds) {
+            val role = guildRoles[id] ?: continue
+            if (role.b() == 0) continue
+            if (RoleUtils.rankIsHigher(role, best)) best = role
+        }
+        val role = best ?: return null
+        if (!NameStyles.knowsRole(role.id)) {
+            fetchRoles(guildId)
+            return null
+        }
+        return NameStyles.role(role.id)?.colors
+    }
+
+    private fun withAlpha(color: Int, alpha: Int) = (color and 0xFFFFFF) or (alpha shl 24)
+
+    companion object {
+        fun mix(from: Int, to: Int, amount: Float): Int {
+            val keep = 1f - amount
+            return Color.rgb(
+                (Color.red(from) * keep + Color.red(to) * amount).toInt(),
+                (Color.green(from) * keep + Color.green(to) * amount).toInt(),
+                (Color.blue(from) * keep + Color.blue(to) * amount).toInt(),
+            )
+        }
+    }
+}

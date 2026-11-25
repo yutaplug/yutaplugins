@@ -12,11 +12,24 @@ internal data class ProfileKey(val userId: Long, val guildId: Long?) {
     fun route(): String = "/users/$userId/profile" + if (guildId != null) "?guild_id=$guildId" else ""
 }
 
-internal data class Profile(val effect: Product.Effect? = null, val frame: Product.Frame? = null)
+internal data class Profile(
+    val effect: Product.Effect? = null,
+    val frame: Product.Frame? = null,
+    /** Profile theme colors (top, bottom); the guild profile's win over the global ones. */
+    val theme: List<Int>? = null,
+)
 
 internal data class ProductKey(val sku: Long, val type: Int)
 
-internal data class ProfileProducts(val effect: ProductKey?, val frame: ProductKey?)
+internal data class ProfileProducts(
+    val effect: ProductKey?,
+    val frame: ProductKey?,
+    val theme: List<Int>?,
+    val userStyle: NameStyle?,
+    val memberStyle: NameStyle?,
+    val hasUserStyle: Boolean,
+    val hasMemberStyle: Boolean,
+)
 
 internal sealed class Product {
     data class Effect(val source: String?, val layers: List<EffectLayer>) : Product()
@@ -70,10 +83,23 @@ internal object ProfileData {
     fun products(body: Map<*, *>): ProfileProducts {
         val global = body["user_profile"] as? Map<*, *>
         val guild = body["guild_member_profile"] as? Map<*, *>
+        val user = body["user"] as? Map<*, *>
+        val member = body["guild_member"] as? Map<*, *>
         return ProfileProducts(
             sku(guild, "profile_effect", 1) ?: sku(global, "profile_effect", 1),
             sku(guild, "profile_frame", 3) ?: sku(global, "profile_frame", 3),
+            theme(guild) ?: theme(global),
+            NameStyle.parse(user?.get("display_name_styles")),
+            NameStyle.parse(member?.get("display_name_styles")),
+            user?.containsKey("display_name_styles") == true,
+            member?.containsKey("display_name_styles") == true,
         )
+    }
+
+    private fun theme(profile: Map<*, *>?): List<Int>? {
+        val colors = Json.colors(profile?.get("theme_colors")) ?: return null
+        if (colors.size < 2) return null
+        return listOf(colors[0], colors[1])
     }
 
     private fun sku(profile: Map<*, *>?, field: String, type: Int): ProductKey? {

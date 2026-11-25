@@ -6,18 +6,16 @@ import com.aliucord.utils.GsonUtils.fromJson
 import com.aliucord.utils.IOUtils
 import com.discord.utilities.rest.RestAPI
 import com.google.gson.JsonElement
-import com.google.gson.JsonObject
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import kotlin.math.ceil
-import b.i.d.g as JsonArray
-import b.i.d.k as JsonPrimitive
 
 /** Owns its workers and caches; closing it prevents callbacks from an earlier plugin session. */
 internal class ProfileRepository(private val log: (String, Throwable) -> Unit) {
     private val workers = Executors.newFixedThreadPool(2) { Thread(it, "ProfileEffectsRequests") }
     private val profiles = RequestCache<ProfileKey, Profile>(128, ::now)
     private val products = RequestCache<ProductKey, Product>(128, ::now)
+    private val roleGuilds = HashSet<Long>()
 
     @Volatile private var closed = false
 
@@ -25,54 +23,80 @@ internal class ProfileRepository(private val log: (String, Throwable) -> Unit) {
 
     fun load(key: ProfileKey, callback: (LoadResult<Profile>) -> Unit) {
         profiles.request(key, { finish ->
-            execute(key.route(), { failure -> finish(failure) }) { body ->
-                val skus = ProfileData.products(body)
-                val keys = listOfNotNull(skus.effect, skus.frame)
+            execute<Profile>(key.route(), { failure -> finish(failure) }) { response ->
+                val body = response as? Map<*, *> ?: error("Invalid profile response")
+                val info = ProfileData.products(body)
+                if (info.hasUserStyle) NameStyles.setUser(key.userId, info.userStyle)
+                if (info.hasMemberStyle && key.guildId != null) {
+                    NameStyles.setMember(key.guildId, key.userId, info.memberStyle)
+                }
+                val base = Profile(theme = info.theme)
+                val keys = listOfNotNull(info.effect, info.frame)
                 if (keys.isEmpty()) {
-                    finish(LoadResult(Profile()))
+                    finish(LoadResult(base))
                     return@execute
                 }
-                val lock = Any()
-                var remaining = keys.size
-                var effect: Product.Effect? = null
-                var frame: Product.Frame? = null
-                var failed = false
-                var ttl = CACHE_TTL
-                for (productKey in keys) {
-                    products.request(productKey, { complete ->
-                        execute("/collectibles-products/${productKey.sku}", complete) { productBody ->
-                            complete(LoadResult(ProfileData.product(productKey, productBody)))
-                        }
-                    }) { result ->
-                        synchronized(lock) {
-                            when (val product = result.value) {
-                                is Product.Effect -> {
-                                    effect = product
-                                }
-
-                                is Product.Frame -> {
-                                    frame = product
-                                }
-
-                                null -> {}
-                            }
-                            failed = failed || result.failed
-                            ttl = minOf(ttl, result.ttl)
-                            val profile = Profile(effect, frame)
-                            if (--remaining == 0) {
-                                finish(LoadResult(profile, failed, ttl))
-                            } else if (effect != null || frame != null) {
-                                // Show whichever product arrives first while the other request finishes.
-                                profiles.publish(key, profile)
-                            }
-                        }
-                    }
-                }
+                // Show the theme right away while collectibles load.
+                profiles.publish(key, base)
+                loadProducts(key, base, keys, finish)
             }
         }, callback)
     }
 
-    private fun <T> execute(route: String, failure: (LoadResult<T>) -> Unit, success: (Map<*, *>) -> Unit) {
+    private fun loadProducts(
+        key: ProfileKey,
+        base: Profile,
+        keys: List<ProductKey>,
+        finish: (LoadResult<Profile>) -> Unit,
+    ) {
+        val lock = Any()
+        var remaining = keys.size
+        var profile = base
+        var failed = false
+        var ttl = CACHE_TTL
+        for (productKey in keys) {
+            products.request(productKey, { complete ->
+                execute<Product>("/collectibles-products/${productKey.sku}", complete) { response ->
+                    val body = response as? Map<*, *> ?: error("Invalid collectible response")
+                    complete(LoadResult(ProfileData.product(productKey, body)))
+                }
+            }) { result ->
+                synchronized(lock) {
+                    when (val product = result.value) {
+                        is Product.Effect -> profile = profile.copy(effect = product)
+                        is Product.Frame -> profile = profile.copy(frame = product)
+                        null -> {}
+                    }
+                    failed = failed || result.failed
+                    ttl = minOf(ttl, result.ttl)
+                    if (--remaining == 0) {
+                        finish(LoadResult(profile, failed, ttl))
+                    } else {
+                        // Show whichever product arrives first while the other request finishes.
+                        profiles.publish(key, profile)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Fetches a guild's roles once per session, for roles whose colors no gateway payload carried
+     * since the plugin started (for example, guilds Discord restored from its cache).
+     */
+    fun loadRoles(guildId: Long, done: () -> Unit) {
+        synchronized(roleGuilds) { if (!roleGuilds.add(guildId)) return }
+        execute<Unit>("/guilds/$guildId/roles", { }) { response ->
+            for (raw in response as? List<*> ?: return@execute) {
+                val role = raw as? Map<*, *> ?: continue
+                val id = Json.long(role["id"]) ?: continue
+                NameStyles.setRole(id, role["colors"] as? Map<*, *>)
+            }
+            done()
+        }
+    }
+
+    private fun <T> execute(route: String, failure: (LoadResult<T>) -> Unit, success: (Any?) -> Unit) {
         try {
             workers.execute {
                 if (closed) return@execute
@@ -98,9 +122,9 @@ internal class ProfileRepository(private val log: (String, Throwable) -> Unit) {
         workers.shutdownNow()
     }
 
-    private class RateLimit(val delay: Long) : Exception("Discord rate limited profile collectibles")
+    private class RateLimit(val delay: Long) : Exception("Discord rate limited profile requests")
 
-    private fun requestJson(route: String): Map<*, *> {
+    private fun requestJson(route: String): Any? {
         val cooldown = retryAt - now()
         if (cooldown > 0) throw RateLimit(cooldown)
         return Http.Request.newDiscordRNRequest(route).use { request ->
@@ -110,7 +134,7 @@ internal class ProfileRepository(private val log: (String, Throwable) -> Unit) {
                 if (response.statusCode == 429) {
                     val errorBody = request.conn.errorStream?.use { IOUtils.readAsText(it) }
                     val body = try {
-                        errorBody?.let { jsonValue(GsonUtils.gson.fromJson(it, JsonElement::class.java)) as? Map<*, *> }
+                        errorBody?.let { Json.value(GsonUtils.gson.fromJson(it, JsonElement::class.java)) as? Map<*, *> }
                     } catch (_: Exception) {
                         null
                     }
@@ -127,32 +151,8 @@ internal class ProfileRepository(private val log: (String, Throwable) -> Unit) {
                     throw RateLimit(delay)
                 }
                 check(response.ok()) { "HTTP ${response.statusCode}" }
-                val root = GsonUtils.gson.fromJson(response.text(), JsonElement::class.java)
-                jsonValue(root) as? Map<*, *> ?: error("Invalid profile collectibles response")
+                Json.value(GsonUtils.gson.fromJson(response.text(), JsonElement::class.java))
             }
-        }
-    }
-
-    private fun jsonValue(value: JsonElement?): Any? = when (value) {
-        // Retain lazy JSON numbers instead of passing snowflakes through Double.
-        is JsonPrimitive -> {
-            value.a
-        }
-
-        is JsonObject -> {
-            val map = LinkedHashMap<String, Any?>()
-            for (entry in value.j()) map[entry.key] = jsonValue(entry.value)
-            map
-        }
-
-        is JsonArray -> {
-            val list = ArrayList<Any?>()
-            for (element in value) list.add(jsonValue(element))
-            list
-        }
-
-        else -> {
-            null
         }
     }
 
