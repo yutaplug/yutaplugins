@@ -1,4 +1,4 @@
-version = "1.0.5"
+version = "1.0.6"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,11 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.6
+        * Screen refresh: new fix for the app reloading and jumping back to the start of the chat or settings after you close an image, a video or a settings page, on some phones
+        * Message links: links to a channel, thread or forum post now open in Aliucord instead of the browser
+        * Message links: jumping to a message in a forum post or thread that isn't loaded yet, from search, a link or a reminder, now opens it instead of the server's default channel
+
         # 1.0.5
         * Slow uploads and downloads: new fix for uploads and media loading very slowly on networks without IPv6, where the app first waited for IPv6 connections to time out
 

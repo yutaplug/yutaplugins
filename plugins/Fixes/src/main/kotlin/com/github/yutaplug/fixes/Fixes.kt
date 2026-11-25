@@ -21,6 +21,7 @@ import com.github.yutaplug.fixes.qrlogin.QRCodeLogin
 import com.github.yutaplug.fixes.rawgithub.RawGitHubUpdater
 import com.github.yutaplug.fixes.searchhistory.SearchHistoryFix
 import com.github.yutaplug.fixes.searchmenu.SearchMessageMenuFix
+import com.github.yutaplug.fixes.screenrefresh.ScreenRefreshFix
 import com.github.yutaplug.fixes.serverhold.ServerHoldFix
 import com.github.yutaplug.fixes.servernickname.ServerNicknameFix
 import com.github.yutaplug.fixes.serversettings.ServerSettingsFix
@@ -51,6 +52,7 @@ class Fixes : Plugin() {
         AppActivityFix(),
         SearchMessageMenuFix(),
         ServerHoldFix(),
+        ScreenRefreshFix(),
         IPv4FirstFix(),
     )
 

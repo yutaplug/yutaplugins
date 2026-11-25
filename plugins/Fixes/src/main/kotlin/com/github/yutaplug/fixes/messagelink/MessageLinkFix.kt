@@ -2,9 +2,16 @@ package com.github.yutaplug.fixes.messagelink
 
 import android.content.Context
 import android.os.SystemClock
+import com.aliucord.Utils
 import com.aliucord.patcher.PreHook
+import com.aliucord.utils.RxUtils.await
+import com.discord.api.channel.ChannelUtils
+import com.discord.utilities.rest.RestAPI
+import java.util.Collections
 import com.discord.stores.StoreMessagesLoader
+import com.discord.stores.StoreNavigation
 import com.discord.stores.StoreStream
+import com.discord.utilities.channel.ChannelSelector
 import com.discord.utilities.uri.UriHandler
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.github.yutaplug.fixes.Fix
@@ -14,10 +21,16 @@ internal class MessageLinkFix :
     Fix(
         "MessageLinkFix",
         "Message links",
-        "Opens message links in Aliucord instead of the Discord app or website, " +
+        "Opens message, channel and forum post links in Aliucord instead of the Discord app or website, " +
             "and stops them from sometimes jumping to the end of the chat.",
     ) {
     @Volatile private var jump: Jump? = null
+    private val fetching: MutableSet<Long> = Collections.synchronizedSet(HashSet())
+    private val retrying: MutableSet<Long> = Collections.synchronizedSet(HashSet())
+
+    private val storeCompanion by lazy {
+        StoreStream::class.java.getField("Companion").get(null) as StoreStream.Companion
+    }
 
     private val activeScrollField by lazy {
         WidgetChatListAdapter::class.java.getDeclaredField("scrollToWithHighlight").apply {
@@ -38,7 +51,12 @@ internal class MessageLinkFix :
             ),
             PreHook { call ->
                 val destination = MessageLink.parse(call.args[1] as? String ?: return@PreHook) ?: return@PreHook
-                StoreStream.getMessagesLoader().jumpToMessage(destination.channelId, destination.messageId)
+                val messageId = destination.messageId
+                if (messageId != null) {
+                    StoreStream.getMessagesLoader().jumpToMessage(destination.channelId, messageId)
+                } else {
+                    openChannel(call.args[0] as Context, destination.channelId)
+                }
                 call.result = null
             },
         )
@@ -50,7 +68,17 @@ internal class MessageLinkFix :
             PreHook { call ->
                 val channelId = call.args[0] as Long
                 val messageId = call.args[1] as Long
-                jump = if (channelId > 0 && messageId > 1) {
+                // Discord only waits 1-3 seconds for the channel to show up in
+                // the store and never fetches it, so jumping to a forum post or
+                // thread that isn't loaded silently does nothing. Fetch it first.
+                if (channelId > 0 && messageId > 1 && !retrying.remove(channelId) &&
+                    StoreStream.getChannels().getChannel(channelId) == null
+                ) {
+                    if (fetching.add(channelId)) Utils.threadPool.execute { fetchThenJump(channelId, messageId) }
+                    call.result = null
+                    return@PreHook
+                }
+                jump =if (channelId > 0 && messageId > 1) {
                     Jump(channelId, SystemClock.uptimeMillis() + GUARD_MILLIS)
                 } else {
                     null
@@ -101,8 +129,40 @@ internal class MessageLinkFix :
         )
     }
 
+    /** Same as Discord's own discord://app/channels route, minus its forum experiment check. */
+    private fun openChannel(context: Context, channelId: Long) {
+        val selector = ChannelSelector.getInstance()
+        if (StoreStream.getChannels().getChannel(channelId) != null) {
+            selector.findAndSet(context, channelId)
+        } else {
+            // Threads and forum posts the client hasn't loaded yet: fetch the
+            // channel from the API first, then select it.
+            selector.findAndSetThread(context, channelId)
+        }
+        storeCompanion.tabsNavigation.selectHomeTab(StoreNavigation.PanelAction.CLOSE, true)
+    }
+
+    private fun fetchThenJump(channelId: Long, messageId: Long) {
+        try {
+            val (channel, _) = RestAPI.getApi().getChannel(channelId).await()
+            if (channel != null && ChannelUtils.H(channel)) {
+                val selector = ChannelSelector.getInstance()
+                selector.dispatcher.schedule { selector.stream.handleThreadCreateOrUpdate(channel) }
+            }
+        } catch (error: Throwable) {
+            logger.error("Could not load channel $channelId", error)
+        } finally {
+            fetching.remove(channelId)
+            // Jump either way: if the fetch failed, Discord's own behavior is unchanged.
+            retrying.add(channelId)
+            StoreStream.getMessagesLoader().jumpToMessage(channelId, messageId)
+        }
+    }
+
     override fun stop(context: Context) {
         patcher.unpatchAll()
+        fetching.clear()
+        retrying.clear()
         jump = null
     }
 
