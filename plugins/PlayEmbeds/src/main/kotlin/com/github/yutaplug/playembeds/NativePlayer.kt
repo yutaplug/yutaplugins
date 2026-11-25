@@ -265,10 +265,24 @@ internal class FullscreenOverlay(context: Context, private val onBack: () -> Uni
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_UP) onBack()
+            if (event.action == KeyEvent.ACTION_UP) {
+                // Back closes an open picker first, then fullscreen.
+                val picker = findViewWithTag<View>(OVERLAY_PICKER_TAG)
+                if (picker != null) removeView(picker) else onBack()
+            }
             return true
         }
         return super.dispatchKeyEvent(event)
+    }
+}
+
+/** Marks the picker [FullscreenOverlay] closes on Back. */
+internal const val OVERLAY_PICKER_TAG = "PlayEmbedsOverlayPicker"
+
+/** A ScrollView no taller than [maxHeight], for a picker's list. */
+internal class MaxHeightScrollView(context: Context, private val maxHeight: Int) : android.widget.ScrollView(context) {
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(maxHeight, MeasureSpec.AT_MOST))
     }
 }
 

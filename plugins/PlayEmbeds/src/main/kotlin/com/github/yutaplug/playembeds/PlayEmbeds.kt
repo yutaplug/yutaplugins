@@ -1305,22 +1305,86 @@ class PlayEmbeds : Plugin() {
         return needed > bar.width
     }
 
+    /**
+     * Makes room in an overflowing control bar, keeping the seekbar long:
+     * 1. the seekbar gets its own full-width row above the bar;
+     * 2. the position and duration move into that row, on either side of the
+     *    seekbar, leaving the bar with play and the buttons;
+     * 3. only if that still doesn't fit (a very narrow player), the buttons move
+     *    to a strip in the player's top-right corner, the fullscreen button last.
+     */
     private fun wrapBarButtons(bar: LinearLayout) {
         if (!barOverflows(bar)) return
         fitSeekbar(bar, force = true)
         if (!barOverflows(bar)) return
-        val row = (bar.parent as? ViewGroup)?.findViewWithTag<LinearLayout>(SEEKBAR_ROW_TAG) ?: return
-        val duration = bar.findViewById<View>(id("exo_duration")) ?: return
-        val start = bar.indexOfChild(duration) + 1
+        val host = bar.parent as? RelativeLayout ?: return
+        val row = host.findViewWithTag<LinearLayout>(SEEKBAR_ROW_TAG)
+        val timeBar = row?.findViewById<View>(id("exo_progress"))
+        if (row != null && timeBar != null) {
+            bar.findViewById<View>(id("exo_position"))?.takeIf { it.parent === bar }?.let { position ->
+                val params = position.layoutParams
+                bar.removeView(position)
+                row.addView(position, row.indexOfChild(timeBar), params)
+            }
+            bar.findViewById<View>(id("exo_duration"))?.takeIf { it.parent === bar }?.let { duration ->
+                val params = duration.layoutParams
+                bar.removeView(duration)
+                row.addView(duration, row.indexOfChild(timeBar) + 1, params)
+            }
+            if (!barOverflows(bar)) return
+        }
+        // The buttons are everything after the spacer that took the seekbar's place.
+        var start = -1
+        for (index in 0 until bar.childCount) {
+            if (bar.getChildAt(index) is Space) start = index + 1
+        }
         if (start <= 0) return
         // A plain loop: IntRange.map iterates Discord's stripped IntRange and crashes (ClassCastException).
         val buttons = ArrayList<View>()
-        for (index in start until bar.childCount) buttons.add(bar.getChildAt(index))
+        val durationId = id("exo_duration")
+        for (index in start until bar.childCount) {
+            val child = bar.getChildAt(index)
+            if (child.id != durationId) buttons.add(child)
+        }
+        val fullscreen = buttons.firstOrNull { it.tag == FULLSCREEN_BUTTON_TAG }
+        val strip = topButtonStrip(host, bar)
         buttons.forEach { button ->
+            if (button === fullscreen) return@forEach
             val params = button.layoutParams
             bar.removeView(button)
-            row.addView(button, params)
+            strip.addView(button, params)
         }
+        if (fullscreen != null) {
+            bar.post {
+                if (!barOverflows(bar) || fullscreen.parent !== bar) return@post
+                val params = fullscreen.layoutParams
+                bar.removeView(fullscreen)
+                strip.addView(fullscreen, params)
+            }
+        }
+    }
+
+    /** The top-right strip [wrapBarButtons] moves buttons to, with the control bar's background. */
+    private fun topButtonStrip(host: RelativeLayout, bar: LinearLayout): LinearLayout {
+        host.findViewWithTag<LinearLayout>(TOP_BUTTONS_TAG)?.let { return it }
+        val context = host.context
+        val strip = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            tag = TOP_BUTTONS_TAG
+            background = bar.background?.constantState?.newDrawable()
+            // The buttons' own start margins space them from the strip's start.
+            val vertical = dp(context, 8)
+            setPadding(0, vertical, bar.paddingRight, vertical)
+        }
+        host.addView(
+            strip,
+            RelativeLayout.LayoutParams(WRAP, WRAP).apply {
+                addRule(RelativeLayout.ALIGN_PARENT_TOP)
+                addRule(RelativeLayout.ALIGN_PARENT_END)
+            },
+        )
+        return strip
     }
 
     private class QualityControl(
@@ -1352,11 +1416,12 @@ class PlayEmbeds : Plugin() {
             return
         }
         val current = control.pending ?: control.media.quality
-        SelectDialog().apply {
-            title = "Video quality"
-            items = qualities.map { if (it == current) "✓ ${it}p" else "${it}p" }.toTypedArray()
-            onResultListener = { which -> qualities.getOrNull(which)?.let { switchQuality(control, it) } }
-        }.show(fragmentManagerFor(control.label.context), "PlayEmbedsQuality")
+        showPicker(
+            control.label,
+            "PlayEmbedsQuality",
+            "Video quality",
+            qualities.map { if (it == current) "✓ ${it}p" else "${it}p" }.toTypedArray(),
+        ) { which -> qualities.getOrNull(which)?.let { switchQuality(control, it) } }
     }
 
     private fun switchQuality(control: QualityControl, quality: Int) {
@@ -1456,22 +1521,19 @@ class PlayEmbeds : Plugin() {
 
     private fun showSpeedPicker(view: View, player: AppMediaPlayer) {
         val extras = extrasFor(player)
-        SelectDialog().apply {
-            title = "Playback speed"
-            items = PLAYBACK_SPEEDS.map { speed ->
-                val label = if (speed == 1f) "Normal" else speedLabel(speed)
-                if (speed == extras.speed) "✓ $label" else label
-            }.toTypedArray()
-            onResultListener = { which ->
-                PLAYBACK_SPEEDS.getOrNull(which)?.let { speed ->
-                    if (NativePlayers.setSpeed(player, speed)) {
-                        extras.speed = speed
-                    } else {
-                        Utils.showToast("Couldn't change the speed", true)
-                    }
+        val labels = PLAYBACK_SPEEDS.map { speed ->
+            val label = if (speed == 1f) "Normal" else speedLabel(speed)
+            if (speed == extras.speed) "✓ $label" else label
+        }.toTypedArray()
+        showPicker(view, "PlayEmbedsSpeed", "Playback speed", labels) { which ->
+            PLAYBACK_SPEEDS.getOrNull(which)?.let { speed ->
+                if (NativePlayers.setSpeed(player, speed)) {
+                    extras.speed = speed
+                } else {
+                    Utils.showToast("Couldn't change the speed", true)
                 }
             }
-        }.show(fragmentManagerFor(view.context), "PlayEmbedsSpeed")
+        }
     }
 
     /** 0.25 → "0.25x", 2 → "2x". */
@@ -1498,16 +1560,13 @@ class PlayEmbeds : Plugin() {
         }
         val current = extras.pendingTrack ?: extras.track
         val names = listOf("Off") + tracks.map { it.name }
-        SelectDialog().apply {
-            title = "Captions"
-            items = names.mapIndexed { index, name ->
-                val selected = if (index == 0) current == null else tracks[index - 1] === current
-                if (selected) "✓ $name" else name
-            }.toTypedArray()
-            onResultListener = { which ->
-                if (which == 0) selectCaptions(extras, null) else tracks.getOrNull(which - 1)?.let { selectCaptions(extras, it) }
-            }
-        }.show(fragmentManagerFor(view.context), "PlayEmbedsCaptions")
+        val labels = names.mapIndexed { index, name ->
+            val selected = if (index == 0) current == null else tracks[index - 1] === current
+            if (selected) "✓ $name" else name
+        }.toTypedArray()
+        showPicker(view, "PlayEmbedsCaptions", "Captions", labels) { which ->
+            if (which == 0) selectCaptions(extras, null) else tracks.getOrNull(which - 1)?.let { selectCaptions(extras, it) }
+        }
     }
 
     /** Looks up [url]'s caption tracks once per player; [done] gets them (null when the lookup failed). */
@@ -2381,6 +2440,83 @@ class PlayEmbeds : Plugin() {
      * screen is created, so after closing settings or the image viewer it points at a closed screen,
      * and Discord's dialogs silently refuse to show there.
      */
+    /**
+     * A single-choice list. Uses Aliucord's SelectDialog, except in the borrowed
+     * fullscreen screen (ProxyBillingActivity), a plain Activity without fragments,
+     * where a dialog would open on Discord's screen behind it instead: there it's
+     * Discord's own selector dialog layout drawn over the player.
+     */
+    private fun showPicker(view: View, tag: String, title: String, items: Array<String>, onPick: (Int) -> Unit) {
+        if (activityFrom(view.context) !is FragmentActivity && showOverlayPicker(view, title, items, onPick)) return
+        SelectDialog().apply {
+            this.title = title
+            this.items = items
+            onResultListener = onPick
+        }.show(fragmentManagerFor(view.context), tag)
+    }
+
+    /** Discord's dialog_simple_selector in the [FullscreenOverlay] around [view]; false when there's none. */
+    private fun showOverlayPicker(view: View, title: String, items: Array<String>, onPick: (Int) -> Unit): Boolean {
+        var parent = view.parent
+        while (parent != null && parent !is FullscreenOverlay) parent = parent.parent
+        val overlay = parent as? FullscreenOverlay ?: return false
+        overlay.findViewWithTag<View>(OVERLAY_PICKER_TAG)?.let { overlay.removeView(it) }
+        val layoutId = Utils.getResId("dialog_simple_selector", "layout")
+        val itemId = Utils.getResId("dialog_simple_selector_item", "layout")
+        if (layoutId <= 0 || itemId <= 0) return false
+        val context = view.context
+        val inflater = LayoutInflater.from(context)
+        val dialog = try {
+            inflater.inflate(layoutId, overlay, false) as? LinearLayout
+        } catch (e: Throwable) {
+            DebugLog.log("picker: couldn't inflate: $e")
+            null
+        } ?: return false
+        val list = dialog.findViewById<View>(id("dialog_selections")) ?: return false
+        val scrim = FrameLayout(context).apply {
+            tag = OVERLAY_PICKER_TAG
+            setBackgroundColor(PICKER_SCRIM)
+            isClickable = true
+        }
+        val close = { overlay.removeView(scrim) }
+        scrim.setOnClickListener { close() }
+        dialog.findViewById<TextView>(id("dialog_title"))?.text = title
+        dialog.findViewById<View>(id("dialog_cancel"))?.setOnClickListener { close() }
+        val rows = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val ripple = TypedValue()
+        val hasRipple = context.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+        items.forEachIndexed { index, label ->
+            val row = try {
+                inflater.inflate(itemId, rows, false) as? TextView
+            } catch (_: Throwable) {
+                null
+            } ?: return@forEachIndexed
+            row.text = label
+            if (hasRipple) row.setBackgroundResource(ripple.resourceId)
+            row.setOnClickListener {
+                close()
+                onPick(index)
+            }
+            rows.addView(row)
+        }
+        val scroll = MaxHeightScrollView(context, (overlay.height * PICKER_MAX_HEIGHT).toInt().coerceAtLeast(dp(context, 120)))
+        scroll.addView(rows)
+        val index = dialog.indexOfChild(list)
+        dialog.removeView(list)
+        dialog.addView(scroll, index, LinearLayout.LayoutParams(MATCH, WRAP))
+        dialog.background = GradientDrawable().apply {
+            cornerRadius = dp(context, 8).toFloat()
+            setColor(themedColor(context, "colorBackgroundPrimary", Color.DKGRAY))
+        }
+        dialog.clipToOutline = true
+        // Taps inside the dialog don't reach the scrim, which closes it.
+        dialog.isClickable = true
+        val width = minOf(dp(context, PICKER_MAX_WIDTH_DP), overlay.width - dp(context, 32))
+        scrim.addView(dialog, FrameLayout.LayoutParams(width, WRAP, Gravity.CENTER))
+        overlay.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
+        return true
+    }
+
     private fun fragmentManagerFor(context: Context): FragmentManager {
         val activity = activityFrom(context) as? FragmentActivity
         return activity?.supportFragmentManager ?: Utils.appActivity.supportFragmentManager
@@ -2494,6 +2630,10 @@ class PlayEmbeds : Plugin() {
         private const val LOADING_TICK_MS = 500L
         private const val FULLSCREEN_BUTTON_TAG = "PlayEmbedsFullscreen"
         private const val SEEKBAR_ROW_TAG = "PlayEmbedsSeekbarRow"
+        private const val TOP_BUTTONS_TAG = "PlayEmbedsTopButtons"
+        private const val PICKER_SCRIM = 0x99000000.toInt()
+        private const val PICKER_MAX_HEIGHT = 0.5f
+        private const val PICKER_MAX_WIDTH_DP = 400
         private val PLAYBACK_SPEEDS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
         private const val CAPTION_TICK_MS = 100L
         private const val CAPTION_BACKGROUND = 0xBF000000.toInt()

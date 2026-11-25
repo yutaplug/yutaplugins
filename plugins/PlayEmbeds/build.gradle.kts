@@ -1,9 +1,13 @@
-version = "1.0.20"
+version = "1.0.21"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.21
+        * When the controls don't fit, the seekbar keeps a full-width row with the times beside it, and the buttons stay at the bottom
+        * The captions and speed menus open in rotated fullscreen
+
         # 1.0.20
         * Captions button in YouTube players, including auto-generated captions; the language you pick turns on in later videos too
         * Playback speed button in YouTube players, from 0.25x to 2x
