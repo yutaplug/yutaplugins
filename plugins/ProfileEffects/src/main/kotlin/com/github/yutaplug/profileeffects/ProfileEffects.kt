@@ -449,7 +449,7 @@ class ProfileEffects : Plugin() {
     private fun now() = System.nanoTime() / 1_000_000L
 
     override fun stop(context: Context) {
-        capture?.active = false
+        capture?.uninstall()
         capture = null
         repository?.close()
         repository = null

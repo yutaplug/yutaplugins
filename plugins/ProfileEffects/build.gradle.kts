@@ -1,8 +1,14 @@
-version = "1.1.2"
+version = "1.1.3"
 description = "Backports Discord profile effects, profile frames, profile themes, role gradients, and display name fonts and colors."
 aliucord {
     changelog.set(
         """
+        # 1.1.3
+        * Fix the app crashing at launch on Android 7
+        * Match Discord's look for every display name effect, including Prism and Gummy
+        * Match Discord's display name font sizes, and use 8Bit's medium weight
+        * Use the right font weights for Monkey Bars and Modern on Android 7 and older
+        * List Prism and Gummy in the settings
         # 1.1.2
         * Fix display name styles in reply previews only showing some of the time
         * Fix display name styles missing for users Discord hadn't cached

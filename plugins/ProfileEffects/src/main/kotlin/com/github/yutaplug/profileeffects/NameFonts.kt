@@ -28,13 +28,23 @@ internal object NameFonts {
     private const val GOOGLE =
         "https://raw.githubusercontent.com/google/fonts/6ebe737e44fd64ee736bbc6feed6136a6dbfd222/ofl/"
 
+    /** The type foundries' own repositories, for static files at Discord's weight on Android 7 and older. */
+    private const val PLAYPEN =
+        "https://raw.githubusercontent.com/TypeTogether/Playpen-Sans/fe37f87a92827003ac26b2348093e00e914d9cfd/fonts/ttf/"
+    private const val MUSEO_MODERNO =
+        "https://raw.githubusercontent.com/Omnibus-Type/MuseoModerno/037e64e09440633e52e66fef19f7625b95996bcb/fonts/ttf/"
+    private const val PIXELIFY =
+        "https://raw.githubusercontent.com/eifetx/Pixelify-Sans/39df74aba80df8157546034b878e8be1eb565ced/fonts/ttf/"
+
     private const val RETRY_AFTER = 5 * 60 * 1000L
     private const val MAX_FILE = 4 * 1024 * 1024
 
     /**
-     * [file] is the mirror's file. [static] is a Google Fonts file at Discord's weight; [variable]
-     * a Google Fonts variable font set to [weight] on Android 8+. Older Android versions, and
-     * failed downloads, use [file]. [spacing] is Discord's letter spacing, in em.
+     * [variable] is a Google Fonts variable font, set to [weight] on Android 8+ (older versions can't
+     * set font weights). Otherwise [static], a full URL to a file at Discord's weight, is used, and
+     * [file], the mirror's file, when neither works. [spacing] is Discord's letter spacing, in em.
+     * [scale] makes glyphs the size Discord's own file draws them: some of Discord's files have more
+     * units per em than ours (Mainframe 1220, Monkey Bars 1100, Modern 1086 against 1000).
      */
     private class Spec(
         val file: String,
@@ -42,21 +52,41 @@ internal object NameFonts {
         val variable: String? = null,
         val weight: Int = 400,
         val spacing: Float = 0f,
+        val scale: Float = 1f,
     )
 
     // IDs 1, 2, 5 and 9 are retired: Discord draws them in its default font, and so does this plugin.
     private val specs = mapOf(
         3 to Spec("CherryBomb.ttf", spacing = 0.04f), // Sakura, 400
         4 to Spec("Chicle.ttf"), // Jellybean, 400
-        6 to Spec("MuseoModerno.ttf", variable = "museomoderno/MuseoModerno%5Bwght%5D.ttf", weight = 500, spacing = 0.01f),
+        6 to Spec(
+            "MuseoModerno.ttf",
+            static = MUSEO_MODERNO + "MuseoModerno-Medium.ttf",
+            variable = "museomoderno/MuseoModerno%5Bwght%5D.ttf",
+            weight = 500,
+            spacing = 0.01f,
+            scale = 1000f / 1086f,
+        ),
         7 to Spec("NeoCastel.otf", spacing = 0.02f), // Medieval, 400
-        8 to Spec("Pixelify.ttf", spacing = 0.02f), // 8Bit, 400
+        8 to Spec( // 8Bit
+            "Pixelify.ttf",
+            static = PIXELIFY + "PixelifySans-Medium.ttf",
+            variable = "pixelifysans/PixelifySans%5Bwght%5D.ttf",
+            weight = 500,
+            spacing = 0.02f,
+        ),
         10 to Spec("Sinistre.otf", spacing = 0.01f), // Vampyre, 400
-        12 to Spec("ZillaSlab.ttf", static = "zillaslab/ZillaSlab-SemiBold.ttf", spacing = 0.03f), // Tempo, 600
-        13 to Spec("Playpen.ttf", variable = "playpensans/PlaypenSans%5Bwght%5D.ttf", weight = 700), // Monkey Bars
-        14 to Spec("Orbitron.ttf", spacing = 0.03f), // Mainframe; the mirror's file is the 700 cut
+        12 to Spec("ZillaSlab.ttf", static = GOOGLE + "zillaslab/ZillaSlab-SemiBold.ttf", spacing = 0.03f), // Tempo, 600
+        13 to Spec( // Monkey Bars
+            "Playpen.ttf",
+            static = PLAYPEN + "PlaypenSans-Bold.ttf",
+            variable = "playpensans/PlaypenSans%5Bwght%5D.ttf",
+            weight = 700,
+            scale = 1000f / 1100f,
+        ),
+        14 to Spec("Orbitron.ttf", spacing = 0.03f, scale = 1000f / 1220f), // Mainframe; the mirror's file is the 700 cut
         15 to Spec("NewRocker.ttf"), // Headbang, 400
-        16 to Spec("Kalam.ttf", static = "kalam/Kalam-Bold.ttf"), // Journal, 700
+        16 to Spec("Kalam.ttf", static = GOOGLE + "kalam/Kalam-Bold.ttf"), // Journal, 700
         // Discord's Pricedown is licensed to Discord only; Teko at 700 stands in for it.
         17 to Spec("Teko.ttf"),
     )
@@ -74,6 +104,9 @@ internal object NameFonts {
 
     /** Discord's extra letter spacing for this font, in em. */
     fun spacing(fontId: Int) = specs[fontId]?.spacing ?: 0f
+
+    /** How much smaller or larger than the name's own size Discord draws this font. */
+    fun scale(fontId: Int) = specs[fontId]?.scale ?: 1f
 
     /** Called on the main thread whenever a font finishes loading. */
     fun setListener(listener: (() -> Unit)?) {
@@ -129,7 +162,7 @@ internal object NameFonts {
         }
         if (spec.static != null) {
             try {
-                return typeface(fetch(dir, GOOGLE + spec.static, "static-" + spec.file))
+                return typeface(fetch(dir, spec.static, "static-" + spec.file))
             } catch (_: Exception) {
                 // Use the mirror's file below.
             }

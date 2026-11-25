@@ -46,7 +46,7 @@ class ProfileEffectsSettings(private val settings: SettingsAPI) : SettingsPage()
         toggle(
             Prefs.NAME_COLORS,
             "Display name colors",
-            "Show display name colors and effects (gradient, neon, toon, pop, glow).",
+            "Show display name colors and effects (gradient, glow, neon, toon, pop, prism, gummy).",
         )
         toggle(
             Prefs.NAME_COLORS_IN_LISTS,
