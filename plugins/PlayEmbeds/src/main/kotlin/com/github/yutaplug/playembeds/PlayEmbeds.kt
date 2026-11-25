@@ -65,6 +65,7 @@ import com.google.android.exoplayer2.ui.PlayerView
 import de.robv.android.xposed.XposedBridge
 import java.io.File
 import java.lang.ref.WeakReference
+import java.util.Collections
 import java.util.WeakHashMap
 
 @AliucordPlugin(requiresRestart = true)
@@ -81,6 +82,7 @@ class PlayEmbeds : Plugin() {
 
     /** Keyed by the player root currently moved into a fullscreen overlay. */
     private val fullscreenPlayers = WeakHashMap<View, FullscreenState>()
+    private val watchedBars: MutableSet<LinearLayout> = Collections.newSetFromMap(WeakHashMap())
 
     /** Keyed by each player's ExoPlayer listener (`AppMediaPlayer.g`), which receives errors. */
     private val errorCallbacks = WeakHashMap<Any, () -> Unit>()
@@ -1229,7 +1231,7 @@ class PlayEmbeds : Plugin() {
         button.setOnClickListener { onClick() }
         val size = dp(context, 24)
         val fullscreen = bar.findViewWithTag<View>(FULLSCREEN_BUTTON_TAG)
-        val index = if (fullscreen != null) bar.indexOfChild(fullscreen) else bar.childCount
+        val index = bar.indexOfChild(fullscreen).takeIf { it >= 0 } ?: bar.childCount
         bar.addView(button, index, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
         fitSeekbar(bar)
         return button
@@ -1241,9 +1243,10 @@ class PlayEmbeds : Plugin() {
      * controls are added it would shrink to nothing in an embed, so it moves to
      * its own row just above the bar, as wide as the player.
      */
-    private fun fitSeekbar(bar: LinearLayout) {
+    private fun fitSeekbar(bar: LinearLayout, force: Boolean = false) {
+        watchBarWidth(bar)
         val timeBar = bar.findViewById<View>(id("exo_progress")) ?: return
-        if (timeBar.parent !== bar || bar.childCount - STOCK_BAR_CHILDREN < 2) return
+        if (timeBar.parent !== bar || (!force && bar.childCount - STOCK_BAR_CHILDREN < 2)) return
         val host = bar.parent as? RelativeLayout ?: return
         val context = bar.context
         if (bar.id == View.NO_ID) bar.id = View.generateViewId()
@@ -1252,13 +1255,61 @@ class PlayEmbeds : Plugin() {
         // Keeps the duration and the buttons at the end of the row, where they were.
         bar.addView(Space(context), index, LinearLayout.LayoutParams(0, 0, 1f))
         val gap = dp(context, 4)
-        val row = FrameLayout(context).apply {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            tag = SEEKBAR_ROW_TAG
             background = bar.background?.constantState?.newDrawable()
             setPadding(bar.paddingLeft, gap, bar.paddingRight, 0)
-            addView(timeBar, FrameLayout.LayoutParams(MATCH, WRAP))
+            addView(timeBar, LinearLayout.LayoutParams(0, WRAP, 1f))
         }
         host.addView(row, RelativeLayout.LayoutParams(MATCH, WRAP).apply { addRule(RelativeLayout.ABOVE, bar.id) })
         bar.setPadding(bar.paddingLeft, gap, bar.paddingRight, bar.paddingBottom)
+    }
+
+    /**
+     * A narrow (portrait) video can be too thin for the control bar, pushing the
+     * buttons at its end (fullscreen, download, quality) out of the player where
+     * they can't be tapped. Once the bar overflows, the seekbar moves to its own
+     * row and, if that's still not enough, the buttons move up beside it.
+     */
+    private fun watchBarWidth(bar: LinearLayout) {
+        if (!watchedBars.add(bar)) return
+        bar.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+            val target = view as LinearLayout
+            if (barOverflows(target)) target.post { wrapBarButtons(target) }
+        }
+    }
+
+    private fun barOverflows(bar: LinearLayout): Boolean {
+        if (bar.width <= 0) return false
+        val timeBarId = id("exo_progress")
+        var needed = bar.paddingLeft + bar.paddingRight
+        for (index in 0 until bar.childCount) {
+            val child = bar.getChildAt(index)
+            if (child.visibility == View.GONE || child is Space) continue
+            val params = child.layoutParams as? ViewGroup.MarginLayoutParams
+            needed += (params?.marginStart ?: 0) + (params?.marginEnd ?: 0)
+            // The seekbar gets whatever is left, so count a usable minimum for it.
+            needed += if (child.id == timeBarId) dp(bar.context, MIN_SEEKBAR_DP) else child.measuredWidth
+        }
+        return needed > bar.width
+    }
+
+    private fun wrapBarButtons(bar: LinearLayout) {
+        if (!barOverflows(bar)) return
+        fitSeekbar(bar, force = true)
+        if (!barOverflows(bar)) return
+        val row = (bar.parent as? ViewGroup)?.findViewWithTag<LinearLayout>(SEEKBAR_ROW_TAG) ?: return
+        val duration = bar.findViewById<View>(id("exo_duration")) ?: return
+        val start = bar.indexOfChild(duration) + 1
+        if (start <= 0) return
+        val buttons = (start until bar.childCount).map { bar.getChildAt(it) }
+        buttons.forEach { button ->
+            val params = button.layoutParams
+            bar.removeView(button)
+            row.addView(button, params)
+        }
     }
 
     private class QualityControl(
@@ -2169,6 +2220,10 @@ class PlayEmbeds : Plugin() {
         private const val MIN_VISIBLE_FRACTION = 0.25f
         private const val LOADING_TICK_MS = 500L
         private const val FULLSCREEN_BUTTON_TAG = "PlayEmbedsFullscreen"
+        private const val SEEKBAR_ROW_TAG = "PlayEmbedsSeekbarRow"
+
+        /** The narrowest the seekbar may get in the control bar before it moves to its own row. */
+        private const val MIN_SEEKBAR_DP = 64
 
         /** Children of Discord's exo_player_control_view bar: play, pause, position, seekbar, duration. */
         private const val STOCK_BAR_CHILDREN = 5

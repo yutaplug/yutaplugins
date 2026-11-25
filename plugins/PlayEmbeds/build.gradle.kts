@@ -1,9 +1,12 @@
-version = "1.0.17"
+version = "1.0.18"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.18
+        * On narrow (portrait) videos, the fullscreen, download and quality buttons move up beside the seekbar instead of being cut off
+
         # 1.0.17
         * On Android 7 and older, rotating fullscreen turns the video sideways instantly instead of rotating the screen
 
