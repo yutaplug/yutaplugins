@@ -1,23 +1,11 @@
 package com.github.yutaplug.logcat
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.ContentValues
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Typeface
-import android.net.Uri
-import android.media.MediaScannerConnection
-import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
 import android.text.InputType
 import android.util.TypedValue
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.core.content.FileProvider
 import com.aliucord.Utils
 import com.aliucord.fragments.ConfirmDialog
 import com.aliucord.fragments.InputDialog
@@ -26,11 +14,6 @@ import com.aliucord.fragments.SettingsPage
 import com.aliucord.utils.DimenUtils
 import com.discord.views.CheckedSetting
 import com.lytefast.flexinput.R
-import java.io.File
-import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class LogcatSettings(private val plugin: Logcat) : SettingsPage() {
     private var statusView: TextView? = null
@@ -52,6 +35,28 @@ class LogcatSettings(private val plugin: Logcat) : SettingsPage() {
                 "Lines from before the plugin started are only partly available, depending on how much your " +
                 "device keeps. Some ROMs (MIUI/HyperOS, some Huawei and others) turn logging off, so the log may stay empty unless you enable it in the " +
                 "developer or engineering settings.",
+        )
+
+        divider()
+        section("Debug log")
+        note(
+            "Discord's in-app debug log, with search, level filters and export. Unlike the old Debug Log page " +
+                "and the DebugLogEnhancer plugin, a big log can be shared or saved as a file. Its lines are also " +
+                "in the logcat captured here, tagged Discord.",
+        )
+        action("Open debug log", "Show Discord's debug log") {
+            Utils.openPageWithProxy(requireContext(), DebugLogPage())
+        }
+        add(
+            Utils.createCheckedSetting(
+                requireContext(),
+                CheckedSetting.ViewType.SWITCH,
+                "Replace Open Debug Log",
+                "Aliucord's Open Debug Log entry opens this page instead of Discord's old one",
+            ).apply {
+                isChecked = plugin.replaceDebugLog
+                setOnCheckedListener { plugin.replaceDebugLog = it }
+            },
         )
 
         divider()
@@ -128,130 +133,20 @@ class LogcatSettings(private val plugin: Logcat) : SettingsPage() {
         }
     }
 
-    /**
-     * The clipboard goes through a binder transaction with a size limit that differs per device, and
-     * a too-big clip throws, so try smaller and smaller parts of the log until one fits.
-     */
+    // The exports run on a background thread, after which the page may be gone, so they get the app context.
     private fun copy() {
-        val context = requireContext().applicationContext
-        Utils.threadPool.execute {
-            val attempts = CLIPBOARD_SIZES.map { plugin.export(context, it) }
-            Utils.mainThread.post {
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                var error: Throwable? = null
-                for ((i, text) in attempts.withIndex()) {
-                    try {
-                        clipboard.setPrimaryClip(ClipData.newPlainText("Discord logcat", text))
-                        Utils.showToast(if (i == 0) "Log copied" else "Copied the latest part of the log (too big for the clipboard)")
-                        return@post
-                    } catch (e: Throwable) {
-                        error = e
-                    }
-                }
-                Utils.showToast(
-                    "Could not copy the log: ${error?.message ?: error?.javaClass?.simpleName}. Try Share log instead.",
-                    true,
-                )
-            }
-        }
+        val app = requireContext().applicationContext
+        LogFiles.copy(app, "Discord logcat") { plugin.export(app, it) }
     }
 
-    /**
-     * Shares the log as a file through Discord's own FileProvider. Putting the text in EXTRA_TEXT
-     * goes over the binder size limit for big logs, and the share sheet then never opens.
-     */
     private fun share() {
-        val context = requireContext().applicationContext
-        Utils.threadPool.execute {
-            val result = try {
-                val dir = File(context.filesDir, "logcat-share").apply { mkdirs() }
-                dir.listFiles()?.forEach { it.delete() }
-                val file = File(dir, fileName())
-                file.writeText(plugin.export(context), Charsets.UTF_8)
-                FileProvider.getUriForFile(context, fileProviderAuthority(context), file)
-            } catch (e: Throwable) {
-                e
-            }
-            Utils.mainThread.post {
-                if (result is Throwable) {
-                    Utils.showToast("Could not share the log: ${result.message ?: result.javaClass.simpleName}", true)
-                    return@post
-                }
-                val uri = result as Uri
-                val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_SUBJECT, "Discord logcat")
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    clipData = ClipData.newRawUri("Discord logcat", uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                val activity = activity ?: Utils.appActivity
-                try {
-                    activity.startActivity(
-                        Intent.createChooser(intent, "Share log").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                    )
-                } catch (e: Throwable) {
-                    Utils.showToast("Could not share the log: ${e.message ?: e.javaClass.simpleName}", true)
-                }
-            }
-        }
+        val app = requireContext().applicationContext
+        LogFiles.share(this, "discord-logcat", "Discord logcat") { plugin.export(app) }
     }
-
-    /** Aliucord installs can rename the authority, so read it from the installed manifest. */
-    private fun fileProviderAuthority(context: Context): String {
-        @Suppress("DEPRECATION")
-        val providers = context.packageManager
-            .getPackageInfo(context.packageName, PackageManager.GET_PROVIDERS).providers
-        providers?.forEach { if (it.name == "androidx.core.content.FileProvider") return it.authority }
-        return "com.discord.file-provider"
-    }
-
-    private fun fileName() =
-        "discord-logcat-" + SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".txt"
 
     private fun save() {
-        val context = requireContext().applicationContext
-        Utils.threadPool.execute {
-            val result = try {
-                "Saved to Downloads/" + writeToDownloads(context, plugin.export(context))
-            } catch (e: Throwable) {
-                "Could not save the log: ${e.message ?: e.javaClass.simpleName}. Try Share log instead."
-            }
-            Utils.mainThread.post { Utils.showToast(result, true) }
-        }
-    }
-
-    private fun writeToDownloads(context: Context, text: String): String {
-        val name = fileName()
-        val bytes = text.toByteArray(Charsets.UTF_8)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val resolver = context.contentResolver
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                put(MediaStore.MediaColumns.IS_PENDING, 1)
-            }
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw IOException("could not create the file")
-            try {
-                (resolver.openOutputStream(uri) ?: throw IOException("could not open the file")).use { it.write(bytes) }
-                resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-                return resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use {
-                    if (it.moveToFirst()) it.getString(0) else name
-                } ?: name
-            } catch (e: Throwable) {
-                resolver.delete(uri, null, null)
-                throw e
-            }
-        }
-        @Suppress("DEPRECATION")
-        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("could not open Downloads")
-        val file = File(dir, name)
-        file.writeBytes(bytes)
-        MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), arrayOf("text/plain"), null)
-        return file.name
+        val app = requireContext().applicationContext
+        LogFiles.save(app, "discord-logcat") { plugin.export(app) }
     }
 
     private fun confirmClear() {
@@ -369,8 +264,5 @@ class LogcatSettings(private val plugin: Logcat) : SettingsPage() {
 
     companion object {
         private const val PREVIEW_LINES = 100
-
-        /** Sizes to try, largest first; the clipboard's binder buffer is ~1 MB shared with other calls. */
-        private val CLIPBOARD_SIZES = intArrayOf(100_000, 40_000, 15_000)
     }
 }

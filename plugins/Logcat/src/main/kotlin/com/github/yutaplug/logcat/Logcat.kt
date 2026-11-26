@@ -3,6 +3,10 @@ package com.github.yutaplug.logcat
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Parcelable
+import com.aliucord.Utils
+import com.discord.widgets.debugging.WidgetDebugging
+import de.robv.android.xposed.XC_MethodHook
 import com.aliucord.Logger
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -17,6 +21,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.regex.Pattern
+import b.a.d.j as ScreenLauncher
 
 @AliucordPlugin
 class Logcat : Plugin() {
@@ -80,12 +85,61 @@ class Logcat : Plugin() {
         set(value) {
             settings.setBool("networkTimings", value)
             if (!running) return
-            if (value) timings.start() else timings.stop()
+            if (value) {
+                timings.start()
+            } else {
+                timings.stop()
+                // NetworkTimings.stop() removes every hook of this plugin, this one too.
+                hookDebugLog()
+            }
         }
 
     fun networkSummary(): String = if (timings.running) timings.summary() else "Off"
 
+    /** Whether Aliucord's Open Debug Log entry (and anything else opening Discord's page) opens [DebugLogPage]. */
+    var replaceDebugLog: Boolean
+        get() = settings.getBool("replaceDebugLog", true)
+        set(value) = settings.setBool("replaceDebugLog", value)
+
+    private var debugLogHook: Runnable? = null
+
+    /**
+     * Every screen, Discord's Debug page included (Aliucord's entry uses Utils.openPage), is launched
+     * through this one method, so swap the screen there.
+     */
+    private fun hookDebugLog() {
+        debugLogHook?.run()
+        debugLogHook = try {
+            patcher.patch(
+                ScreenLauncher::class.java.getDeclaredMethod(
+                    "d",
+                    Context::class.java,
+                    Class::class.java,
+                    Parcelable::class.java,
+                ),
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (param.args[1] != WidgetDebugging::class.java || !replaceDebugLog) return
+                        val context = param.args[0] as? Context ?: return
+                        try {
+                            Utils.openPageWithProxy(context, DebugLogPage())
+                            param.result = null
+                        } catch (e: Throwable) {
+                            log.error("Could not open the debug log", e)
+                        }
+                    }
+                },
+            )
+        } catch (e: Throwable) {
+            log.error("Could not replace the Debug Log page", e)
+            null
+        }
+    }
+
     override fun start(context: Context) {
+        hookDebugLog()
+        // After every plugin has loaded, so DebugLogEnhancer can be stopped and unloaded cleanly.
+        Utils.mainThread.post { ReplacedPlugins.uninstall(log) }
         running = true
         startedAt = System.currentTimeMillis()
         openSession(context)
@@ -101,6 +155,8 @@ class Logcat : Plugin() {
 
     override fun stop(context: Context) {
         running = false
+        debugLogHook?.run()
+        debugLogHook = null
         timings.stop()
         DiagLog.sink = null
         DiagLog.clear()
