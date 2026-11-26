@@ -20,7 +20,6 @@ import com.github.yutaplug.fixes.messagewidth.MessageWidthFix
 import com.github.yutaplug.fixes.newbadges.NewBadgesFix
 import com.github.yutaplug.fixes.pasteimages.PasteImagesFix
 import com.github.yutaplug.fixes.qrlogin.QRCodeLogin
-import com.github.yutaplug.fixes.rawgithub.RawGitHubUpdater
 import com.github.yutaplug.fixes.searchhistory.SearchHistoryFix
 import com.github.yutaplug.fixes.searchmenu.SearchMessageMenuFix
 import com.github.yutaplug.fixes.screenrefresh.ScreenRefreshFix
@@ -29,6 +28,7 @@ import com.github.yutaplug.fixes.servernickname.ServerNicknameFix
 import com.github.yutaplug.fixes.serversettings.ServerSettingsFix
 import com.github.yutaplug.fixes.serversheet.ServerSheetFix
 import com.github.yutaplug.fixes.settings.SettingsFix
+import com.github.yutaplug.fixes.updater.UpdaterFix
 import com.github.yutaplug.fixes.validuser.ValidUserFix
 
 @AliucordPlugin(requiresRestart = true)
@@ -44,7 +44,7 @@ class Fixes : Plugin() {
         SearchHistoryFix(),
         ServerSheetFix(),
         SettingsFix(),
-        RawGitHubUpdater(),
+        UpdaterFix(),
         ForumTagFix(),
         ServerNicknameFix(),
         QRCodeLogin(),

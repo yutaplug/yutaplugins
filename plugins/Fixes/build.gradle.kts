@@ -1,4 +1,4 @@
-version = "1.0.7"
+version = "1.0.8"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,11 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.8
+        * GitHub updater: replaces the Raw GitHub updater, and Aliucord's own updater for both plugins and Aliucord itself. Updates come straight from GitHub at the latest commit, so new versions show up right away, and each download is checked before it replaces the old version, which fixes plugins asking to restart over and over
+        * GitHub updater: a new Updater screen, a message with an Update button when updates are found at startup, a restart prompt after updating, and a message saying what was updated after the restart, with its changelog
+        * GitHub updater: Aliucord's changelog now shows what changed, from the Aliucord documentation site
+
         # 1.0.7
         * New badges: new fix that shows newer Discord badges on profiles, like Account Age, which Discord didn't send to Aliucord
         * Paste images: new fix that lets you paste images from the clipboard into the chat box as attachments

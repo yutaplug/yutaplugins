@@ -17,6 +17,7 @@ import com.github.yutaplug.fixes.screenrefresh.RefreshLog
 import com.github.yutaplug.fixes.screenrefresh.ScreenRefreshFix
 import com.github.yutaplug.fixes.serversettings.ServerSettingsFix
 import com.github.yutaplug.fixes.serversettings.ServerSettingsOptions
+import com.github.yutaplug.fixes.updater.UpdaterFix
 import com.lytefast.flexinput.R
 
 class FixesSettings(private val plugin: Fixes) : SettingsPage() {
@@ -73,6 +74,9 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
             }
             if (fix is ScreenRefreshFix) {
                 row("Save screen refresh log", "ic_file_download_white_24dp") { saveRefreshLog(fix) }
+            }
+            if (fix is UpdaterFix) {
+                row("Open updater", "ic_file_download_white_24dp") { UpdaterFix.openUpdater(requireContext()) }
             }
             if (fix is ServerSettingsFix) {
                 row("Server settings options", "ic_settings_grey_a60_24dp") {
