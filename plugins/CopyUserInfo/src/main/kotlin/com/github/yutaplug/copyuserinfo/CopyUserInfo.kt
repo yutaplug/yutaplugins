@@ -90,15 +90,16 @@ class CopyUserInfo : Plugin() {
             container.removeViewAt(1)
             rows.addView(child)
         }
+        val scroll = ScrollView(ctx).apply {
+            isVerticalScrollBarEnabled = false
+            addView(rows)
+        }
         container.addView(
-            ScrollView(ctx).apply {
-                isVerticalScrollBarEnabled = false
-                addView(rows)
-            },
+            scroll,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT),
         )
 
-        fun row(text: String, iconAttr: String, onClick: () -> Unit) {
+        fun row(text: String, iconAttr: String, dismiss: Boolean = true, onClick: () -> Unit) {
             val tv = TextView(ctx, null, 0, Utils.getResId("UiKit_ListItem_Icon", "style"))
             tv.text = text
             tv.typeface = template.typeface
@@ -125,10 +126,25 @@ class CopyUserInfo : Plugin() {
             )
             tv.setOnClickListener {
                 onClick()
-                dialog.dismiss()
+                if (dismiss) dialog.dismiss()
             }
             rows.addView(tv)
         }
+
+        // One "Copy Options" row; tapping it swaps the menu's rows for the plugin's options.
+        row("Copy Options", "ic_copy", dismiss = false) {
+            rows.removeAllViews()
+            addOptions(dialog, info, ::row)
+            scroll.scrollTo(0, 0)
+        }
+    }
+
+    private fun addOptions(
+        dialog: UserActionsDialog,
+        info: Info,
+        addRow: (String, String, Boolean, () -> Unit) -> Unit,
+    ) {
+        fun row(text: String, iconAttr: String, onClick: () -> Unit) = addRow(text, iconAttr, true, onClick)
 
         row("Copy Username", "ic_copy") { copy(info.username) }
         row("Copy Display Name", "ic_copy") { copy(info.displayName) }
