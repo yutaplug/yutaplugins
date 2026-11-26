@@ -103,8 +103,27 @@ internal class CheckResult(
     val errors: Map<String, String>,
     /** Plugins without an updater URL. */
     val untracked: List<PluginInfo>,
+    /** Plugins the user chose not to check, by name. */
+    val ignored: List<PluginInfo> = emptyList(),
 ) {
     val count: Int get() = plugins.size + (if (core != null) 1 else 0)
+
+    /** This result with the plugins named in [names] moved to [ignored]. */
+    fun withIgnored(names: Collection<String>): CheckResult {
+        val moved = ArrayList(ignored.filter { it.name in names })
+        plugins.filter { it.name in names }.forEach { moved.add(PluginInfo(it.name, it.currentVersion, it.repo)) }
+        (upToDate + untracked).filter { it.name in names }.forEach { moved.add(it) }
+        errors.keys.filter { it in names && moved.none { m -> m.name == it } }.forEach { moved.add(PluginInfo(it, "?", null)) }
+        moved.sortBy { it.name.lowercase() }
+        return CheckResult(
+            time, core, latestCore, coreError,
+            plugins.filter { it.name !in names },
+            upToDate.filter { it.name !in names },
+            errors.filterKeys { it !in names },
+            untracked.filter { it.name !in names },
+            moved.distinctBy { it.name },
+        )
+    }
 }
 
 internal object Versions {

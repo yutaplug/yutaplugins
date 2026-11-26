@@ -3,9 +3,6 @@ package com.github.yutaplug.fixes.updater
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.graphics.Color
-import android.view.View
-import android.widget.TextView
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import com.aliucord.Logger
@@ -15,7 +12,6 @@ import com.aliucord.api.SettingsAPI
 import com.aliucord.fragments.ConfirmDialog
 import com.aliucord.utils.ChangelogUtils
 import com.github.yutaplug.fixes.OpenActivities
-import com.google.android.material.snackbar.Snackbar
 import com.lytefast.flexinput.R
 import java.util.Collections
 import java.util.concurrent.CopyOnWriteArrayList
@@ -27,7 +23,13 @@ internal object Updater {
     const val CHECK_ON_STARTUP = "updater_checkOnStartup"
     const val AUTO_PLUGINS = "updater_autoPlugins"
     const val AUTO_CORE = "updater_autoCore"
+    /** Whether to show the in-app update popups (default on). */
+    const val SHOW_POPUPS = "updater_showPopups"
+
+    /** Whether to also post Android notifications for updates (default off). */
+    const val SHOW_NOTIFICATIONS = "updater_showNotifications"
     private const val LAST_CHECK = "updater_lastCheck"
+    private const val IGNORED = "updater_ignored"
 
     @Volatile var settings: SettingsAPI? = null
 
@@ -67,6 +69,36 @@ internal object Updater {
 
     fun setting(key: String, default: Boolean): Boolean = settings?.getBool(key, default) ?: default
 
+    /** Plugins the user chose never to check for updates, by name. */
+    val ignored: List<String>
+        get() = try {
+            val array = org.json.JSONArray(settings?.getString(IGNORED, "[]") ?: "[]")
+            val list = ArrayList<String>(array.length())
+            for (i in 0 until array.length()) list.add(array.getString(i))
+            list
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+    fun isIgnored(name: String): Boolean = name in ignored
+
+    /** Adds or removes [name] from the ignored plugins, then checks again so the lists match. */
+    fun setIgnored(name: String, ignore: Boolean) {
+        val list = ignored.filter { it != name }.toMutableList()
+        if (ignore) list.add(name)
+        list.sortBy { it.lowercase() }
+        val array = org.json.JSONArray()
+        list.forEach { array.put(it) }
+        settings?.setString(IGNORED, array.toString())
+        // Hide a newly ignored plugin right away; un-ignoring needs a check to know its update.
+        result = result?.withIgnored(list)
+        changed()
+        if (checking) recheck = true else check()
+    }
+
+    /** Set when the ignored plugins change during a check, so another check runs after it. */
+    @Volatile private var recheck = false
+
     /** Aliucord's own auto-update settings, used as this updater's defaults. */
     fun aliucordSetting(key: String): Boolean = try {
         com.aliucord.Main.settings.getBool(key, false)
@@ -77,9 +109,19 @@ internal object Updater {
     val autoPlugins: Boolean get() = setting(AUTO_PLUGINS, aliucordSetting("AC_plugins_auto_update_enabled"))
     val autoCore: Boolean get() = setting(AUTO_CORE, aliucordSetting("AC_aliucord_auto_update_enabled"))
 
+    /** Callbacks of checks asked for while one was already running; they get that check's result. */
+    private val waiting = ArrayList<(CheckResult?) -> Unit>()
+
+    /**
+     * Checks for updates, then calls [then] on the main thread. If a check is already running, [then] gets
+     * that one's result instead of being dropped (the startup notice was lost that way).
+     */
     fun check(then: ((CheckResult?) -> Unit)? = null) {
-        if (checking) return
-        checking = true
+        synchronized(waiting) {
+            if (then != null) waiting.add(then)
+            if (checking) return
+            checking = true
+        }
         checkError = null
         changed()
         Utils.threadPool.execute {
@@ -96,9 +138,28 @@ internal object Updater {
                 files = checker.files()
                 settings?.setLong(LAST_CHECK, found.time)
             }
-            checking = false
+            val callbacks = synchronized(waiting) {
+                checking = false
+                ArrayList(waiting).also { waiting.clear() }
+            }
             changed()
-            if (then != null) Utils.mainThread.post { then(found) }
+            if (callbacks.isNotEmpty()) Utils.mainThread.post { callbacks.forEach { it(found) } }
+            if (recheck) {
+                recheck = false
+                Utils.mainThread.post { check() }
+            }
+        }
+    }
+
+    /** Installs [plugins] and [core] right away, from a popup or notification, then asks to restart. */
+    fun installNow(context: Context, plugins: List<PluginUpdate>, core: CoreUpdate?) {
+        val count = plugins.size + (if (core != null) 1 else 0)
+        Utils.showToast("Downloading ${Utils.pluralise(count, "update")}…")
+        install(plugins, core) { done ->
+            val failed = (plugins.map { it.name } + listOfNotNull(core?.let { Installed.CORE_NAME }))
+                .filter { name -> done.none { it.name == name } }
+            if (failed.isNotEmpty()) Utils.showToast("Couldn't update ${names(failed)}", true)
+            promptRestart(context, done)
         }
     }
 
@@ -271,86 +332,7 @@ internal object Updater {
             plugins.size <= 3 -> "Successfully updated ${names(plugins.map { "${it.name} ${it.to}" })}"
             else -> "Successfully updated ${plugins.size} plugins"
         }
-        snackbar(message, "Changelog", { showChangelog(it.context, updated) })
+        UpdatePopups.show(message, "Tap to see what's new.") { showChangelog(it.context, updated) }
+        UpdateNotifications.updated(message, updated)
     }
-
-    // region Snackbars
-
-    private class Notice(
-        val message: String,
-        val action: String,
-        val onAction: (View) -> Unit,
-        val onTap: ((View) -> Unit)?,
-        val duration: Int,
-    )
-
-    /** Shown one after another, so a new one never cuts off one the user hasn't read yet. */
-    // java.util, not Kotlin's ArrayDeque: Discord ships a stripped copy of that one.
-    private val notices = java.util.ArrayDeque<Notice>()
-    private var showing: Snackbar? = null
-
-    /**
-     * Shows a snackbar with Discord's colors once the app's screen is ready. [onTap] runs when the
-     * message itself is tapped. Falls back to a toast if no screen shows up.
-     */
-    fun snackbar(message: String, action: String, onAction: (View) -> Unit, onTap: ((View) -> Unit)? = null, duration: Int = 10_000) {
-        Utils.mainThread.post {
-            notices.add(Notice(message, action, onAction, onTap, duration))
-            if (showing == null) showNext(0)
-        }
-    }
-
-    private fun showNext(attempt: Int) {
-        val notice = notices.peekFirst() ?: return
-        Utils.mainThread.postDelayed({
-            val root = OpenActivities.front()?.findViewById<View>(android.R.id.content)
-            if (root == null || !root.isAttachedToWindow) {
-                if (attempt < 30) {
-                    showNext(attempt + 1)
-                } else {
-                    notices.pollFirst()
-                    Utils.showToast(notice.message, true)
-                    showNext(0)
-                }
-                return@postDelayed
-            }
-            notices.pollFirst()
-            try {
-                showing = makeSnackbar(root, notice).also { it.show() }
-            } catch (e: Throwable) {
-                logger.error("Could not show a snackbar", e)
-                Utils.showToast(notice.message, true)
-                showing = null
-                showNext(0)
-            }
-        }, if (attempt == 0) 2500L else 500L)
-    }
-
-    private fun makeSnackbar(root: View, notice: Notice): Snackbar {
-        val context = root.context
-        val bar = Snackbar.make(root, notice.message, notice.duration)
-        bar.setBackgroundTint(UpdaterUi.color(context, "colorBackgroundFloating", Color.rgb(24, 25, 28)))
-        bar.setTextColor(UpdaterUi.color(context, "colorHeaderPrimary", Color.WHITE))
-        bar.setActionTextColor(UpdaterUi.BRAND)
-        bar.setAction(notice.action) { notice.onAction(it) }
-        Utils.getResId("snackbar_text", "id").takeIf { it != 0 }?.let { bar.view.findViewById<TextView>(it)?.maxLines = 3 }
-        notice.onTap?.let { onTap ->
-            bar.view.setOnClickListener {
-                bar.dismiss()
-                onTap(it)
-            }
-        }
-        bar.addCallback(
-            object : Snackbar.Callback() {
-                override fun onDismissed(transientBottomBar: Snackbar?, event: Int) {
-                    if (showing === transientBottomBar) showing = null
-                    // Waits the usual 2.5 seconds, so the next one doesn't appear instantly in its place.
-                    showNext(0)
-                }
-            },
-        )
-        return bar
-    }
-
-    // endregion
 }

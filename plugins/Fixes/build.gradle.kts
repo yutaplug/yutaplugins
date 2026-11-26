@@ -1,4 +1,4 @@
-version = "1.0.10"
+version = "1.0.11"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,13 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.11
+        * New badges: turned off for now, since it could log you out of Discord. It will come back once it's safe
+        * GitHub updater: update messages are now a popup at the top of the app instead of a bar at the bottom, so they don't cover the chat or the navigation bar. Tap it to update, or swipe it away
+        * GitHub updater: new options to turn the popups off, or to also get a phone notification
+        * GitHub updater: ignore plugins you don't want updates for, from their update or under Ignored
+        * GitHub updater: checks again if GitHub couldn't be reached right after starting
+
         # 1.0.10
         * GitHub updater: no longer replaces a plugin you installed by hand before restarting with an older version from GitHub. It now shows that a restart is needed instead
         * GitHub updater: plugin updates show when the new version was released

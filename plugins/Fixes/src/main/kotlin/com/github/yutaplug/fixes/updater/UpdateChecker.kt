@@ -22,8 +22,19 @@ internal class UpdateChecker(private val logger: Logger) {
             val plugins = PluginManager.plugins.values.filter { !isCorePlugin(it) && it.__filename != null }
             val byRepo = LinkedHashMap<String, MutableList<Plugin>>()
             val untracked = ArrayList<PluginInfo>()
+            val ignoredNames = Updater.ignored.toSet()
+            val ignored = ArrayList<PluginInfo>()
             for (plugin in plugins) {
                 val url = plugin.manifest.updateUrl?.trim()
+                if (plugin.name in ignoredNames) {
+                    ignored.add(
+                        PluginInfo(
+                            plugin.name, plugin.manifest.version ?: "?", url?.let { GitHubFiles.parse(it)?.repoName },
+                            plugin.manifest.changelog, plugin.manifest.changelogMedia,
+                        ),
+                    )
+                    continue
+                }
                 if (url == null || url.isEmpty()) {
                     val loaded = plugin.manifest.version ?: "?"
                     val disk = UpdateInstaller.diskVersion(plugin.__filename!!)
@@ -110,7 +121,8 @@ internal class UpdateChecker(private val logger: Logger) {
             updates.sortBy { it.name.lowercase() }
             upToDate.sortBy { it.name.lowercase() }
             untracked.sortBy { it.name.lowercase() }
-            return CheckResult(System.currentTimeMillis(), core, latestCore, coreError, updates, upToDate, errors, untracked)
+            ignored.sortBy { it.name.lowercase() }
+            return CheckResult(System.currentTimeMillis(), core, latestCore, coreError, updates, upToDate, errors, untracked, ignored)
         } finally {
             pool.shutdownNow()
         }
@@ -153,7 +165,7 @@ internal class UpdateChecker(private val logger: Logger) {
         }
 
         // CorePlugin is internal to Aliucord.
-        private fun isCorePlugin(plugin: Plugin) = corePluginClass?.isInstance(plugin) == true
+        fun isCorePlugin(plugin: Plugin) = corePluginClass?.isInstance(plugin) == true
 
         fun describe(e: Throwable): String {
             val cause = (e as? java.util.concurrent.ExecutionException)?.cause ?: e

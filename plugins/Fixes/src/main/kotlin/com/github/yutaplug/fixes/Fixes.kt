@@ -101,7 +101,8 @@ class Fixes : Plugin() {
         OpenActivities.stop()
     }
 
-    internal fun isFixEnabled(fix: Fix): Boolean = settings.getBool(enabledKey(fix), fix.enabledByDefault)
+    internal fun isFixEnabled(fix: Fix): Boolean =
+        fix.disabledReason == null && settings.getBool(enabledKey(fix), fix.enabledByDefault)
 
     internal fun setFixEnabled(fix: Fix, enabled: Boolean) {
         settings.setBool(enabledKey(fix), enabled)

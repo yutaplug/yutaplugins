@@ -10,8 +10,10 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.aliucord.PluginManager
 import com.aliucord.Utils
 import com.aliucord.fragments.ConfirmDialog
+import com.aliucord.fragments.SelectDialog
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.utils.ChangelogUtils
 import com.discord.views.CheckedSetting
@@ -64,6 +66,7 @@ class UpdaterPage : SettingsPage() {
         addPluginUpdates(context, result)
         addProblems(context, result)
         addUpToDate(context, result)
+        addIgnored(context, result)
         addSettings(context)
         addView(
             UpdaterUi.subtext(
@@ -343,6 +346,9 @@ class UpdaterPage : SettingsPage() {
                 showChangelog(it.context, "${update.name} ${update.build.version}", update.build.changelogMedia, body, update.repo)
             },
         )
+        if (installed == null && !installing) {
+            buttons.add(UpdaterUi.button(context, "Ignore", Kind.SECONDARY) { confirmIgnore(it.context, update.name) })
+        }
         if (installed == null) {
             buttons.add(
                 UpdaterUi.button(
@@ -360,6 +366,104 @@ class UpdaterPage : SettingsPage() {
         content.addView(UpdaterUi.buttonRow(context, buttons))
         card.layoutParams = UpdaterUi.cardParams(context)
         return card
+    }
+
+    private fun addIgnored(context: Context, result: CheckResult?) {
+        val ignored = result?.ignored?.takeIf { it.isNotEmpty() }
+            ?: Updater.ignored.map { PluginInfo(it, PluginManager.plugins[it]?.manifest?.version ?: "", null) }
+        addView(UpdaterUi.header(context, "Ignored · ${ignored.size}"))
+        val (card, content) = UpdaterUi.card(context)
+        content.addView(
+            UpdaterUi.subtext(
+                context,
+                if (ignored.isEmpty()) {
+                    "Plugins you add here are never checked for updates."
+                } else {
+                    "These plugins are never checked for updates. Tap one to check it again."
+                },
+            ).apply { setPadding(0, 0, 0, UpdaterUi.dp(context, 6)) },
+        )
+        for (plugin in ignored) {
+            content.addView(
+                tappableRow(context, plugin.name, plugin.version, null) { view ->
+                    val dialog = ConfirmDialog()
+                    dialog.setTitle("Check ${plugin.name} again?")
+                        .setDescription("The updater will look for ${plugin.name} updates again.")
+                        .setOnOkListener {
+                            Updater.setIgnored(plugin.name, false)
+                            dialog.dismiss()
+                        }
+                    Updater.fragmentManager(view.context)?.let { dialog.show(it, "UpdaterUnignore") }
+                },
+            )
+        }
+        content.addView(UpdaterUi.space(context, 8))
+        content.addView(
+            UpdaterUi.buttonRow(
+                context,
+                listOf(UpdaterUi.button(context, "Ignore a plugin", Kind.SECONDARY) { pickPluginToIgnore(it.context) }),
+            ),
+        )
+        addView(card.also { it.layoutParams = UpdaterUi.cardParams(context) })
+    }
+
+    private fun pickPluginToIgnore(context: Context) {
+        val ignored = Updater.ignored.toSet()
+        val names = PluginManager.plugins.values
+            .filter { it.__filename != null && it.name !in ignored && !UpdateChecker.isCorePlugin(it) }
+            .map { it.name }
+            .sortedBy { it.lowercase() }
+        if (names.isEmpty()) {
+            Utils.showToast("Every plugin is already ignored")
+            return
+        }
+        val dialog = SelectDialog().apply {
+            title = "Ignore a plugin"
+            items = names.toTypedArray()
+            onResultListener = { which -> Updater.setIgnored(names[which], true) }
+        }
+        Updater.fragmentManager(context)?.let { dialog.show(it, "UpdaterIgnore") }
+    }
+
+    private fun confirmIgnore(context: Context, name: String) {
+        val dialog = ConfirmDialog()
+        dialog.setTitle("Ignore $name?")
+            .setDescription(
+                "The updater won't check $name for updates anymore, or tell you about them. " +
+                    "You can undo this under Ignored.",
+            )
+            .setOnOkListener {
+                Updater.setIgnored(name, true)
+                dialog.dismiss()
+            }
+        Updater.fragmentManager(context)?.let { dialog.show(it, "UpdaterIgnore") }
+    }
+
+    /** A tappable row: [name] with [trailing] on the right, and [detail] below. */
+    private fun tappableRow(context: Context, name: String, trailing: String?, detail: String?, onClick: (View) -> Unit): View {
+        val pad = UpdaterUi.dp(context, 5)
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, pad, 0, pad)
+            background = selectableBackground(context)
+            isClickable = true
+            setOnClickListener(onClick)
+        }
+        val top = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        top.addView(
+            UpdaterUi.body(context, name).apply {
+                isSingleLine = true
+                ellipsize = TextUtils.TruncateAt.END
+            },
+            LinearLayout.LayoutParams(0, -2, 1f),
+        )
+        if (trailing != null && trailing.isNotEmpty()) top.addView(UpdaterUi.subtext(context, trailing))
+        row.addView(top)
+        if (detail != null) row.addView(UpdaterUi.subtext(context, detail))
+        return row
     }
 
     /** "Nov 26", or "Nov 26, 2025" when it's not this year, in the phone's language. */
@@ -395,11 +499,17 @@ class UpdaterPage : SettingsPage() {
         addView(UpdaterUi.header(context, "Couldn't check · ${errors.size}"))
         val (card, content) = UpdaterUi.card(context)
         var first = true
+        content.addView(
+            UpdaterUi.subtext(context, "Tap a plugin to ignore it.").apply {
+                setPadding(0, 0, 0, UpdaterUi.dp(context, 6))
+            },
+        )
         for ((name, reason) in errors) {
-            if (!first) content.addView(UpdaterUi.space(context, 10))
+            if (!first) content.addView(UpdaterUi.space(context, 4))
             first = false
-            content.addView(UpdaterUi.body(context, name))
-            content.addView(UpdaterUi.subtext(context, reason))
+            content.addView(
+                tappableRow(context, name, null, reason) { confirmIgnore(it.context, name) },
+            )
         }
         addView(card.also { it.layoutParams = UpdaterUi.cardParams(context) })
     }
@@ -481,6 +591,20 @@ class UpdaterPage : SettingsPage() {
             "Shows a message with an Update button when updates are available.",
             Updater.setting(Updater.CHECK_ON_STARTUP, true),
         ) { Updater.settings?.setBool(Updater.CHECK_ON_STARTUP, it) }
+        switch(
+            context,
+            "Show update popups",
+            "Shows a popup at the top of the app when updates are found on startup, and after updating. " +
+                "Tap it to update, or swipe it away.",
+            Updater.setting(Updater.SHOW_POPUPS, true),
+        ) { Updater.settings?.setBool(Updater.SHOW_POPUPS, it) }
+        switch(
+            context,
+            "Show phone notifications",
+            "Also posts an Android notification for them, which stays in your notifications until you swipe it away. " +
+                "Tap it to open the Updater, or use its Update button.",
+            Updater.setting(Updater.SHOW_NOTIFICATIONS, false),
+        ) { Updater.settings?.setBool(Updater.SHOW_NOTIFICATIONS, it) }
         switch(
             context,
             "Update plugins automatically",

@@ -32,6 +32,7 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
         header("Fixes")
         for (fix in plugin.fixes) {
             val subtext = buildString {
+                fix.disabledReason?.let { append("⚠ ").append(it).append("\n\n") }
                 fix.warning?.let { append("⚠ ").append(it).append("\n\n") }
                 append(fix.description)
                 fix.author?.let { append("\nMade by ").append(it) }
@@ -40,6 +41,11 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
             addView(
                 Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, fix.title, subtext).apply {
                     isChecked = plugin.isFixEnabled(fix)
+                    // Discord's own disabled switch: greyed out, and a tap shows the reason instead of toggling.
+                    fix.disabledReason?.let { reason ->
+                        c(reason)
+                        return@apply
+                    }
                     var reverting = false
                     setOnCheckedListener { checked ->
                         if (reverting) return@setOnCheckedListener

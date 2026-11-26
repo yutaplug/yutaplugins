@@ -3,6 +3,7 @@ package com.github.yutaplug.fixes.updater
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.os.Bundle
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
@@ -18,9 +19,11 @@ import com.aliucord.patcher.Hook
 import com.aliucord.patcher.InsteadHook
 import com.aliucord.patcher.PreHook
 import com.aliucord.settings.AliucordPage
+import com.discord.app.AppActivity
 import com.discord.views.CheckedSetting
 import com.discord.widgets.settings.WidgetSettings
 import com.github.yutaplug.fixes.Fix
+import com.github.yutaplug.fixes.OpenActivities
 import com.lytefast.flexinput.R
 import java.lang.ref.WeakReference
 
@@ -42,14 +45,13 @@ internal class UpdaterFix :
         replaceSettingsEntry()
         replaceAliucordPageSwitches()
         redirectUpdaterScreen()
+        handleNotificationTaps()
         Updater.addListener(entryListener)
 
         if (!startedThisProcess) {
             startedThisProcess = true
             Updater.showUpdatedNotice()
-            if (Updater.setting(Updater.CHECK_ON_STARTUP, true)) {
-                Utils.mainThread.postDelayed({ if (started) Updater.check { onStartupCheck(it) } }, 3000L)
-            }
+            if (Updater.setting(Updater.CHECK_ON_STARTUP, true)) startupCheck(0)
         }
     }
 
@@ -57,6 +59,32 @@ internal class UpdaterFix :
         Updater.removeListener(entryListener)
         patcher.unpatchAll()
         entry = null
+    }
+
+    /**
+     * A tapped update notification opens Discord's main screen with an action in its intent: in onCreate
+     * when Discord wasn't open, in onNewIntent when it was (the main screen is singleTask).
+     */
+    private fun handleNotificationTaps() {
+        patcher.patch(
+            AppActivity::class.java,
+            "onCreate",
+            arrayOf(Bundle::class.java),
+            Hook { param ->
+                val activity = param.thisObject as AppActivity
+                UpdateNotifications.handle(activity, activity.intent)
+            },
+        )
+        patcher.patch(
+            AppActivity::class.java,
+            "onNewIntent",
+            arrayOf(Intent::class.java),
+            Hook { param -> UpdateNotifications.handle(param.thisObject as AppActivity, param.args[0] as? Intent) },
+        )
+        // When a tap started Discord, plugins may start during that screen's onCreate, too late for the hook.
+        Utils.mainThread.post {
+            (OpenActivities.front() as? AppActivity)?.let { UpdateNotifications.handle(it, it.intent) }
+        }
     }
 
     /** Aliucord's own startup check, which would also download and notify on its own. */
@@ -185,58 +213,91 @@ internal class UpdaterFix :
         }
     }
 
+    /**
+     * The startup check, a few seconds after launch. Discord is still connecting then, so if GitHub couldn't
+     * be reached (the whole check failed, or a repository couldn't be read), it tries again a bit later.
+     */
+    private fun startupCheck(attempt: Int) {
+        Utils.mainThread.postDelayed({
+            if (!started) return@postDelayed
+            Updater.logger.info("Startup update check, attempt ${attempt + 1}")
+            Updater.check { result ->
+                // Only network trouble is worth retrying, not e.g. a plugin missing from its repo's updater.
+                val failed = result == null || result.coreError != null && result.latestCore == null ||
+                    result.errors.values.any { it in RETRYABLE }
+                Updater.logger.info(
+                    if (result == null) {
+                        "Startup check failed: ${Updater.checkError}"
+                    } else {
+                        "Startup check found ${result.count} updates, couldn't check ${result.errors.keys}" +
+                            (result.coreError?.let { ", Aliucord: $it" } ?: "")
+                    },
+                )
+                if (failed && attempt < 3) {
+                    // Show what was found now; the retry only adds what it couldn't check.
+                    if (result != null) onStartupCheck(result)
+                    startupCheck(attempt + 1)
+                } else {
+                    onStartupCheck(result)
+                }
+            }
+        }, if (attempt == 0) 3000L else 20_000L)
+    }
+
+    /** Updates already announced in a notification this session, so a retried startup check doesn't repeat them. */
+    private val announced = HashSet<String>()
+
     private fun onStartupCheck(result: CheckResult?) {
         if (result == null || !started) return
-        val plugins = if (Updater.autoPlugins) result.plugins.filter { it.canInstall } else emptyList()
-        val core = result.core?.takeIf { Updater.autoCore && it.reinstallReason == null }
-        val manual = result.count - plugins.size - (if (core != null) 1 else 0)
+        // Skip what an earlier attempt already installed or announced.
+        val fresh = result.plugins.filter {
+            it.name !in Updater.installed && it.name !in Updater.installing && "${it.name} ${it.build.version}" !in announced
+        }
+        val freshCore = result.core?.takeIf {
+            Installed.CORE_NAME !in Updater.installed && Installed.CORE_NAME !in Updater.installing &&
+                "${Installed.CORE_NAME} ${it.latestVersion}" !in announced
+        }
+        val plugins = if (Updater.autoPlugins) fresh.filter { it.canInstall } else emptyList()
+        val core = freshCore?.takeIf { Updater.autoCore && it.reinstallReason == null }
         if (plugins.isNotEmpty() || core != null) {
             Updater.install(plugins, core) { done -> Updater.promptRestart(null, done) }
         }
-        if (manual <= 0) return
-        showUpdatesFound(
-            result.plugins.filter { it !in plugins },
-            result.core?.takeIf { core == null },
-        )
+        val manualPlugins = fresh.filter { it !in plugins }
+        val manualCore = freshCore?.takeIf { core == null }
+        if (manualPlugins.isEmpty() && manualCore == null) return
+        manualPlugins.forEach { announced.add("${it.name} ${it.build.version}") }
+        manualCore?.let { announced.add("${Installed.CORE_NAME} ${it.latestVersion}") }
+        Updater.logger.info("Notifying about ${manualPlugins.map { it.name } + listOfNotNull(manualCore?.let { "Aliucord" })}")
+        showUpdatesFound(manualPlugins, manualCore)
     }
 
-    /** A snackbar listing the updates found, with a button that installs them right away. */
+    /** A notification listing the updates found: tapping it opens the Updater, its Update button installs them. */
     private fun showUpdatesFound(plugins: List<PluginUpdate>, core: CoreUpdate?) {
         val versions = listOfNotNull(core?.let { "Aliucord ${it.latestVersion}" }) +
             plugins.map { "${it.name} ${it.build.version}" }
-        val message = when {
-            versions.size == 1 -> "Update available: ${versions[0]}"
-            versions.size <= 3 -> "Updates available: ${Updater.names(versions)}"
-            else -> "${versions.size} updates available: ${versions.take(2).joinToString(", ")} " +
-                "and ${versions.size - 2} more"
+        val title = if (versions.size == 1) "Update available" else "${versions.size} updates available"
+        val list = if (versions.size <= 4) {
+            Updater.names(versions)
+        } else {
+            "${versions.take(3).joinToString(", ")} and ${versions.size - 3} more"
         }
         val installablePlugins = plugins.filter { it.canInstall }
         val installableCore = core?.takeIf { it.reinstallReason == null }
-        val open: (View) -> Unit = { openUpdater(it.context) }
-        if (installablePlugins.isEmpty() && installableCore == null) {
+        val canInstall = installablePlugins.isNotEmpty() || installableCore != null
+        if (canInstall) {
+            UpdatePopups.show(title, "$list\nTap to update.") { Updater.installNow(it.context, installablePlugins, installableCore) }
+        } else {
             // Every update needs something first (e.g. a newer Aliucord); the Updater says what.
-            Updater.snackbar(message, "View", open, open, 15_000)
-            return
+            UpdatePopups.show(title, "$list\nTap to see what it needs.") { openUpdater(it.context) }
         }
-        Updater.snackbar(
-            message,
-            "Update",
-            { view ->
-                val context = view.context
-                Utils.showToast("Downloading ${Utils.pluralise(installablePlugins.size + (if (installableCore != null) 1 else 0), "update")}…")
-                Updater.install(installablePlugins, installableCore) { done ->
-                    val failed = (installablePlugins.map { it.name } + listOfNotNull(installableCore?.let { Installed.CORE_NAME }))
-                        .filter { name -> done.none { it.name == name } }
-                    if (failed.isNotEmpty()) Utils.showToast("Couldn't update ${Updater.names(failed)}", true)
-                    Updater.promptRestart(context, done)
-                }
-            },
-            open,
-            15_000,
-        )
+        // Off by default; without an installable update it has no Update button.
+        UpdateNotifications.updatesFound(title, list, installablePlugins, installableCore)
     }
 
     companion object {
+        /** [UpdateChecker.describe]'s reasons that mean GitHub couldn't be reached, so a retry may help. */
+        private val RETRYABLE = setOf("No internet connection", "Timed out")
+
         private const val ROW_TAG = "fixes_updater_settings"
         private val HIDDEN_SWITCHES = setOf("Automatically update Aliucord", "Automatically update plugins", "Disable Updater")
 

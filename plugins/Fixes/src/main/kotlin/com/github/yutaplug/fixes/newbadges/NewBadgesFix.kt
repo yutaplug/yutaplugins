@@ -1,7 +1,6 @@
 package com.github.yutaplug.fixes.newbadges
 
 import android.content.Context
-import android.util.Base64
 import com.aliucord.Http
 import com.aliucord.api.rn.user.RNUserProfile
 import com.aliucord.utils.GsonUtils
@@ -12,15 +11,13 @@ import com.discord.utilities.rest.RestAPI
 import com.discord.widgets.user.Badge
 import com.github.yutaplug.fixes.Fix
 import de.robv.android.xposed.XC_MethodHook
-import org.json.JSONObject
 import java.util.Locale
-import java.util.TimeZone
 
 /**
- * Aliucord's Badges core plugin shows the profile's `badges`, but Discord's server leaves newer badges such as
- * Account Age out of `/users/{id}/profile` for the old RN version Aliucord reports (`341.0 - rn`, build 6081), while
- * the web app gets them. So this replaces Aliucord's profile request with the web app's (`type=popout`, web client
- * super properties and build number), parsed into the same [RNUserProfile].
+ * Aliucord's Badges core plugin shows the profile's `badges`. This replaces Aliucord's profile request with the
+ * web app's query (`type=popout`), still sent as Aliucord's own Android client, parsed into the same [RNUserProfile].
+ * It used to send it as the web client (Chrome on Windows) to also get newer badges like Account Age, which
+ * Discord may leave out for the old RN version Aliucord reports, but that logged accounts out.
  *
  * Those badges also have an SVG `simple_icon_url`, which the core plugin prefers and BitmapFactory can't decode.
  * Their `icon` hash still has a PNG on the CDN (`badge-icons/{icon}.png`), so the badge list swaps the SVG for it.
@@ -34,6 +31,8 @@ internal class NewBadgesFix :
         "NewBadges",
         "New badges",
         "Shows newer Discord badges on profiles, like Account Age, which Discord otherwise doesn't send to Aliucord.",
+        // Getting those badges logged accounts out (see profileRequest), so it stays off until it works safely.
+        disabledReason = "Turned off for now: it could log you out of Discord. It will come back once it's safe.",
     ) {
     override fun start(context: Context) {
         // Runs before Aliucord's own replacement of this method (which then never runs) and does the same
@@ -49,7 +48,7 @@ internal class NewBadgesFix :
                     val guildId = param.args[2] as Long?
                     param.result = RxUtils.create<UserProfile> { subscriber ->
                         try {
-                            val req = webRequest(
+                            val req = profileRequest(
                                 "/users/$userId/profile?type=popout&with_mutual_guilds=$withMutualGuilds" +
                                     (guildId?.let { "&guild_id=$it" } ?: ""),
                             )
@@ -108,50 +107,17 @@ internal class NewBadgesFix :
         patcher.unpatchAll()
     }
 
-    /** Like Aliucord's `Http.Request.newDiscordRNRequest`, but with the web client's identity, as in Discord's web app. */
-    private fun webRequest(route: String): Http.Request {
-        val headers = RestAPI.AppHeadersProvider.INSTANCE
-        return Http.Request("https://discord.com/api/v9$route", "GET")
-            .setHeader("User-Agent", WEB_USER_AGENT)
-            .setHeader("X-Super-Properties", webSuperProperties)
-            .setHeader("Accept-Language", headers.acceptLanguages)
-            .setHeader("Accept", "*/*")
-            .setHeader("Authorization", headers.authToken)
-            .setHeader("X-Discord-Locale", headers.locale)
-            .setHeader("X-Discord-Timezone", TimeZone.getDefault().id)
-    }
-
-    private val webSuperProperties: String by lazy {
-        val json = JSONObject().apply {
-            put("os", "Windows")
-            put("browser", "Chrome")
-            put("device", "")
-            put("system_locale", Locale.getDefault().toString().replace("_", "-"))
-            put("has_client_mods", false)
-            put("browser_user_agent", WEB_USER_AGENT)
-            put("browser_version", WEB_BROWSER_VERSION)
-            put("os_version", "10")
-            put("referrer", "")
-            put("referring_domain", "")
-            put("referrer_current", "")
-            put("referring_domain_current", "")
-            put("release_channel", "stable")
-            put("client_build_number", WEB_BUILD_NUMBER)
-            put("client_event_source", JSONObject.NULL)
-        }
-        Base64.encodeToString(json.toString().toByteArray(), Base64.NO_WRAP)
-    }
+    /**
+     * Aliucord's own request, identified as the Discord Android app like every other Aliucord request.
+     * Never identify as another client (this fix used to claim Chrome on Windows): Discord treats one token
+     * showing up as two different clients as stolen and logs the account out.
+     */
+    private fun profileRequest(route: String): Http.Request = Http.Request.newDiscordRNRequest(route, "GET")
 
     private fun isSvg(url: String): Boolean =
         url.substringBefore('?').lowercase(Locale.ROOT).endsWith(".svg")
 
     private companion object {
         const val BADGE_ICONS = "https://cdn.discordapp.com/badge-icons/"
-
-        /** Discord web's build number (`BUILD_NUMBER` on discord.com/app, 2026-11-26). Newer is never a problem. */
-        const val WEB_BUILD_NUMBER = 681034
-        const val WEB_BROWSER_VERSION = "142.0.0.0"
-        const val WEB_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/$WEB_BROWSER_VERSION Safari/537.36"
     }
 }

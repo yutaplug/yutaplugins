@@ -21,6 +21,11 @@ internal abstract class Fix(
     val enabledByDefault: Boolean = true,
     /** Shown in the settings, and confirmed before turning the fix on, e.g. while it's still being tested. */
     val warning: String? = null,
+    /**
+     * When set, the fix is always off whatever was saved, and its switch is greyed out; tapping it shows
+     * this reason. For fixes that are broken until further notice.
+     */
+    val disabledReason: String? = null,
 ) {
     lateinit var plugin: Fixes
         private set
