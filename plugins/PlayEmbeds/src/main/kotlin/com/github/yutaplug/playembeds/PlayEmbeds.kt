@@ -20,6 +20,7 @@ import android.util.TypedValue
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.OrientationEventListener
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -132,6 +133,7 @@ class PlayEmbeds : Plugin() {
         patchEmbedRows()
         patchNativeHostedLaunches()
         patchPlayerErrors()
+        patchOutsideTaps()
         hostPatched = try {
             patchFullscreenHost()
             true
@@ -180,6 +182,35 @@ class PlayEmbeds : Plugin() {
                 val callback = errorCallbacks.remove(frame.thisObject) ?: return@Hook
                 DebugLog.log("player error: ${frame.args.firstOrNull()}")
                 Utils.mainThread.post { callback() }
+            },
+        )
+    }
+
+    /**
+     * A tap anywhere outside an inline player hides its controls, instead of
+     * them staying up until their timeout. Fullscreen players cover the whole
+     * screen, so they're left alone.
+     */
+    private fun patchOutsideTaps() {
+        val dispatch = Activity::class.java.getDeclaredMethod("dispatchTouchEvent", MotionEvent::class.java)
+        patcher.patch(
+            dispatch,
+            PreHook { frame ->
+                val event = frame.args.getOrNull(0) as? MotionEvent ?: return@PreHook
+                if (event.actionMasked != MotionEvent.ACTION_DOWN) return@PreHook
+                val x = event.rawX.toInt()
+                val y = event.rawY.toInt()
+                for (state in players.values) {
+                    val root = state.root
+                    if (fullscreenPlayers.containsKey(root) || !root.isShown) continue
+                    val playerView = (root as? ViewGroup)?.getChildAt(0) as? PlayerView ?: continue
+                    if (playerView.t?.e() != true) continue
+                    val location = IntArray(2)
+                    root.getLocationOnScreen(location)
+                    val inside = x >= location[0] && x < location[0] + root.width &&
+                        y >= location[1] && y < location[1] + root.height
+                    if (!inside) playerView.d()
+                }
             },
         )
     }
@@ -1198,9 +1229,10 @@ class PlayEmbeds : Plugin() {
         val control = QualityControl(state, playerView, label, url, media)
         control.updateLabel()
         label.setOnClickListener { showQualityPicker(control) }
-        bar.addView(
+        val row = buttonRow(bar)
+        row.addView(
             label,
-            bar.indexOfChild(duration) + 1,
+            if (row === bar) bar.indexOfChild(duration) + 1 else 0,
             LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(context, 12) },
         )
         fitSeekbar(bar)
@@ -1239,11 +1271,92 @@ class PlayEmbeds : Plugin() {
         button.contentDescription = description
         button.setOnClickListener { onClick() }
         val size = dp(context, 24)
-        val fullscreen = bar.findViewWithTag<View>(FULLSCREEN_BUTTON_TAG)
-        val index = bar.indexOfChild(fullscreen).takeIf { it >= 0 } ?: bar.childCount
-        bar.addView(button, index, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
+        val row = buttonRow(bar)
+        val fullscreen = row.findViewWithTag<View>(FULLSCREEN_BUTTON_TAG)
+        val index = row.indexOfChild(fullscreen).takeIf { it >= 0 } ?: row.childCount
+        row.addView(button, index, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
         fitSeekbar(bar)
         return button
+    }
+
+    /** Where extra buttons go: the compact video layout's top strip, or the control bar itself. */
+    private fun buttonRow(bar: LinearLayout): LinearLayout {
+        if (bar.tag != COMPACT_BAR_TAG) return bar
+        return (bar.parent as? ViewGroup)?.findViewWithTag(TOP_BUTTONS_TAG) ?: bar
+    }
+
+    /**
+     * Rearranges a video player's controls into a compact overlay: play/pause
+     * as a round button in the middle, the extra buttons (quality, download,
+     * captions, speed, fullscreen) in a strip at the top right, and only the
+     * position, seekbar and duration left in a slim bottom row. Both rows use
+     * a lighter, more see-through background than Discord's bar.
+     */
+    private fun compactControls(bar: LinearLayout) {
+        if (bar.tag == COMPACT_BAR_TAG) return
+        val host = bar.parent as? RelativeLayout ?: return
+        val context = bar.context
+        bar.tag = COMPACT_BAR_TAG
+        bar.setBackgroundColor(CONTROLS_BACKGROUND)
+        val horizontal = dp(context, 12)
+        val vertical = dp(context, 6)
+        bar.setPadding(horizontal, vertical, horizontal, vertical)
+        (bar.findViewById<View>(id("exo_position"))?.layoutParams as? ViewGroup.MarginLayoutParams)
+            ?.marginEnd = dp(context, 10)
+        (bar.findViewById<View>(id("exo_duration"))?.layoutParams as? ViewGroup.MarginLayoutParams)
+            ?.marginStart = dp(context, 10)
+
+        val center = FrameLayout(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(CONTROLS_BACKGROUND)
+            }
+        }
+        val icon = dp(context, 28)
+        val playButtons = ArrayList<View>()
+        for (name in arrayOf("exo_play", "exo_pause")) {
+            val button = bar.findViewById<View>(id(name)) ?: continue
+            bar.removeView(button)
+            center.addView(button, FrameLayout.LayoutParams(icon, icon, Gravity.CENTER))
+            playButtons.add(button)
+        }
+        // The ring around the icon toggles playback too, instead of hiding the controls.
+        center.setOnClickListener { playButtons.firstOrNull { it.visibility == View.VISIBLE }?.performClick() }
+        val size = dp(context, 52)
+        host.addView(center, RelativeLayout.LayoutParams(size, size).apply { addRule(RelativeLayout.CENTER_IN_PARENT) })
+
+        val strip = topButtonStrip(host, bar)
+        strip.setPadding(0, vertical, horizontal, vertical)
+        host.addOnLayoutChangeListener { view, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft) view.post { fitButtonStrip(strip, right - left) }
+        }
+        strip.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+            val width = host.width
+            if (width > 0) view.post { fitButtonStrip(strip, width) }
+        }
+    }
+
+    /** Narrows the gaps between the top strip's buttons when the player is too thin for them. */
+    private fun fitButtonStrip(strip: LinearLayout, available: Int) {
+        if (available <= 0 || strip.childCount == 0) return
+        val context = strip.context
+        var content = strip.paddingLeft + strip.paddingRight
+        for (index in 0 until strip.childCount) {
+            val child = strip.getChildAt(index)
+            if (child.visibility == View.GONE) continue
+            child.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+            val params = child.layoutParams
+            content += if (params != null && params.width > 0) params.width else child.measuredWidth
+        }
+        val gap = ((available - content) / strip.childCount)
+            .coerceIn(dp(context, MIN_STRIP_GAP_DP), dp(context, STRIP_GAP_DP))
+        for (index in 0 until strip.childCount) {
+            val params = strip.getChildAt(index).layoutParams as? LinearLayout.LayoutParams ?: continue
+            if (params.marginStart != gap) {
+                params.marginStart = gap
+                strip.getChildAt(index).layoutParams = params
+            }
+        }
     }
 
     /**
@@ -1253,6 +1366,7 @@ class PlayEmbeds : Plugin() {
      * its own row just above the bar, as wide as the player.
      */
     private fun fitSeekbar(bar: LinearLayout, force: Boolean = false) {
+        if (bar.tag == COMPACT_BAR_TAG) return
         watchBarWidth(bar)
         val timeBar = bar.findViewById<View>(id("exo_progress")) ?: return
         if (timeBar.parent !== bar || (!force && bar.childCount - STOCK_BAR_CHILDREN < 2)) return
@@ -1643,10 +1757,9 @@ class PlayEmbeds : Plugin() {
         val context = playerView.context
         val host = playerView.findViewById<FrameLayout>(id("exo_overlay")) ?: playerView
         val duration = playerView.findViewById<TextView>(id("exo_duration"))
-        val caption = TextView(context).apply {
+        val caption = CaptionView(context, CAPTION_BACKGROUND).apply {
             duration?.typeface?.let { typeface = it }
             setTextColor(Color.WHITE)
-            setBackgroundColor(CAPTION_BACKGROUND)
             gravity = Gravity.CENTER
             val horizontal = dp(context, 6)
             val vertical = dp(context, 2)
@@ -1810,7 +1923,8 @@ class PlayEmbeds : Plugin() {
             if (fullscreenPlayers.containsKey(root)) exitFullscreen(root) else enterFullscreen(root, button, landscape)
         }
         val size = dp(context, 24)
-        bar.addView(button, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
+        compactControls(bar)
+        buttonRow(bar).addView(button, LinearLayout.LayoutParams(size, size).apply { marginStart = dp(context, 16) })
         fitSeekbar(bar)
     }
 
@@ -2631,12 +2745,20 @@ class PlayEmbeds : Plugin() {
         private const val FULLSCREEN_BUTTON_TAG = "PlayEmbedsFullscreen"
         private const val SEEKBAR_ROW_TAG = "PlayEmbedsSeekbarRow"
         private const val TOP_BUTTONS_TAG = "PlayEmbedsTopButtons"
+        private const val COMPACT_BAR_TAG = "PlayEmbedsCompactBar"
+
+        /** The compact video controls' background: 40% black, lighter than Discord's 80% bar. */
+        private const val CONTROLS_BACKGROUND = 0x66000000
+
+        /** Gap between the top strip's buttons, narrowed down to the minimum on thin players. */
+        private const val STRIP_GAP_DP = 16
+        private const val MIN_STRIP_GAP_DP = 4
         private const val PICKER_SCRIM = 0x99000000.toInt()
         private const val PICKER_MAX_HEIGHT = 0.5f
         private const val PICKER_MAX_WIDTH_DP = 400
         private val PLAYBACK_SPEEDS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
         private const val CAPTION_TICK_MS = 100L
-        private const val CAPTION_BACKGROUND = 0xBF000000.toInt()
+        private const val CAPTION_BACKGROUND = 0x8C000000.toInt()
 
         /** Caption text height as a share of the player height, kept between these sizes. */
         private const val CAPTION_SIZE_FRACTION = 0.045f

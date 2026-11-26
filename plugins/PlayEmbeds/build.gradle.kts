@@ -1,9 +1,15 @@
-version = "1.0.21"
+version = "1.1.0"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.1.0
+        * Cleaner, more compact video controls: play/pause in the middle, buttons in the top right, and a slim time and seekbar row at the bottom
+        * Lighter, more see-through background behind the controls
+        * Tapping outside a player hides its controls
+        * Captions have a lighter background that fits each line instead of one box as wide as the longest line
+
         # 1.0.21
         * When the controls don't fit, the seekbar keeps a full-width row with the times beside it, and the buttons stay at the bottom
         * The captions and speed menus open in rotated fullscreen
