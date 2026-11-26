@@ -1,4 +1,4 @@
-version = "1.0.12"
+version = "1.0.13"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,9 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.13
+        * GitHub updater: new "Update from the popup" option. Turn it off and tapping the updates popup opens the Updater, so you can read the changelogs and choose what to install
+
         # 1.0.12
         * Attachment previews: new fix for the preview of a file you add to a message (like a .zip) sometimes showing an image you added before
 

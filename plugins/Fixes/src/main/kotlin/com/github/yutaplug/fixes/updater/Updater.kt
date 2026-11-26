@@ -26,6 +26,9 @@ internal object Updater {
     /** Whether to show the in-app update popups (default on). */
     const val SHOW_POPUPS = "updater_showPopups"
 
+    /** Whether tapping the "updates available" popup installs them (default on) instead of opening the Updater. */
+    const val POPUP_INSTALLS = "updater_popupInstalls"
+
     /** Whether to also post Android notifications for updates (default off). */
     const val SHOW_NOTIFICATIONS = "updater_showNotifications"
     private const val LAST_CHECK = "updater_lastCheck"

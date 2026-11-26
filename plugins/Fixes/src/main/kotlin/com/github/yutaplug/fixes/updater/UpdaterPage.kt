@@ -595,9 +595,16 @@ class UpdaterPage : SettingsPage() {
             context,
             "Show update popups",
             "Shows a popup at the top of the app when updates are found on startup, and after updating. " +
-                "Tap it to update, or swipe it away.",
+                "Swipe it away to dismiss it.",
             Updater.setting(Updater.SHOW_POPUPS, true),
         ) { Updater.settings?.setBool(Updater.SHOW_POPUPS, it) }
+        switch(
+            context,
+            "Update from the popup",
+            "Tapping the popup installs the updates right away. Turn this off to open the Updater instead, " +
+                "so you can read the changelogs and choose which ones to install.",
+            Updater.setting(Updater.POPUP_INSTALLS, true),
+        ) { Updater.settings?.setBool(Updater.POPUP_INSTALLS, it) }
         switch(
             context,
             "Show phone notifications",

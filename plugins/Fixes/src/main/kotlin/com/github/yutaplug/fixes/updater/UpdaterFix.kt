@@ -284,8 +284,10 @@ internal class UpdaterFix :
         val installablePlugins = plugins.filter { it.canInstall }
         val installableCore = core?.takeIf { it.reinstallReason == null }
         val canInstall = installablePlugins.isNotEmpty() || installableCore != null
-        if (canInstall) {
+        if (canInstall && Updater.setting(Updater.POPUP_INSTALLS, true)) {
             UpdatePopups.show(title, "$list\nTap to update.") { Updater.installNow(it.context, installablePlugins, installableCore) }
+        } else if (canInstall) {
+            UpdatePopups.show(title, "$list\nTap to see the changelogs.") { openUpdater(it.context) }
         } else {
             // Every update needs something first (e.g. a newer Aliucord); the Updater says what.
             UpdatePopups.show(title, "$list\nTap to see what it needs.") { openUpdater(it.context) }
