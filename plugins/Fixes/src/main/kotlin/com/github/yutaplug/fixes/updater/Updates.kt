@@ -65,6 +65,10 @@ internal class PluginUpdate(
 
     val canInstall: Boolean get() = blockedReason == null
 
+    /** When the new build was published (its zip's last commit on GitHub), or null if unknown. */
+    @Volatile
+    var releaseDate: Long? = null
+
     /** Only the changelog entries newer than the installed version. */
     val newChangelog: String? get() = Changelogs.since(build.changelog, currentVersion)
 }
@@ -76,7 +80,16 @@ internal class CoreUpdate(
     val reinstallReason: String?,
 )
 
-internal class PluginInfo(val name: String, val version: String, val repo: String?)
+internal class PluginInfo(
+    val name: String,
+    val version: String,
+    val repo: String?,
+    /** The full changelog, from GitHub when listed there, else from the installed plugin. */
+    val changelog: String? = null,
+    val changelogMedia: String? = null,
+    /** A newer version already in the plugins folder that loads after a restart, or null. */
+    val pendingVersion: String? = null,
+)
 
 internal class CheckResult(
     val time: Long,

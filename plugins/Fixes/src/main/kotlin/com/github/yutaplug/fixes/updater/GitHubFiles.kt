@@ -118,11 +118,45 @@ internal class GitHubFiles(private val logger: Logger) {
         }
     }
 
+    /**
+     * When [url]'s file last changed on its branch, from GitHub's API, or null if it can't be looked up
+     * (not on GitHub, or the API's limit of 60 requests an hour per IP address was used up).
+     * Builds branches only commit a plugin's zip when it changed, so for a zip that's its release date.
+     */
+    fun lastChanged(url: String): Long? {
+        val file = parse(url) ?: return null
+        return try {
+            // HEAD means the default branch, which the API uses when no sha is given.
+            val sha = if (file.ref == "HEAD") "" else "&sha=${encode(file.ref.removePrefix("refs/heads/").removePrefix("refs/tags/"))}"
+            val api = "https://api.github.com/repos/${file.owner}/${file.repo}/commits?per_page=1" +
+                "$sha&path=${encode(file.path)}"
+            request(api).setHeader("Accept", "application/vnd.github+json").execute().use { resp ->
+                if (!resp.ok()) throw IOException("HTTP ${resp.statusCode}")
+                val commits = org.json.JSONArray(resp.text())
+                if (commits.length() == 0) return null
+                val date = commits.getJSONObject(0).getJSONObject("commit").getJSONObject("committer").getString("date")
+                ISO_DATE.get()!!.parse(date)?.time
+            }
+        } catch (e: Throwable) {
+            logger.warn("Could not get the release date of ${file.repoName}/${file.path}: ${e.message}")
+            null
+        }
+    }
+
+    private fun encode(value: String) = java.net.URLEncoder.encode(value, "UTF-8")
+
     class NotFound(url: String) : IOException("Not found: $url")
 
     companion object {
         private val SLASH = Pattern.compile("/")
         private val SHA = Pattern.compile("^[0-9a-f]{40}$")
+
+        // GitHub's dates are UTC, like 2026-11-26T19:22:38Z. SimpleDateFormat isn't thread-safe.
+        private val ISO_DATE = object : ThreadLocal<java.text.SimpleDateFormat>() {
+            override fun initialValue() = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+            }
+        }
 
         // "<pkt-len><sha> <ref>" followed by NUL (capabilities, first line only) or a newline.
         private val REF_LINE = Pattern.compile("([0-9a-f]{40}) ([^\u0000\n]+)")

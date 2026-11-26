@@ -298,7 +298,8 @@ class UpdaterPage : SettingsPage() {
         row.addView(
             UpdaterUi.pill(
                 context,
-                "${update.currentVersion} → ${update.build.version}",
+                "${update.currentVersion} → ${update.build.version}" +
+                    (update.releaseDate?.let { " · " + shortDate(it) } ?: ""),
                 if (installed != null) UpdaterUi.GREEN else UpdaterUi.BRAND,
             ),
             LinearLayout.LayoutParams(-2, -2).apply { marginStart = UpdaterUi.dp(context, 8) },
@@ -338,14 +339,8 @@ class UpdaterPage : SettingsPage() {
         val buttons = ArrayList<View>()
         buttons.add(
             UpdaterUi.button(context, "Changelog", Kind.SECONDARY) {
-                val body = update.newChangelog ?: update.build.changelog ?: "* No changelog was published for this version."
-                val github = Updater.repoUrl(update.repo)
-                val footer = if (github == null) {
-                    emptyArray()
-                } else {
-                    arrayOf(ChangelogUtils.FooterAction(R.e.ic_account_github_white_24dp, github))
-                }
-                ChangelogUtils.show(it.context, "${update.name} ${update.build.version}", update.build.changelogMedia, body, *footer)
+                val body = update.newChangelog ?: update.build.changelog
+                showChangelog(it.context, "${update.name} ${update.build.version}", update.build.changelogMedia, body, update.repo)
             },
         )
         if (installed == null) {
@@ -365,6 +360,33 @@ class UpdaterPage : SettingsPage() {
         content.addView(UpdaterUi.buttonRow(context, buttons))
         card.layoutParams = UpdaterUi.cardParams(context)
         return card
+    }
+
+    /** "Nov 26", or "Nov 26, 2025" when it's not this year, in the phone's language. */
+    private fun shortDate(time: Long): String {
+        val sameYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR) ==
+            java.util.Calendar.getInstance().apply { timeInMillis = time }.get(java.util.Calendar.YEAR)
+        val flags = DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_MONTH or
+            (if (sameYear) DateUtils.FORMAT_NO_YEAR else DateUtils.FORMAT_SHOW_YEAR)
+        return DateUtils.formatDateTime(context ?: Utils.appContext, time, flags)
+    }
+
+    /** The theme's ripple for tappable rows. */
+    private fun selectableBackground(context: Context): android.graphics.drawable.Drawable? {
+        val value = android.util.TypedValue()
+        if (!context.theme.resolveAttribute(android.R.attr.selectableItemBackground, value, true)) return null
+        return androidx.core.content.ContextCompat.getDrawable(context, value.resourceId)
+    }
+
+    private fun showChangelog(context: Context, title: String, media: String?, changelog: String?, repo: String?) {
+        val body = changelog?.takeIf { it.trim().isNotEmpty() } ?: "* No changelog was published for this version."
+        val github = Updater.repoUrl(repo)
+        val footer = if (github == null) {
+            emptyArray()
+        } else {
+            arrayOf(ChangelogUtils.FooterAction(R.e.ic_account_github_white_24dp, github))
+        }
+        ChangelogUtils.show(context, title, media, body, *footer)
     }
 
     private fun addProblems(context: Context, result: CheckResult?) {
@@ -403,24 +425,47 @@ class UpdaterPage : SettingsPage() {
         addView(header)
         if (!showUpToDate) return
         val (card, content) = UpdaterUi.card(context)
-        var first = true
+        content.addView(
+            UpdaterUi.subtext(context, "Tap a plugin to see its changelog.").apply {
+                setPadding(0, 0, 0, UpdaterUi.dp(context, 6))
+            },
+        )
+        val pad = UpdaterUi.dp(context, 5)
         for (plugin in result.upToDate + result.untracked) {
-            if (!first) content.addView(UpdaterUi.space(context, 10))
-            first = false
             val row = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, pad, 0, pad)
+                background = selectableBackground(context)
+                isClickable = true
+                setOnClickListener {
+                    val title = "${plugin.name} ${plugin.version}"
+                    showChangelog(it.context, title, plugin.changelogMedia, plugin.changelog, plugin.repo)
+                }
+            }
+            val top = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            row.addView(
+            top.addView(
                 UpdaterUi.body(context, plugin.name).apply {
                     isSingleLine = true
                     ellipsize = TextUtils.TruncateAt.END
                 },
                 LinearLayout.LayoutParams(0, -2, 1f),
             )
-            row.addView(
-                UpdaterUi.subtext(context, if (plugin.repo == null) "${plugin.version} · no updates" else plugin.version),
+            top.addView(UpdaterUi.subtext(context, plugin.version))
+            row.addView(top)
+            val details = listOfNotNull(
+                plugin.pendingVersion?.let { "$it installed, restart to start using it" },
+                if (plugin.repo == null) "No updates" else null,
             )
+            if (details.isNotEmpty()) {
+                row.addView(
+                    UpdaterUi.subtext(context, details.joinToString(" · ")).apply {
+                        if (plugin.pendingVersion != null) setTextColor(UpdaterUi.GREEN)
+                    },
+                )
+            }
             content.addView(row)
         }
         addView(card.also { it.layoutParams = UpdaterUi.cardParams(context) })

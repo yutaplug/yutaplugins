@@ -1,4 +1,4 @@
-version = "1.0.9"
+version = "1.0.10"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,11 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.10
+        * GitHub updater: no longer replaces a plugin you installed by hand before restarting with an older version from GitHub. It now shows that a restart is needed instead
+        * GitHub updater: plugin updates show when the new version was released
+        * GitHub updater: tap a plugin under Up to date to see its changelog
+
         # 1.0.9
         * Screen refresh: now on by default. It also stops the second reload Discord started right after the fix put your language back, which is why it didn't work before
 

@@ -90,6 +90,12 @@ internal object UpdateInstaller {
         val target = File(dir, "${update.fileName}.zip")
         // Aliucord only loads *.zip, so a half-finished download is never loaded.
         val part = File(dir, "${update.fileName}.zip.part")
+        // The zip may have been replaced since the check, e.g. by installing a build by hand.
+        diskVersion(update.fileName)?.let { installedVersion ->
+            if (!Versions.newer(update.build.version, installedVersion)) {
+                throw IOException("Version $installedVersion is already installed. Restart to start using it.")
+            }
+        }
         try {
             files.download(UpdaterUi.replaceLiteral(update.build.build, "%s", update.name), part)
             update.build.crc32?.let { expected ->
@@ -114,6 +120,20 @@ internal object UpdateInstaller {
             false, update.name, update.currentVersion, update.build.version,
             update.newChangelog, update.build.changelogMedia, update.repo,
         )
+    }
+
+    /**
+     * The version in the manifest of the plugin's zip in the plugins folder ([fileName] without `.zip`),
+     * which can differ from the loaded plugin until the next restart. Null if it can't be read.
+     */
+    fun diskVersion(fileName: String): String? = try {
+        ZipFile(File(Constants.PLUGINS_PATH, "$fileName.zip")).use { zip ->
+            val entry = zip.getEntry("manifest.json") ?: return@use null
+            JSONObject(zip.getInputStream(entry).bufferedReader().use { it.readText() })
+                .optString("version", "").takeIf { it.isNotEmpty() }
+        }
+    } catch (_: Throwable) {
+        null
     }
 
     fun installCore(update: CoreUpdate, files: GitHubFiles): Installed {

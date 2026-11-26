@@ -25,7 +25,14 @@ internal class UpdateChecker(private val logger: Logger) {
             for (plugin in plugins) {
                 val url = plugin.manifest.updateUrl?.trim()
                 if (url == null || url.isEmpty()) {
-                    untracked.add(PluginInfo(plugin.name, plugin.manifest.version ?: "?", null))
+                    val loaded = plugin.manifest.version ?: "?"
+                    val disk = UpdateInstaller.diskVersion(plugin.__filename!!)
+                    untracked.add(
+                        PluginInfo(
+                            plugin.name, loaded, null, plugin.manifest.changelog, plugin.manifest.changelogMedia,
+                            pendingVersion = disk?.takeIf { Versions.newer(it, loaded) },
+                        ),
+                    )
                 } else {
                     byRepo.getOrPut(url) { ArrayList() }.add(plugin)
                 }
@@ -55,7 +62,13 @@ internal class UpdateChecker(private val logger: Logger) {
                 }
                 for (plugin in repoPlugins) {
                     val name = plugin.manifest.name ?: plugin.name
-                    val current = plugin.manifest.version ?: "0.0.0"
+                    val loaded = plugin.manifest.version ?: "0.0.0"
+                    // The zip in the plugins folder can be newer than the loaded plugin, when it was
+                    // replaced (by hand or by an update) since the app started. Compare against that,
+                    // or the update would overwrite the newer zip with GitHub's older build.
+                    val disk = UpdateInstaller.diskVersion(plugin.__filename!!)
+                    val pending = disk?.takeIf { Versions.newer(it, loaded) }
+                    val current = pending ?: loaded
                     val entry = json.optJSONObject(name) ?: json.optJSONObject(plugin.name)
                     val build = entry?.let { PluginBuild.parse(it) }
                     if (build == null) {
@@ -67,8 +80,31 @@ internal class UpdateChecker(private val logger: Logger) {
                             PluginUpdate(plugin.name, plugin.__filename!!, current, build, repo, latestCore),
                         )
                     } else {
-                        upToDate.add(PluginInfo(plugin.name, current, repo))
+                        // GitHub's changelog, when it has this version, else the installed plugin's own.
+                        val sameVersion = !Versions.newer(build.version, loaded) && !Versions.newer(loaded, build.version)
+                        upToDate.add(
+                            PluginInfo(
+                                plugin.name, loaded, repo,
+                                if (sameVersion) build.changelog ?: plugin.manifest.changelog else plugin.manifest.changelog,
+                                if (sameVersion) build.changelogMedia ?: plugin.manifest.changelogMedia else plugin.manifest.changelogMedia,
+                                pending,
+                            ),
+                        )
                     }
+                }
+            }
+            // When each update was published. Only for updates, to stay within GitHub's API limit.
+            val dateFutures = updates.map { update ->
+                pool.submit(
+                    Runnable {
+                        update.releaseDate = files.lastChanged(UpdaterUi.replaceLiteral(update.build.build, "%s", update.name))
+                    },
+                )
+            }
+            for (future in dateFutures) {
+                try {
+                    future.get(30, TimeUnit.SECONDS)
+                } catch (_: Throwable) {
                 }
             }
             updates.sortBy { it.name.lowercase() }
