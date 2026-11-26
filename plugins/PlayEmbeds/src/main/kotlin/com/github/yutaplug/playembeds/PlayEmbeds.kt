@@ -607,11 +607,7 @@ class PlayEmbeds : Plugin() {
             return true
         }
         val quality = youtubeQualityChoices[embed.url] ?: youtubeQuality
-        if (youtubeResolver.cached(embed.url, quality) == null) {
-            showYoutubeLoading(container) { youtubeResolver.progress(embed.url, quality) }
-        } else {
-            showLoading(container)
-        }
+        showLoading(container)
         youtubeResolver.resolve(embed.url, quality, done)
         return true
     }
@@ -1098,21 +1094,30 @@ class PlayEmbeds : Plugin() {
         val context = container.context
         val anchor = previewView(container)
         val parent = anchor?.parent as? ViewGroup ?: container
-        val sizeId = Utils.getResId("embed_play_button_width", "dimen")
-        val size = if (sizeId > 0) context.resources.getDimensionPixelSize(sizeId) else dp(context, 48)
-        val indicator = ProgressBar(context).apply {
-            isIndeterminate = true
-            val backgroundId = Utils.getResId("drawable_circle_primary_900", "drawable")
-            if (backgroundId > 0) setBackgroundResource(backgroundId)
-            val padding = dp(context, 8)
-            setPadding(padding, padding, padding, padding)
-            indeterminateTintList = ColorStateList.valueOf(Color.WHITE)
-            alpha = 0.6f
-            elevation = dp(context, 2).toFloat()
-        }
+        val size = spinnerSize(context)
+        val indicator = loadingSpinner(context)
         parent.addView(indicator, centeredParams(parent, anchor, size, size))
         indicator.bringToFront()
         loadingIndicators[container] = indicator
+    }
+
+    /** The size of Discord's embed play button, which the spinner replaces while loading. */
+    private fun spinnerSize(context: Context): Int {
+        val sizeId = Utils.getResId("embed_play_button_width", "dimen")
+        return if (sizeId > 0) context.resources.getDimensionPixelSize(sizeId) else dp(context, 48)
+    }
+
+    private fun loadingSpinner(context: Context): ProgressBar = ProgressBar(context).apply {
+        isIndeterminate = true
+        val backgroundId = Utils.getResId("drawable_circle_primary_900", "drawable")
+        if (backgroundId > 0) setBackgroundResource(backgroundId)
+        val padding = dp(context, 8)
+        setPadding(padding, padding, padding, padding)
+        indeterminateTintList = ColorStateList.valueOf(Color.WHITE)
+        alpha = 0.6f
+        elevation = dp(context, 2).toFloat()
+        // Taps on the spinner shouldn't reach the player underneath.
+        isClickable = true
     }
 
     /** Layout params that center a view of [width]x[height] over [anchor] (or [parent] without one). */
@@ -1128,80 +1133,6 @@ class PlayEmbeds : Plugin() {
             parent is FrameLayout -> FrameLayout.LayoutParams(width, height, Gravity.CENTER)
             else -> ViewGroup.LayoutParams(width, height)
         }
-
-    /**
-     * A popup over the YouTube preview while the video is fetched, built from
-     * Discord's upload progress row (view_upload_progress): the current step,
-     * a progress bar and, once it can be estimated, the time left.
-     */
-    private fun showYoutubeLoading(container: ViewGroup, progress: () -> LoadProgress?) {
-        val context = container.context
-        val card = youtubeLoadingCard(context)
-        if (card == null) {
-            showLoading(container)
-            return
-        }
-
-        // Center over a large preview; a small thumbnail can't hold it, so use the whole card then.
-        val preview = previewView(container)
-        val maxWidth = dp(context, 260)
-        val margin = dp(context, 16)
-        val largePreview = preview != null && preview.width - margin >= dp(context, 160)
-        val anchor = if (largePreview) preview else null
-        val parent = anchor?.parent as? ViewGroup ?: container
-        val width = if (anchor != null) {
-            minOf(maxWidth, anchor.width - margin)
-        } else {
-            minOf(maxWidth, (container.width - margin).coerceAtLeast(dp(context, 160)))
-        }
-        parent.addView(card, centeredParams(parent, anchor, width, WRAP))
-        card.bringToFront()
-        loadingIndicators[container] = card
-        startLoadingTicker(card, progress)
-    }
-
-    /** The popup's content: Discord's upload progress row on a floating card, or null without it. */
-    private fun youtubeLoadingCard(context: Context): FrameLayout? {
-        val layoutId = Utils.getResId("view_upload_progress", "layout")
-        if (layoutId <= 0) return null
-        val card = FrameLayout(context).apply {
-            background = GradientDrawable().apply {
-                cornerRadius = dp(context, 8).toFloat()
-                setColor(themedColor(context, "colorBackgroundFloating", Color.DKGRAY))
-            }
-            elevation = dp(context, 4).toFloat()
-            setPadding(dp(context, 12), dp(context, 8), dp(context, 12), 0)
-            // Taps on the popup shouldn't reach the preview underneath.
-            isClickable = true
-        }
-        val content = try {
-            LayoutInflater.from(context).inflate(layoutId, card, false)
-        } catch (_: Throwable) {
-            return null
-        }
-        content.findViewById<View>(id("progress_file_image"))?.visibility = View.GONE
-        content.findViewById<TextView>(id("progress_text"))
-            ?.setTextColor(themedColor(context, "colorHeaderPrimary", Color.WHITE))
-        content.findViewById<TextView>(id("progress_subtext"))
-            ?.setTextColor(themedColor(context, "colorTextMuted", Color.LTGRAY))
-        card.addView(content)
-        return card
-    }
-
-    /** Refreshes [card] from [progress] until it's removed from its parent. */
-    private fun startLoadingTicker(card: View, progress: () -> LoadProgress?) {
-        val resolver = youtube ?: return
-        val cardRef = WeakReference(card)
-        val tick = object : Runnable {
-            override fun run() {
-                val view = cardRef.get() ?: return
-                if (view.parent == null) return
-                updateYoutubeLoading(view, progress(), resolver)
-                Utils.mainThread.postDelayed(this, LOADING_TICK_MS)
-            }
-        }
-        tick.run()
-    }
 
     /**
      * A quality label at the end of the YouTube player's control bar, styled
@@ -1556,16 +1487,12 @@ class PlayEmbeds : Plugin() {
             return
         }
         val root = control.state.root as? FrameLayout
-        val card = youtubeLoadingCard(root?.context ?: control.label.context)
-        if (root != null && card != null) {
-            val context = root.context
-            val width = minOf(dp(context, 260), (root.width - dp(context, 16)).coerceAtLeast(dp(context, 160)))
-            root.addView(card, FrameLayout.LayoutParams(width, WRAP, Gravity.CENTER))
-            card.bringToFront()
-            control.loadingCard = card
-            startLoadingTicker(card) { resolver.progress(control.url, quality) }
-        } else {
-            Utils.showToast("Loading ${quality}p…")
+        if (root != null) {
+            val spinner = loadingSpinner(root.context)
+            val size = spinnerSize(root.context)
+            root.addView(spinner, FrameLayout.LayoutParams(size, size, Gravity.CENTER))
+            spinner.bringToFront()
+            control.loadingCard = spinner
         }
         resolver.resolve(control.url, quality) { media ->
             if (control.pending != quality) return@resolve
@@ -1654,11 +1581,17 @@ class PlayEmbeds : Plugin() {
     private fun speedLabel(speed: Float): String =
         if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
 
+    /**
+     * The captions button: with one track it just turns captions on or off; with
+     * more it lists them in a bottom sheet (or a sheet drawn over the borrowed
+     * fullscreen screen, which has no fragments).
+     */
     private fun showCaptionPicker(view: View, player: AppMediaPlayer, url: String) {
         val extras = extrasFor(player)
         val tracks = extras.tracks
         if (tracks == null) {
-            Utils.showToast("Loading captions…")
+            // A second tap while the list loads would open it twice.
+            if (extras.loadingTracks) return
             loadCaptionTracks(extras, url) { loaded ->
                 when {
                     loaded == null -> Utils.showToast("Couldn't load captions", true)
@@ -1673,14 +1606,20 @@ class PlayEmbeds : Plugin() {
             return
         }
         val current = extras.pendingTrack ?: extras.track
+        if (tracks.size == 1) {
+            selectCaptions(extras, if (current == null) tracks[0] else null)
+            return
+        }
         val names = listOf("Off") + tracks.map { it.name }
-        val labels = names.mapIndexed { index, name ->
-            val selected = if (index == 0) current == null else tracks[index - 1] === current
-            if (selected) "✓ $name" else name
-        }.toTypedArray()
-        showPicker(view, "PlayEmbedsCaptions", "Captions", labels) { which ->
+        val selected = if (current == null) 0 else tracks.indexOfFirst { it === current } + 1
+        val onPick: (Int) -> Unit = { which ->
             if (which == 0) selectCaptions(extras, null) else tracks.getOrNull(which - 1)?.let { selectCaptions(extras, it) }
         }
+        if (activityFrom(view.context) !is FragmentActivity) {
+            val labels = names.mapIndexed { index, name -> if (index == selected) "✓ $name" else name }.toTypedArray()
+            if (showOverlayPicker(view, "Captions", labels, onPick, sheet = true)) return
+        }
+        CaptionsSheet(names, selected, onPick).show(fragmentManagerFor(view.context), "PlayEmbedsCaptions")
     }
 
     /** Looks up [url]'s caption tracks once per player; [done] gets them (null when the lookup failed). */
@@ -1847,38 +1786,6 @@ class PlayEmbeds : Plugin() {
             current = current.parent as? View
         }
         return if (current === ancestor) top else null
-    }
-
-    private fun updateYoutubeLoading(card: View, tracker: LoadProgress?, resolver: YoutubeResolver) {
-        val stage = tracker?.stage
-        val total = tracker?.totalBytes ?: 0L
-        val percent = if (tracker != null && stage == LoadStage.DOWNLOADING && total > 0) {
-            (tracker.downloadedBytes.get() * 100L / total).toInt().coerceIn(0, 100)
-        } else {
-            null
-        }
-        card.findViewById<TextView>(id("progress_text"))?.text = when (stage) {
-            null -> "Loading video"
-            LoadStage.RESOLVING -> "Finding video"
-            LoadStage.DOWNLOADING -> if (percent != null) "Downloading video · $percent%" else "Downloading video"
-            LoadStage.MUXING -> "Preparing video"
-        }
-        val remaining = tracker?.let(resolver::estimateMs)
-        card.findViewById<TextView>(id("progress_subtext"))?.text =
-            if (remaining != null) formatRemaining(remaining) else ""
-        card.findViewById<ProgressBar>(id("progress_bar"))?.let { bar ->
-            if (percent != null) {
-                if (bar.isIndeterminate) bar.isIndeterminate = false
-                bar.progress = percent
-            } else if (!bar.isIndeterminate) {
-                bar.isIndeterminate = true
-            }
-        }
-    }
-
-    private fun formatRemaining(ms: Long): String {
-        val seconds = ((ms + 999L) / 1_000L).coerceAtLeast(1L)
-        return if (seconds < 60L) "~${seconds}s left" else "~${(seconds + 30L) / 60L} min left"
     }
 
     private fun themedColor(context: Context, attrName: String, fallback: Int): Int {
@@ -2569,8 +2476,17 @@ class PlayEmbeds : Plugin() {
         }.show(fragmentManagerFor(view.context), tag)
     }
 
-    /** Discord's dialog_simple_selector in the [FullscreenOverlay] around [view]; false when there's none. */
-    private fun showOverlayPicker(view: View, title: String, items: Array<String>, onPick: (Int) -> Unit): Boolean {
+    /**
+     * Discord's dialog_simple_selector in the [FullscreenOverlay] around [view]; false when there's none.
+     * With [sheet] it sits at the bottom edge like a bottom sheet instead of in the middle.
+     */
+    private fun showOverlayPicker(
+        view: View,
+        title: String,
+        items: Array<String>,
+        onPick: (Int) -> Unit,
+        sheet: Boolean = false,
+    ): Boolean {
         var parent = view.parent
         while (parent != null && parent !is FullscreenOverlay) parent = parent.parent
         val overlay = parent as? FullscreenOverlay ?: return false
@@ -2589,7 +2505,7 @@ class PlayEmbeds : Plugin() {
         val list = dialog.findViewById<View>(id("dialog_selections")) ?: return false
         val scrim = FrameLayout(context).apply {
             tag = OVERLAY_PICKER_TAG
-            setBackgroundColor(PICKER_SCRIM)
+            setBackgroundColor(if (sheet) SHEET_SCRIM else PICKER_SCRIM)
             isClickable = true
         }
         val close = { overlay.removeView(scrim) }
@@ -2619,14 +2535,26 @@ class PlayEmbeds : Plugin() {
         dialog.removeView(list)
         dialog.addView(scroll, index, LinearLayout.LayoutParams(MATCH, WRAP))
         dialog.background = GradientDrawable().apply {
-            cornerRadius = dp(context, 8).toFloat()
+            val radius = dp(context, 8).toFloat()
+            if (sheet) {
+                cornerRadii = floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
+            } else {
+                cornerRadius = radius
+            }
             setColor(themedColor(context, "colorBackgroundPrimary", Color.DKGRAY))
         }
         dialog.clipToOutline = true
         // Taps inside the dialog don't reach the scrim, which closes it.
         dialog.isClickable = true
-        val width = minOf(dp(context, PICKER_MAX_WIDTH_DP), overlay.width - dp(context, 32))
-        scrim.addView(dialog, FrameLayout.LayoutParams(width, WRAP, Gravity.CENTER))
+        if (sheet) {
+            // A sheet has no cancel button; tapping above it closes it.
+            dialog.findViewById<View>(id("dialog_cancel"))?.visibility = View.GONE
+            val width = minOf(dp(context, SHEET_MAX_WIDTH_DP), overlay.width)
+            scrim.addView(dialog, FrameLayout.LayoutParams(width, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+        } else {
+            val width = minOf(dp(context, PICKER_MAX_WIDTH_DP), overlay.width - dp(context, 32))
+            scrim.addView(dialog, FrameLayout.LayoutParams(width, WRAP, Gravity.CENTER))
+        }
         overlay.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
         return true
     }
@@ -2741,7 +2669,6 @@ class PlayEmbeds : Plugin() {
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         private const val DETACH_RELEASE_DELAY_MS = 1_000L
         private const val MIN_VISIBLE_FRACTION = 0.25f
-        private const val LOADING_TICK_MS = 500L
         private const val FULLSCREEN_BUTTON_TAG = "PlayEmbedsFullscreen"
         private const val SEEKBAR_ROW_TAG = "PlayEmbedsSeekbarRow"
         private const val TOP_BUTTONS_TAG = "PlayEmbedsTopButtons"
@@ -2755,6 +2682,8 @@ class PlayEmbeds : Plugin() {
         private const val MIN_STRIP_GAP_DP = 4
         private const val PICKER_SCRIM = 0x99000000.toInt()
         private const val PICKER_MAX_HEIGHT = 0.5f
+        private const val SHEET_SCRIM = 0x40000000
+        private const val SHEET_MAX_WIDTH_DP = 480
         private const val PICKER_MAX_WIDTH_DP = 400
         private val PLAYBACK_SPEEDS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
         private const val CAPTION_TICK_MS = 100L

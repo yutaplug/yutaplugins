@@ -1,9 +1,13 @@
-version = "1.1.0"
+version = "1.1.1"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.1.1
+        * Videos and quality changes show just a loading spinner instead of a progress box
+        * The captions button turns captions on or off right away when there's only one language, and opens a bottom sheet to pick one when there are more
+
         # 1.1.0
         * Cleaner, more compact video controls: play/pause in the middle, buttons in the top right, and a slim time and seekbar row at the bottom
         * Lighter, more see-through background behind the controls
