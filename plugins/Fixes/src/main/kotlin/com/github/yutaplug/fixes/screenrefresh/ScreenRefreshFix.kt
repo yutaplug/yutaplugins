@@ -7,8 +7,12 @@ import android.content.res.Configuration
 import android.content.res.Resources
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import android.util.TypedValue
 import androidx.appcompat.app.AppCompatActivity
+import com.aliucord.Utils
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.discord.app.AppActivity
@@ -22,17 +26,19 @@ import java.util.Locale
 /**
  * Every time a screen comes back to the front, AppActivity compares the language in its resources
  * with Discord's language setting, and if they differ it finishes and relaunches itself through
- * `b(locale, true)`. That's meant for when the user changes the language. On some Android 14+
- * builds and OEM skins (OneUI, OxygenOS, GrapheneOS), the system resets the resources' locale
- * when the screen resumes, or adds regional-preference extensions (`en-US-u-fw-mon`). The check
- * then fails every time you come back from the image viewer or settings, and the chat reloads at
- * the top (Aliucord issues #429 and #776).
+ * `b(locale, true)`. That's meant for when the user changes the language. On some phones (Android 14+
+ * builds and OEM skins like OneUI, OxygenOS and GrapheneOS, but also an LG on Android 11), the system
+ * resets the resources' locale to the system language shortly after the screen resumes, or adds
+ * regional-preference extensions (`en-US-u-fw-mon`). The check then fails every time you come back
+ * from the image viewer or settings, and the chat reloads at the top (Aliucord issues #429 and #776).
  *
  * When the language setting hasn't changed since this screen applied it (`r`), apply it again
- * without relaunching. A real language change still relaunches the screen like before.
+ * without relaunching. A real language change still relaunches the screen like before. The settings
+ * observer that calls `b()` (`AppActivity$c`) also relaunches the screen itself right after it, so
+ * that one relaunch is skipped too, unless the theme or font scale really changed.
  *
- * Temporary: it also records every screen's lifecycle to [RefreshLog], which the user can save from
- * the Fixes settings, because the fix doesn't work for everyone yet.
+ * It also records every screen's lifecycle to [RefreshLog], which the user can save from the Fixes
+ * settings, in case the screen still reloads on some phone.
  */
 internal class ScreenRefreshFix :
     Fix(
@@ -40,10 +46,6 @@ internal class ScreenRefreshFix :
         "Screen refresh",
         "Fixes the app reloading and jumping back to the start of the chat or settings after you close " +
             "an image, a video or a settings page. This only happens on some phones.",
-        // Temporary, until a user's log shows why it doesn't work for everyone yet.
-        enabledByDefault = false,
-        warning = "Not working yet, so it's off by default. Only turn it on if you were asked to, " +
-            "to save a screen refresh log.",
     ) {
     override fun start(context: Context) {
         RefreshLog.init(context)
@@ -68,26 +70,44 @@ internal class ScreenRefreshFix :
                         "${currentLocale(activity)}, putting $locale back",
                 )
                 call.args[1] = false
+                // The settings observer (AppActivity$c) that called b() still relaunches the screen
+                // itself right after b() returns, so skip that relaunch too. Cleared on the next
+                // main-thread message, so it only covers this one call.
+                keptActivity = activity
+                mainHandler.post { keptActivity = null }
             },
         )
-        // Logs the remaining reasons a screen relaunches itself (theme, font scale, language on resume).
+        // Skips the observer's relaunch above, and logs the remaining reasons a screen relaunches
+        // itself (theme, font scale, language on resume).
         patcher.patch(
             AppActivity::class.java,
             "i",
             arrayOf(AppActivity::class.java, java.lang.Boolean.TYPE, Integer.TYPE, Any::class.java),
-            Hook { call ->
-                val activity = call.args[0] as? AppActivity ?: return@Hook
+            PreHook { call ->
+                val activity = call.args[0] as? AppActivity ?: return@PreHook
                 try {
                     val settings = StoreStream.getUserSettingsSystem()
                     val system = FontUtils.INSTANCE.getSystemFontScaleInt(activity.contentResolver)
+                    val fontChanged = if (settings.fontScale == -1) {
+                        activity.q != system
+                    } else {
+                        activity.q != settings.fontScale
+                    }
+                    val themeChanged = themeName(activity)?.let { it != settings.theme } ?: false
+                    if (activity === keptActivity && !fontChanged && !themeChanged) {
+                        keptActivity = null
+                        note("Skipped Discord's relaunch of ${name(activity)} after putting the language back")
+                        call.result = null
+                        return@PreHook
+                    }
                     note(
                         "${name(activity)} relaunched by Discord: language ${currentLocale(activity)} " +
                             "(setting ${settings.locale}, applied ${activity.r}), font scale ${activity.q} " +
-                            "(setting ${settings.fontScale}, system $system), theme setting ${settings.theme}, " +
-                            "called from ${caller()}",
+                            "(setting ${settings.fontScale}, system $system), theme setting ${settings.theme} " +
+                            "(screen ${themeName(activity)}), called from ${caller()}",
                     )
                 } catch (error: Throwable) {
-                    logger.error("Could not log relaunch", error)
+                    logger.error("Could not check relaunch", error)
                 }
             },
         )
@@ -153,7 +173,25 @@ internal class ScreenRefreshFix :
         )
     }
 
-    override fun stop(context: Context) {}
+    override fun stop(context: Context) {
+        keptActivity = null
+    }
+
+    /** The screen whose language b() just put back, so its observer's follow-up relaunch is skipped. */
+    private var keptActivity: AppActivity? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** The theme this screen was created with (Discord's `theme_name` attr), as Discord's observer checks it. */
+    private fun themeName(activity: AppActivity): String? = try {
+        val value = TypedValue()
+        if (activity.theme.resolveAttribute(Utils.getResId("theme_name", "attr"), value, true)) {
+            value.string?.toString()
+        } else {
+            null
+        }
+    } catch (_: Throwable) {
+        null
+    }
 
     private fun note(message: String) {
         logger.info(message)

@@ -13,8 +13,8 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Temporary diagnostics for [ScreenRefreshFix]: a small log file in the app's own storage, so it survives the
- * process being killed, that the user can save to Downloads from the Fixes settings. Remove once the fix works.
+ * Diagnostics for [ScreenRefreshFix]: a small log file in the app's own storage, so it survives the
+ * process being killed, that the user can save to Downloads from the Fixes settings.
  */
 internal object RefreshLog {
     private const val FILE_NAME = "screenrefresh-log.txt"

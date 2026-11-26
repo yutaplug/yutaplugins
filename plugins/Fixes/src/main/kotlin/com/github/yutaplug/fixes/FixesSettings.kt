@@ -86,7 +86,7 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
         }
     }
 
-    /** Temporary: saves [ScreenRefreshFix]'s diagnostics log to Downloads as a .txt file. */
+    /** Saves [ScreenRefreshFix]'s diagnostics log to Downloads as a .txt file. */
     private fun saveRefreshLog(fix: ScreenRefreshFix) {
         val context = requireContext().applicationContext
         Utils.threadPool.execute {

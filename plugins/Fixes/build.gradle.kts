@@ -1,4 +1,4 @@
-version = "1.0.8"
+version = "1.0.9"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,9 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.9
+        * Screen refresh: now on by default. It also stops the second reload Discord started right after the fix put your language back, which is why it didn't work before
+
         # 1.0.8
         * GitHub updater: replaces the Raw GitHub updater, and Aliucord's own updater for both plugins and Aliucord itself. Updates come straight from GitHub at the latest commit, so new versions show up right away, and each download is checked before it replaces the old version, which fixes plugins asking to restart over and over
         * GitHub updater: a new Updater screen, a message with an Update button when updates are found at startup, a restart prompt after updating, and a message saying what was updated after the restart, with its changelog
