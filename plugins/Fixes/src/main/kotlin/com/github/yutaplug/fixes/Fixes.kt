@@ -17,6 +17,8 @@ import com.github.yutaplug.fixes.markdown.MarkdownAppearance
 import com.github.yutaplug.fixes.markdown.MarkdownFix
 import com.github.yutaplug.fixes.messagelink.MessageLinkFix
 import com.github.yutaplug.fixes.messagewidth.MessageWidthFix
+import com.github.yutaplug.fixes.newbadges.NewBadgesFix
+import com.github.yutaplug.fixes.pasteimages.PasteImagesFix
 import com.github.yutaplug.fixes.qrlogin.QRCodeLogin
 import com.github.yutaplug.fixes.rawgithub.RawGitHubUpdater
 import com.github.yutaplug.fixes.searchhistory.SearchHistoryFix
@@ -54,6 +56,8 @@ class Fixes : Plugin() {
         ServerHoldFix(),
         ScreenRefreshFix(),
         IPv4FirstFix(),
+        PasteImagesFix(),
+        NewBadgesFix(),
     )
 
     internal val markdown: MarkdownFix get() = fixes.first { it is MarkdownFix } as MarkdownFix
@@ -97,7 +101,7 @@ class Fixes : Plugin() {
         OpenActivities.stop()
     }
 
-    internal fun isFixEnabled(fix: Fix): Boolean = settings.getBool(enabledKey(fix), true)
+    internal fun isFixEnabled(fix: Fix): Boolean = settings.getBool(enabledKey(fix), fix.enabledByDefault)
 
     internal fun setFixEnabled(fix: Fix, enabled: Boolean) {
         settings.setBool(enabledKey(fix), enabled)

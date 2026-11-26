@@ -6,12 +6,15 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.aliucord.Utils
+import com.aliucord.fragments.ConfirmDialog
 import com.aliucord.fragments.SettingsPage
 import com.discord.utilities.drawable.DrawableCompat
 import com.discord.views.CheckedSetting
 import com.github.yutaplug.fixes.markdown.MarkdownAppearance
 import com.github.yutaplug.fixes.markdown.MarkdownFix
 import com.github.yutaplug.fixes.markdown.MarkdownFixSettings
+import com.github.yutaplug.fixes.screenrefresh.RefreshLog
+import com.github.yutaplug.fixes.screenrefresh.ScreenRefreshFix
 import com.github.yutaplug.fixes.serversettings.ServerSettingsFix
 import com.github.yutaplug.fixes.serversettings.ServerSettingsOptions
 import com.lytefast.flexinput.R
@@ -28,6 +31,7 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
         header("Fixes")
         for (fix in plugin.fixes) {
             val subtext = buildString {
+                fix.warning?.let { append("⚠ ").append(it).append("\n\n") }
                 append(fix.description)
                 fix.author?.let { append("\nMade by ").append(it) }
                 if (fix.requiresRestart) append("\nToggling requires a restart.")
@@ -35,7 +39,31 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
             addView(
                 Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, fix.title, subtext).apply {
                     isChecked = plugin.isFixEnabled(fix)
-                    setOnCheckedListener { plugin.setFixEnabled(fix, it) }
+                    var reverting = false
+                    setOnCheckedListener { checked ->
+                        if (reverting) return@setOnCheckedListener
+                        val warning = fix.warning
+                        if (!checked || warning == null) {
+                            plugin.setFixEnabled(fix, checked)
+                            return@setOnCheckedListener
+                        }
+                        // Stays off until the warning is confirmed.
+                        reverting = true
+                        isChecked = false
+                        reverting = false
+                        val dialog = ConfirmDialog()
+                        dialog
+                            .setTitle("Turn on ${fix.title}?")
+                            .setDescription(warning)
+                            .setIsDangerous(true)
+                            .setOnOkListener {
+                                reverting = true
+                                isChecked = true
+                                reverting = false
+                                plugin.setFixEnabled(fix, true)
+                                dialog.dismiss()
+                            }.show(parentFragmentManager, "FixWarning")
+                    }
                 },
             )
             if (fix is MarkdownFix) {
@@ -43,11 +71,27 @@ class FixesSettings(private val plugin: Fixes) : SettingsPage() {
                     Utils.openPageWithProxy(requireContext(), MarkdownFixSettings(plugin.settings, plugin.markdown))
                 }
             }
+            if (fix is ScreenRefreshFix) {
+                row("Save screen refresh log", "ic_file_download_white_24dp") { saveRefreshLog(fix) }
+            }
             if (fix is ServerSettingsFix) {
                 row("Server settings options", "ic_settings_grey_a60_24dp") {
                     Utils.openPageWithProxy(requireContext(), ServerSettingsOptions(plugin, fix))
                 }
             }
+        }
+    }
+
+    /** Temporary: saves [ScreenRefreshFix]'s diagnostics log to Downloads as a .txt file. */
+    private fun saveRefreshLog(fix: ScreenRefreshFix) {
+        val context = requireContext().applicationContext
+        Utils.threadPool.execute {
+            val result = try {
+                "Saved to Downloads/" + RefreshLog.saveToDownloads(context, fix.exportText(context))
+            } catch (e: Throwable) {
+                "Could not save the log: ${e.message ?: e.javaClass.simpleName}"
+            }
+            Utils.mainThread.post { Utils.showToast(result, true) }
         }
     }
 

@@ -1,4 +1,4 @@
-version = "1.0.6"
+version = "1.0.7"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +13,11 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.7
+        * New badges: new fix that shows newer Discord badges on profiles, like Account Age, which Discord didn't send to Aliucord
+        * Paste images: new fix that lets you paste images from the clipboard into the chat box as attachments
+        * Screen refresh: off by default for now, since it doesn't work for everyone yet. If you were asked to, you can turn it on and save a log from the plugin settings
+
         # 1.0.6
         * Screen refresh: new fix for the app reloading and jumping back to the start of the chat or settings after you close an image, a video or a settings page, on some phones
         * Message links: links to a channel, thread or forum post now open in Aliucord instead of the browser

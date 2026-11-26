@@ -17,6 +17,10 @@ internal abstract class Fix(
     val author: String? = null,
     /** Hooks that only take effect for newly created activities or after Discord caches them. */
     val requiresRestart: Boolean = false,
+    /** Whether the fix is on until the user toggles it. Only an explicit toggle is saved. */
+    val enabledByDefault: Boolean = true,
+    /** Shown in the settings, and confirmed before turning the fix on, e.g. while it's still being tested. */
+    val warning: String? = null,
 ) {
     lateinit var plugin: Fixes
         private set
