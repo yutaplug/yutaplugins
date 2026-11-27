@@ -26,6 +26,10 @@ internal object Prefs {
     const val DEFAULT_DELETED_LABEL_COLOR = "#FFFF0000"
     const val DEFAULT_DELETED_MESSAGE_COLOR = "#FFFFFFFF"
 
+    const val HIDE_ENABLED = "hideMessages"
+    const val HIDE_PERSIST = "hidePersist"
+    const val HIDDEN_IDS = "hiddenMessages"
+
     const val IGNORE_OWN = "ignoreOwn"
     const val IGNORE_BOTS = "ignoreBots"
 
@@ -44,7 +48,11 @@ internal object Prefs {
 
     fun persist(settings: SettingsAPI) = settings.getBool(PERSIST, false)
 
-    fun showDeletedTag(settings: SettingsAPI) = settings.getBool(SHOW_DELETED_TAG, true)
+    fun hideEnabled(settings: SettingsAPI) = settings.getBool(HIDE_ENABLED, true)
+
+    fun hidePersist(settings: SettingsAPI) = settings.getBool(HIDE_PERSIST, false)
+
+    fun showDeletedTag(settings: SettingsAPI) =settings.getBool(SHOW_DELETED_TAG, true)
 
     fun labelColor(settings: SettingsAPI) = color(settings, DELETED_LABEL_COLOR, DEFAULT_DELETED_LABEL_COLOR)
 

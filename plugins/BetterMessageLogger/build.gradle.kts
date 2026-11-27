@@ -1,9 +1,12 @@
-version = "1.1.0"
+version = "1.1.1"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.1.1
+        * Hide Message can be turned off in the settings
+        * Choose whether hidden messages stay hidden until Discord restarts or across restarts
         # 1.1.0
         * Rewritten from scratch, with a faster database that also works when logs aren't saved across restarts
         * New dashboard (top of the settings): browse by server, channel, DM or person, filter deleted or edited, search, and jump to a message

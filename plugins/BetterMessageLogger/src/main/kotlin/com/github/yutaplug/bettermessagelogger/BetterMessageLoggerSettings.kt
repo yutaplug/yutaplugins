@@ -39,6 +39,22 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         linearLayout.setBackgroundColor(ui.pageColor)
 
         logs = ui.option(linearLayout, "Dashboard", "") { LogViewer.openHome(requireContext()) }
+
+        section("Hide Message")
+        ui.switch(
+            linearLayout,
+            "Hide Message",
+            "Adds Hide Message to the message menu, which hides a message from chat on this device only",
+            Prefs.hideEnabled(settings),
+        ) {
+            setHiding(it)
+            refresh()
+        }
+        option(Prefs.HIDE_PERSIST, "Keep hidden") {
+            choose("Keep hidden", KEEP_CHOICES) {
+                if (log != null) log?.setHidePersist(it == 1) else settings.setBool(Prefs.HIDE_PERSIST, it == 1)
+            }
+        }
         hidden = ui.option(linearLayout, "Hidden messages", "") {
             log?.unhideAll()
             refresh()
@@ -132,9 +148,15 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         summaries[Prefs.SHOW_DELETED_TAG]?.text = TAG_CHOICES[if (Prefs.showDeletedTag(settings)) 0 else 1]
         summaries[Prefs.DELETED_LABEL_COLOR]?.text = colorName(Prefs.labelColor(settings))
         summaries[Prefs.DELETED_MESSAGE_COLOR]?.text = colorName(Prefs.textColor(settings))
+        val hiding = Prefs.hideEnabled(settings)
+        val acrossRestarts = Prefs.hidePersist(settings)
+        summaries[Prefs.HIDE_PERSIST]?.let {
+            it.text = KEEP_CHOICES[if (acrossRestarts) 1 else 0]
+            (it.parent as? View)?.visibility = if (hiding) View.VISIBLE else View.GONE
+        }
         val count = log?.hiddenCount ?: 0
-        hidden?.text = "$count hidden until restart. Tap to show them again."
-        (hidden?.parent as? View)?.visibility = if (count > 0) View.VISIBLE else View.GONE
+        hidden?.text = "$count hidden${if (acrossRestarts) "" else " until restart"}. Tap to show them again."
+        (hidden?.parent as? View)?.visibility = if (hiding && count > 0) View.VISIBLE else View.GONE
         refreshLogs()
     }
 
@@ -196,6 +218,11 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
     private fun setKeep(persist: Boolean) {
         settings.setBool(Prefs.PERSIST, persist)
         log?.setPersist(persist)
+    }
+
+    private fun setHiding(enabled: Boolean) {
+        val log = log
+        if (log != null) log.setHidingEnabled(enabled) else settings.setBool(Prefs.HIDE_ENABLED, enabled)
     }
 
     private fun setIgnore(choice: Int) {

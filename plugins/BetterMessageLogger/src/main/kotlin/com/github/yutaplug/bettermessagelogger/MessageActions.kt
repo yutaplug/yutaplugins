@@ -82,12 +82,14 @@ internal class MessageActions(private val log: MessageLog, private val reportErr
             }
             rows.add(history)
         }
-        NativeRows.dress(hide, "${TAG}hide", "Hide Message", "design_ic_visibility_off") {
-            log.hide(id)
-            sheet.dismiss()
-            Utils.showToast("Hidden until Discord restarts")
+        if (log.hidingEnabled) {
+            NativeRows.dress(hide, "${TAG}hide", "Hide Message", "design_ic_visibility_off") {
+                log.hide(id)
+                sheet.dismiss()
+                Utils.showToast(if (log.hidesAcrossRestarts) "Hidden on this device" else "Hidden until Discord restarts")
+            }
+            rows.add(hide)
         }
-        rows.add(hide)
         if (saved != null) {
             NativeRows.dress(delete, "${TAG}delete", "Remove From Log", "ic_delete_24dp") {
                 log.delete(id)

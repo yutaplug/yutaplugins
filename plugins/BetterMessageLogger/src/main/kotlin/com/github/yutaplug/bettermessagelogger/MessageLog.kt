@@ -50,6 +50,7 @@ internal class MessageLog(
     fun start(mediaFolder: File) {
         media = MediaStore(mediaFolder, reportError) { synchronized(lock) { shown.clear() }; changed() }
         database = LogDatabase(reportError)
+        loadHidden()
         open(Prefs.persist(settings), importOld = true)
     }
 
@@ -201,18 +202,52 @@ internal class MessageLog(
 
     fun record(id: Long): MessageRecord? = synchronized(lock) { logged[id] }?.takeIf(filters::logs)
 
-    /** Hides a message from chat until Discord restarts. */
+    /** Whether Hide Message is on; when off, hidden messages show again (the list is kept). */
+    @Volatile var hidingEnabled = Prefs.hideEnabled(settings)
+        private set
+
+    /** Hides a message from chat, until Discord restarts or for good, as the settings say. */
     fun hide(id: Long) {
-        synchronized(lock) { hidden.add(id) }
+        synchronized(lock) {
+            hidden.add(id)
+            while (hidden.size > HIDDEN_LIMIT) hidden.remove(hidden.first())
+        }
+        saveHidden()
         changed()
     }
 
     fun unhideAll() {
         synchronized(lock) { hidden.clear() }
+        saveHidden()
         changed()
     }
 
     val hiddenCount get() = synchronized(lock) { hidden.size }
+
+    val hidesAcrossRestarts get() = Prefs.hidePersist(settings)
+
+    fun setHidingEnabled(enabled: Boolean) {
+        settings.setBool(Prefs.HIDE_ENABLED, enabled)
+        hidingEnabled = enabled
+        changed()
+    }
+
+    /** Kept across restarts: saves the current list. Until restart: forgets the saved list, keeping this session's. */
+    fun setHidePersist(persist: Boolean) {
+        settings.setBool(Prefs.HIDE_PERSIST, persist)
+        saveHidden()
+    }
+
+    private fun loadHidden() {
+        if (!Prefs.hidePersist(settings)) return
+        val saved = settings.getString(Prefs.HIDDEN_IDS, "").orEmpty().split(',').mapNotNull { it.trim().toLongOrNull() }
+        synchronized(lock) { hidden.addAll(saved) }
+    }
+
+    private fun saveHidden() {
+        val value = if (Prefs.hidePersist(settings)) synchronized(lock) { hidden.joinToString(",") } else ""
+        settings.setString(Prefs.HIDDEN_IDS, value)
+    }
 
     /**
      * The chat list Discord is about to show, with hidden messages removed and logged deleted ones added back.
@@ -230,6 +265,7 @@ internal class MessageLog(
             if (message.id > newest) newest = message.id
         }
         val result = synchronized(lock) {
+            val hidden = if (hidingEnabled) hidden else emptySet<Long>()
             val kept = if (hidden.isEmpty()) messages else messages.filter { it.id !in hidden }
             if (oldest == Long.MAX_VALUE) return@synchronized kept
             val window = oldest..(if (detached) newest else Long.MAX_VALUE)
@@ -498,6 +534,7 @@ internal class MessageLog(
         private const val LIVE_CACHE = 2048
         private const val LOGGED_CACHE = 4096
         private const val WINDOWS = 32
+        private const val HIDDEN_LIMIT = 5000
         private const val PREFETCH_HISTORY_MS = 24L * 60 * 60 * 1000
     }
 }
