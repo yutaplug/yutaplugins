@@ -17,7 +17,6 @@ aliucord {
         """
         # 1.0.14
         * Voice and video calls: new fix that makes voice calls, server voice channels, camera video and screen sharing work again, with the end-to-end encryption (DAVE) Discord now requires. Type /davevoice in a call to see its status
-        * The DaveVoice plugin is uninstalled automatically, since Fixes replaces it
 
         # 1.0.13
         * GitHub updater: new "Update from the popup" option. Turn it off and tapping the updates popup opens the Updater, so you can read the changelogs and choose what to install
