@@ -2425,8 +2425,34 @@ class PlayEmbeds : Plugin() {
             // Closing: return the player now rather than once it's destroyed, after Discord resumes.
             if (activity.isFinishing && hosted?.activity === activity) hostClosed(activity)
         }
-        override fun onActivityStopped(activity: Activity) {}
+        override fun onActivityStopped(activity: Activity) {
+            // Rebuilt (rotation): the player carries on in the new one.
+            if (!activity.isChangingConfigurations) pausePlayersIn(activity)
+        }
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+    }
+
+    /**
+     * Pauses every player shown in [activity] once it's no longer visible: another
+     * screen opened over it (settings, a profile, a link in the browser) or the app
+     * went to the background. The chat rows stay attached then, so the scroll and
+     * detach checks never see them leave. Like scrolling away, it isn't resumed.
+     */
+    private fun pausePlayersIn(activity: Activity) {
+        val decor = activity.window?.peekDecorView() ?: return
+        for (state in players.values.toList()) {
+            val root = state.root
+            if (root.isAttachedToWindow && root.rootView === decor && NativePlayers.isPlaying(state.player)) {
+                DebugLog.log("embed screen stopped: paused")
+                NativePlayers.pause(state.player)
+            }
+        }
+        for (session in listOfNotNull(rotated, hosted)) {
+            if (session.activity === activity && NativePlayers.isPlaying(session.player)) {
+                DebugLog.log("fullscreen screen stopped: paused")
+                NativePlayers.pause(session.player)
+            }
+        }
     }
 
     @Suppress("DEPRECATION")

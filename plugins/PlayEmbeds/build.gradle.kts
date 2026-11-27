@@ -1,9 +1,12 @@
-version = "1.1.1"
+version = "1.1.2"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.1.2
+        * Embeds pause when you leave the chat for another screen (like user settings), open a link, or minimize the app
+
         # 1.1.1
         * Videos and quality changes show just a loading spinner instead of a progress box
         * The captions button turns captions on or off right away when there's only one language, and opens a bottom sheet to pick one when there are more
