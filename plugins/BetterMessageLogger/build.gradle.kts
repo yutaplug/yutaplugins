@@ -1,9 +1,24 @@
-version = "1.0.29"
+version = "1.1.0"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.1.0
+        * Rewritten from scratch, with a faster database that also works when logs aren't saved across restarts
+        * New dashboard (top of the settings): browse by server, channel, DM or person, filter deleted or edited, search, and jump to a message
+        * Hide any message until you restart Discord from its long-press menu
+        * Edit history is always logged and shown in chat (the option is gone), and edits that remove an attachment keep that attachment
+        * Choose which media is saved: uploaded files or link embeds, and images, videos, audio or other files, with a size limit
+        * Pre-download media everywhere or only in selected servers, channels, DMs and people, with exclusions and an option for your own messages
+        * Saved audio and files open from storage, and their download button saves a copy to Downloads
+        * Deletions and edits of messages logged in an earlier session are now recorded even if you haven't opened that chat
+        * Simpler settings: each option shows its current choice and opens a pop-up, and filter lists have their own pages
+        * Deleted tag and text colors: choose one of Discord's colors, or pick any color with a picker or hex code
+        * Deleted media is kept across restarts whenever logs are
+        * Message Logger options for servers, channels and DMs, and edit history, now open as full pages
+        * Block or allow a person, or see what they had logged, from the three dots on their profile
+        * HideMessagesLocally is uninstalled automatically, since Hide Message replaces it and it made the logger record hidden messages as deleted
         # 1.0.29
         * The clear logs dialog no longer stops opening after you open and close another screen, like settings or an image
         # 1.0.28
