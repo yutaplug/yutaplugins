@@ -1,4 +1,6 @@
-version = "1.0.13"
+import org.gradle.kotlin.dsl.support.serviceOf
+
+version = "1.0.14"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -13,6 +15,10 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.0.14
+        * Voice and video calls: new fix that makes voice calls, server voice channels, camera video and screen sharing work again, with the end-to-end encryption (DAVE) Discord now requires. Type /davevoice in a call to see its status
+        * The DaveVoice plugin is uninstalled automatically, since Fixes replaces it
+
         # 1.0.13
         * GitHub updater: new "Update from the popup" option. Turn it off and tapping the updates popup opens the Updater, so you can read the changelogs and choose what to install
 
@@ -81,4 +87,89 @@ aliucord {
         * Initial release
         """.trimIndent(),
     )
+}
+
+// The voice fix (voice/) uses BouncyCastle's MLS implementation (MIT) for DAVE's group key exchange. It's bundled
+// into the plugin, shrunk by R8 to what the plugin reaches (no obfuscation or optimisation: bcmls decodes messages
+// through reflection, and the plugin's own classes are kept exactly as compiled).
+val bundled: Configuration by configurations.creating
+
+dependencies {
+    val bcmls = "org.bouncycastle:bcmls-jdk18on:1.87"
+    compileOnly(bcmls)
+    bundled(bcmls)
+}
+
+// bcmls' LifeTime uses java.time (Android 8+ only). Fixes ships a Kotlin replacement of that one class
+// (src/main/kotlin/org/bouncycastle/mls/TreeKEM/LifeTime.kt), so BouncyCastle's own copy is left out of the bundle.
+val bcJar by tasks.registering(Jar::class) {
+    // locals only: the lambda must not capture the script (configuration cache)
+    val archives = project.serviceOf<ArchiveOperations>()
+    val jars = bundled.elements
+    from(jars.map { files -> files.map { archives.zipTree(it.asFile) } }) {
+        exclude("META-INF/**", "**/module-info.class", "org/bouncycastle/mls/TreeKEM/LifeTime.class")
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    destinationDirectory.set(layout.buildDirectory.dir("intermediates/bundle"))
+    archiveFileName.set("bouncycastle.jar")
+}
+
+val pluginClassesJar by tasks.registering(Jar::class) {
+    dependsOn("compileDebugKotlin")
+    from(layout.buildDirectory.dir("tmp/kotlin-classes/debug"))
+    destinationDirectory.set(layout.buildDirectory.dir("intermediates/bundle"))
+    archiveFileName.set("plugin-classes.jar")
+}
+
+val bundleDir = layout.buildDirectory.dir("intermediates/bundle/classes")
+
+val shrinkBundle by tasks.registering(JavaExec::class) {
+    dependsOn(bcJar, pluginClassesJar)
+    val sdkDir = android.sdkDirectory
+    val rules = file("bundle-rules.pro")
+    val d8 = File(sdkDir, "build-tools").listFiles { f -> File(f, "lib/d8.jar").exists() }
+        ?.maxByOrNull { it.name }
+        ?.let { File(it, "lib/d8.jar") }
+        ?: error("No Android build-tools with lib/d8.jar in $sdkDir")
+    val androidJar = File(sdkDir, "platforms").listFiles()!!
+        .map { File(it, "android.jar") }
+        .filter { it.exists() }
+        .minByOrNull { it.path }!!
+    // Only the Kotlin stdlib as library classes: Discord's and Aliucord's jars overlap, which R8 refuses. What stays
+    // unresolved is Discord/Aliucord code that exists at runtime (bundle-rules.pro ignores those warnings).
+    val compileJars = configurations.getByName("debugCompileClasspath").incoming.artifactView {
+        attributes { attribute(Attribute.of("artifactType", String::class.java), "jar") }
+        lenient(true)
+    }.files.filter { it.name.startsWith("kotlin-stdlib") }
+
+    // plain values only below: lambdas here must not capture script objects (configuration cache)
+    val outDir = bundleDir.get().asFile
+    val bcFile = bcJar.get().archiveFile.get().asFile
+    val classesFile = pluginClassesJar.get().archiveFile.get().asFile
+    val classpathJars = compileJars.files.map { it.path }
+    val rulesPath = rules.path
+    val androidJarPath = androidJar.path
+
+    inputs.file(rules)
+    inputs.files(bcFile, classesFile)
+    outputs.dir(outDir)
+
+    classpath = files(d8)
+    mainClass.set("com.android.tools.r8.R8")
+    doFirst {
+        outDir.deleteRecursively()
+        outDir.mkdirs()
+    }
+    args(
+        listOf("--classfile", "--output", outDir.path, "--pg-conf", rulesPath, "--lib", androidJarPath) +
+            classpathJars.flatMap { listOf("--classpath", it) } +
+            listOf(classesFile.path, bcFile.path),
+    )
+}
+
+afterEvaluate {
+    tasks.named("compileDex") {
+        dependsOn(shrinkBundle)
+        (this as com.aliucord.gradle.task.CompileDexTask).input.setFrom(bundleDir)
+    }
 }

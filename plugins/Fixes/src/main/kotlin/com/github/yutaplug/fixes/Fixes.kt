@@ -3,6 +3,7 @@ package com.github.yutaplug.fixes
 import android.content.Context
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
+import com.aliucord.api.CommandsAPI
 import com.aliucord.api.SettingsAPI
 import com.aliucord.entities.Plugin
 import com.github.yutaplug.fixes.appactivity.AppActivityFix
@@ -31,6 +32,7 @@ import com.github.yutaplug.fixes.serversheet.ServerSheetFix
 import com.github.yutaplug.fixes.settings.SettingsFix
 import com.github.yutaplug.fixes.updater.UpdaterFix
 import com.github.yutaplug.fixes.validuser.ValidUserFix
+import com.github.yutaplug.fixes.voice.VoiceFix
 
 @AliucordPlugin(requiresRestart = true)
 class Fixes : Plugin() {
@@ -60,9 +62,13 @@ class Fixes : Plugin() {
         PasteImagesFix(),
         NewBadgesFix(),
         AttachmentPreviewFix(),
+        VoiceFix(),
     )
 
     internal val markdown: MarkdownFix get() = fixes.first { it is MarkdownFix } as MarkdownFix
+
+    /** The plugin's slash commands, for fixes that add one (Plugin.commands is protected). */
+    internal val commandsApi: CommandsAPI get() = commands
 
     @Volatile private var running = false
 
