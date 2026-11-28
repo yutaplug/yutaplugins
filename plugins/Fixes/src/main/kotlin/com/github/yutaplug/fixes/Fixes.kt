@@ -16,8 +16,10 @@ import com.github.yutaplug.fixes.friendrequest.FriendRequestFix
 import com.github.yutaplug.fixes.gifdownload.GifDownloadFix
 import com.github.yutaplug.fixes.gifsticker.GifStickerFix
 import com.github.yutaplug.fixes.ipv4first.IPv4FirstFix
+import com.github.yutaplug.fixes.leaderboard.LeaderboardMessagesFix
 import com.github.yutaplug.fixes.markdown.MarkdownAppearance
 import com.github.yutaplug.fixes.markdown.MarkdownFix
+import com.github.yutaplug.fixes.mediadim.MediaDimFix
 import com.github.yutaplug.fixes.messagelink.MessageLinkFix
 import com.github.yutaplug.fixes.messagewidth.MessageWidthFix
 import com.github.yutaplug.fixes.newbadges.NewBadgesFix
@@ -69,6 +71,8 @@ class Fixes : Plugin() {
         VideoDecoderFix(),
         VoiceSelfFix(),
         DeleteServerFix(),
+        LeaderboardMessagesFix(),
+        MediaDimFix(),
     )
 
     internal val markdown: MarkdownFix get() = fixes.first { it is MarkdownFix } as MarkdownFix

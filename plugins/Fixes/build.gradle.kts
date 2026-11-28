@@ -1,6 +1,6 @@
 import org.gradle.kotlin.dsl.support.serviceOf
 
-version = "1.1.1"
+version = "1.1.2"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -15,6 +15,10 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.1.2
+        * Leaderboard messages: new fix that shows the server gaming leaderboard's messages (a new week, a new 1st place, the weekly winner) instead of "Original message was deleted"
+        * Darker images in search: new fix for images and videos in search results looking darker when searching in DMs
+
         # 1.1.1
         * Delete server: new fix for deleting a server failing with "You are unauthorized to perform this request" when you have 2FA
 
