@@ -610,6 +610,12 @@ class UpdaterPage : SettingsPage() {
         ) { Updater.settings?.setBool(Updater.SHOW_POPUPS, it) }
         switch(
             context,
+            "Show a popup after updating",
+            "After restarting, shows a popup saying what was updated. Tap it to see the changelogs.",
+            Updater.setting(Updater.UPDATED_POPUP, true),
+        ) { Updater.settings?.setBool(Updater.UPDATED_POPUP, it) }
+        switch(
+            context,
             "Update from the popup",
             "Tapping the popup installs the updates right away. Turn this off to open the Updater instead, " +
                 "so you can read the changelogs and choose which ones to install.",

@@ -26,6 +26,9 @@ internal object Updater {
     /** Whether to show the in-app update popups (default on). */
     const val SHOW_POPUPS = "updater_showPopups"
 
+    /** Whether to show the "Successfully updated" popup after restarting (default on). */
+    const val UPDATED_POPUP = "updater_updatedPopup"
+
     /** Whether tapping the "updates available" popup installs them (default on) instead of opening the Updater. */
     const val POPUP_INSTALLS = "updater_popupInstalls"
 
@@ -337,7 +340,9 @@ internal object Updater {
             plugins.size <= 3 -> "Successfully updated ${names(plugins.map { "${it.name} ${it.to}" })}"
             else -> "Successfully updated ${plugins.size} plugins"
         }
-        UpdatePopups.show(message, "Tap to see what's new.") { showChangelog(it.context, updated) }
+        if (setting(UPDATED_POPUP, true)) {
+            UpdatePopups.show(message, "Tap to see what's new.") { showChangelog(it.context, updated) }
+        }
         UpdateNotifications.updated(message, updated)
     }
 }

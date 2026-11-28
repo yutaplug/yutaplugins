@@ -1,6 +1,6 @@
 import org.gradle.kotlin.dsl.support.serviceOf
 
-version = "1.1.2"
+version = "1.1.3"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -15,6 +15,9 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.1.3
+        * GitHub updater: new "Show a popup after updating" setting, to turn off the "Successfully updated" popup shown after restarting
+
         # 1.1.2
         * Leaderboard messages: new fix that shows the server gaming leaderboard's messages (a new week, a new 1st place, the weekly winner) instead of "Original message was deleted"
         * Darker images in search: new fix for images and videos in search results looking darker when searching in DMs
