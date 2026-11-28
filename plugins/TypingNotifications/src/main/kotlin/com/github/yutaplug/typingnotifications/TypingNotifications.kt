@@ -68,6 +68,7 @@ class TypingNotifications : Plugin() {
 
         override fun onActivityResumed(activity: Activity) {
             front = WeakReference(activity)
+            discordBanner.onScreenResumed()
         }
 
         override fun onActivityStopped(activity: Activity) {
@@ -115,7 +116,6 @@ class TypingNotifications : Plugin() {
             val channelId = message.g()
             Utils.mainThread.post { safely("handle message") { onMessage(channelId, userId) } }
         })
-        discordBanner.patch(patcher)
         ContextMenus(settings, reportError).patch(patcher)
     }
 
