@@ -213,6 +213,8 @@ class ProfileEffects : Plugin() {
                 val (user, member, message) = reply
                 val guild = member?.guildId?.takeIf { it > 0 } ?: message.guildId
                 names.apply(view, user.id, guild, member?.roles, true, false, user)
+                // Discord indented the reply text by the name's width before the name font widened it.
+                replyIndent.bind(item.itemView)
             },
         )
         patcher.patch(
@@ -339,6 +341,7 @@ class ProfileEffects : Plugin() {
 
     /** Shrinks chat names a little instead of cutting them short. */
     private val nameFit = NameFit()
+    private val replyIndent = ReplyIndent()
 
     private fun styleHeaderName(header: UserProfileHeaderView, userId: Long, guildId: Long?, model: Any? = null) {
         val nameView = header.findViewById<View>(Utils.getResId("user_profile_header_primary_name", "id")) ?: return
@@ -467,6 +470,7 @@ class ProfileEffects : Plugin() {
         names?.clear()
         names = null
         nameFit.clear()
+        replyIndent.clear()
         NameFonts.setListener(null)
         NameFonts.log = null
         NameStyles.onChange = null

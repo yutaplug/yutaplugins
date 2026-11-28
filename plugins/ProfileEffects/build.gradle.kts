@@ -1,8 +1,10 @@
-version = "1.1.6"
+version = "1.1.7"
 description = "Backports Discord profile effects, profile frames, profile themes, role gradients, and display name fonts and colors."
 aliucord {
     changelog.set(
         """
+        # 1.1.7
+        * Fix reply previews' author names running into the reply text when they use a display name font
         # 1.1.6
         * Chat names that don't fit next to their timestamp are drawn slightly smaller instead of being cut short
         # 1.1.5
