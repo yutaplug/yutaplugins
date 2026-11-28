@@ -8,6 +8,7 @@ import com.aliucord.api.SettingsAPI
 import com.aliucord.entities.Plugin
 import com.github.yutaplug.fixes.appactivity.AppActivityFix
 import com.github.yutaplug.fixes.attachmentpreview.AttachmentPreviewFix
+import com.github.yutaplug.fixes.deleteserver.DeleteServerFix
 import com.github.yutaplug.fixes.fontscale.FontScaleFix
 import com.github.yutaplug.fixes.forumtag.ForumTagFix
 import com.github.yutaplug.fixes.friend.FriendFix
@@ -67,6 +68,7 @@ class Fixes : Plugin() {
         VoiceFix(),
         VideoDecoderFix(),
         VoiceSelfFix(),
+        DeleteServerFix(),
     )
 
     internal val markdown: MarkdownFix get() = fixes.first { it is MarkdownFix } as MarkdownFix

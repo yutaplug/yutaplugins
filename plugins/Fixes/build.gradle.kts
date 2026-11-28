@@ -1,6 +1,6 @@
 import org.gradle.kotlin.dsl.support.serviceOf
 
-version = "1.1.0"
+version = "1.1.1"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -15,6 +15,9 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.1.1
+        * Delete server: new fix for deleting a server failing with "You are unauthorized to perform this request" when you have 2FA
+
         # 1.1.0
         * Videos loading forever: new fix for videos that never start playing (often tall, high-resolution screen recordings). When the phone's first video decoder can't play a video, the others are tried, like on newer Discord
         * Voice and video calls: soundboard. Sounds played by others in your voice channel are heard, and the soundboard button in the call controls opens a picker of sounds to play, with search and a preview button on each sound: Discord's default sounds, the server's own, and every other server's (marked, since those need Nitro)
