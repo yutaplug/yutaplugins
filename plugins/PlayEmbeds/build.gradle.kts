@@ -1,9 +1,12 @@
-version = "1.1.3"
+version = "1.1.4"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.1.4
+        * GIFs from X (Twitter) and FxTwitter links open in Discord's fullscreen viewer again instead of opening the tweet
+
         # 1.1.3
         * X (Twitter) videos play inline instead of failing with a playback error; tweets without a playable video open in the app or browser
 

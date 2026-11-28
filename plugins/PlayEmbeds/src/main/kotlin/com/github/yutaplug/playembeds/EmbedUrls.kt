@@ -51,7 +51,7 @@ internal object EmbedUrls {
     fun genericVideoUrl(embed: MessageEmbed): String? {
         if (isGifEmbed(embed)) return null
         if (isDirectLinkedMediaEmbed(embed) || EmbedResourceUtils.INSTANCE.isInlineEmbed(embed)) return null
-        fxLookupUrl(embed)?.let { return fxVideoResolver?.cached(it) }
+        fxLookupUrl(embed)?.let { return fxVideoResolver?.cached(it)?.takeIf(FxVideoResolver::isVideo) }
         val video = embed.m() ?: return null
         val providerName = embed.g()?.a()?.lowercase(Locale.ROOT)
         if (providerName in HOSTED_PROVIDER_NAMES) return null

@@ -37,7 +37,9 @@ internal class FxVideoResolver : CachedResolver<String>() {
                 val videos = data.optJSONObject("tweet")?.optJSONObject("media")?.optJSONArray("videos")
                 val media = videos?.optJSONObject(key.substringAfter(':').toInt() - 1) ?: return null
                 val source = Uri.parse(media.optString("url"))
-                if (media.optString("type") != "video" || source.scheme != "https" ||
+                val type = media.optString("type")
+                if (type == "gif") return GIF to 600_000L
+                if (type != "video" || source.scheme != "https" ||
                     source.host != "video.twimg.com" || !source.path.orEmpty().endsWith(".mp4")
                 ) {
                     return null
@@ -48,10 +50,18 @@ internal class FxVideoResolver : CachedResolver<String>() {
         return url to 600_000L
     }
 
-    private companion object {
-        val FX_HOSTS = setOf("fxtwitter.com", "www.fxtwitter.com", "fixupx.com", "www.fixupx.com")
-        val X_HOSTS = setOf("twitter.com", "www.twitter.com", "mobile.twitter.com", "x.com", "www.x.com")
-        val STATUS_PATH = Regex("^/[^/]+/status/([0-9]+)(?:/video/([1-9][0-9]*))?/?$")
-        val PLAYER_PATH = Regex("^/i/videos/(?:tweet/)?([0-9]+)/?$")
+    companion object {
+        /**
+         * Cached for a tweet whose media is a GIF (FxTwitter's type "gif", an mp4 too).
+         * Those aren't played: Discord opens them as before, in its fullscreen viewer.
+         */
+        const val GIF = "gif"
+
+        fun isVideo(value: String?): Boolean = value != null && value != GIF
+
+        private val FX_HOSTS = setOf("fxtwitter.com", "www.fxtwitter.com", "fixupx.com", "www.fixupx.com")
+        private val X_HOSTS = setOf("twitter.com", "www.twitter.com", "mobile.twitter.com", "x.com", "www.x.com")
+        private val STATUS_PATH = Regex("^/[^/]+/status/([0-9]+)(?:/video/([1-9][0-9]*))?/?$")
+        private val PLAYER_PATH = Regex("^/i/videos/(?:tweet/)?([0-9]+)/?$")
     }
 }

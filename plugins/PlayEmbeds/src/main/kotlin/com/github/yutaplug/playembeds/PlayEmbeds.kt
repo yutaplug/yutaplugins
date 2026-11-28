@@ -63,6 +63,7 @@ import com.discord.widgets.media.WidgetMedia
 import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.ui.PlayerControlView
 import com.google.android.exoplayer2.ui.PlayerView
+import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import java.io.File
 import java.lang.ref.WeakReference
@@ -285,7 +286,7 @@ class PlayEmbeds : Plugin() {
                         val rowKey = entry.message.id to entry.embedIndex
                         EmbedUrls.fxVideoResolver?.resolve(fxUrl) { video ->
                             val view = root.get()
-                            if (video != null && view != null && configuredEmbeds[view] === embed &&
+                            if (FxVideoResolver.isVideo(video) && view != null && configuredEmbeds[view] === embed &&
                                 embedContainers(view).any { embedRowKeys[it] == rowKey }
                             ) {
                                 EmbedUrls.embedLink(embed)?.let { attachMediaClickHandlers(view, it) }
@@ -313,7 +314,7 @@ class PlayEmbeds : Plugin() {
             PreHook { frame ->
                 val embed = frame.args.getOrNull(1) as? MessageEmbed ?: return@PreHook
                 val container = findHostedContainer(embed) ?: return@PreHook
-                if (playPendingFxVideo(container, embed)) {
+                if (playPendingFxVideo(container, embed) { runOriginal(frame) }) {
                     frame.setResult(null)
                     return@PreHook
                 }
@@ -373,7 +374,7 @@ class PlayEmbeds : Plugin() {
                     ?: viewGroupField(frame.thisObject)
                     ?: return@PreHook
                 val container = findHostedContainer(source)
-                if (container != null && playPendingFxVideo(container, embed)) {
+                if (container != null && playPendingFxVideo(container, embed) { runOriginal(frame) }) {
                     frame.setResult(null)
                     return@PreHook
                 }
@@ -624,9 +625,10 @@ class PlayEmbeds : Plugin() {
     /**
      * An X video whose mp4 FxTwitter hasn't returned yet: wait for it with a spinner
      * and play it then, instead of letting Discord load X's HTML player page.
-     * When there's no mp4, open the tweet. False when the embed doesn't need this.
+     * When it's a GIF, [discord] does what Discord would have (its fullscreen viewer);
+     * when there's no mp4, open the tweet. False when the embed doesn't need this.
      */
-    private fun playPendingFxVideo(container: ViewGroup, embed: MessageEmbed): Boolean {
+    private fun playPendingFxVideo(container: ViewGroup, embed: MessageEmbed, discord: () -> Unit): Boolean {
         val fxUrl = EmbedUrls.fxLookupUrl(embed) ?: return false
         val resolver = EmbedUrls.fxVideoResolver ?: return false
         if (resolver.cached(fxUrl) != null) return false
@@ -638,12 +640,24 @@ class PlayEmbeds : Plugin() {
             val target = containerRef.get() ?: return@resolve
             hideLoading(target)
             if (!target.isAttachedToWindow || embedRowKeys[target] != rowKey) return@resolve
-            if (video == null || !playInlineVideo(target, embed)) {
+            if (video == FxVideoResolver.GIF) {
+                DebugLog.log("x video: $fxUrl is a gif, opening it in Discord")
+                discord()
+            } else if (video == null || !playInlineVideo(target, embed)) {
                 DebugLog.log("x video: no mp4 for $fxUrl, opening the tweet")
                 openExternally(target.context, embed.l() ?: fxUrl)
             }
         }
         return true
+    }
+
+    /** Runs the hooked Discord method a PreHook held back, as if it hadn't been hooked. */
+    private fun runOriginal(frame: XC_MethodHook.MethodHookParam) {
+        try {
+            XposedBridge.invokeOriginalMethod(frame.method, frame.thisObject, frame.args)
+        } catch (e: Throwable) {
+            DebugLog.log("couldn't run Discord's own action: ${DebugLog.causes(e)}")
+        }
     }
 
     /** Replace a direct-video preview with a native player for Discord's video URL. */
