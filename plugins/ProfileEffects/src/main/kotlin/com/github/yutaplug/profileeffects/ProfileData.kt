@@ -71,7 +71,7 @@ internal object Anchor {
 }
 
 internal data class FrameLayer(
-    val id: Long,
+    val id: String,
     val front: Boolean,
     val anchor: Int,
     val rail: Boolean,
@@ -120,10 +120,26 @@ internal object ProfileData {
         return null
     }
 
+    /**
+     * The collectible items of a product, its variants' and its bundled products', with the item
+     * whose SKU is the requested one first. Variant groups keep their items under `variants`.
+     */
+    private fun items(key: ProductKey, body: Map<*, *>): List<Map<*, *>> {
+        val result = ArrayList<Map<*, *>>()
+        fun collect(product: Map<*, *>, depth: Int) {
+            for (raw in list(product["items"])) (raw as? Map<*, *>)?.let { result.add(it) }
+            if (depth >= 2) return
+            for (raw in list(product["variants"])) (raw as? Map<*, *>)?.let { collect(it, depth + 1) }
+            for (raw in list(product["bundled_products"])) (raw as? Map<*, *>)?.let { collect(it, depth + 1) }
+        }
+        collect(body, 0)
+        val exact = result.filter { positiveId(it["sku_id"]) == key.sku }
+        return exact + result.filter { positiveId(it["sku_id"]) != key.sku }
+    }
+
     fun product(key: ProductKey, body: Map<*, *>): Product? {
         // Bundles can put a different collectible before the requested effect/frame.
-        for (raw in list(body["items"])) {
-            val item = raw as? Map<*, *> ?: continue
+        for (item in items(key, body)) {
             if (integer(item["type"]) != key.type.toLong()) continue
             when (key.type) {
                 1 -> {
@@ -189,10 +205,10 @@ internal object ProfileData {
 
     private fun frames(raw: Any?): List<FrameLayer> {
         val result = ArrayList<FrameLayer>()
-        val seen = HashSet<Long>()
+        val seen = HashSet<String>()
         for (value in list(raw)) {
             val item = value as? Map<*, *> ?: continue
-            val id = positiveId(item["id"]) ?: continue
+            val id = assetId(item["id"]) ?: continue
             if (!seen.add(id)) continue
             val anchor = when (enum(item["anchor"])) {
                 "1", "bottom" -> Anchor.BOTTOM
@@ -253,6 +269,20 @@ internal object ProfileData {
         if (raw is Double && kotlin.math.abs(raw) > 9_007_199_254_740_991.0) return null
         if (raw is Float && kotlin.math.abs(raw) > 16_777_215f) return null
         return integer(raw)?.takeIf { it > 0 }
+    }
+
+    /**
+     * A layer's asset ID, a path segment of its CDN URL. Documented as a snowflake, but kept as text
+     * so other IDs still work; only characters safe in a URL path are allowed.
+     */
+    private fun assetId(raw: Any?): String? {
+        if (raw is Double || raw is Float) return positiveId(raw)?.toString()
+        val text = integer(raw)?.takeIf { it > 0 }?.toString() ?: trim(raw?.toString() ?: return null)
+        if (text.isEmpty() || text.length > 128) return null
+        for (c in text) {
+            if (!(c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' || c == '_' || c == '-' || c == '.')) return null
+        }
+        return text.takeIf { it != "." && it != ".." }
     }
 
     private fun enum(raw: Any?): String = integer(raw)?.toString() ?: trim(raw?.toString() ?: "")

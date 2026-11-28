@@ -58,7 +58,9 @@ internal class ProfileRepository(private val log: (String, Throwable) -> Unit) {
             products.request(productKey, { complete ->
                 execute<Product>("/collectibles-products/${productKey.sku}", complete) { response ->
                     val body = response as? Map<*, *> ?: error("Invalid collectible response")
-                    complete(LoadResult(ProfileData.product(productKey, body)))
+                    val product = ProfileData.product(productKey, body)
+                    if (productKey.type == 3) reportFrame(productKey, product, body)
+                    complete(LoadResult(product))
                 }
             }) { result ->
                 synchronized(lock) {
@@ -113,6 +115,22 @@ internal class ProfileRepository(private val log: (String, Throwable) -> Unit) {
         } catch (error: RejectedExecutionException) {
             if (!closed) failure(LoadResult(null, true, FAILURE_TTL))
         }
+    }
+
+    /** Logs a frame that would draw nothing, with Discord's data, so it shows up in the debug log. */
+    private fun reportFrame(key: ProductKey, product: Product?, body: Map<*, *>) {
+        val frame = product as? Product.Frame
+        val reason = when {
+            frame == null -> "has no layers the plugin could read"
+            frame.layers.all { it.anchor == Anchor.BOTTOM } -> "only has bottom layers, which profile sheets don't show"
+            else -> return
+        }
+        val json = try {
+            GsonUtils.toJson(body)
+        } catch (_: Exception) {
+            body.toString()
+        }
+        log("Profile frame ${key.sku} $reason", IllegalStateException(json.take(4000)))
     }
 
     fun close() {

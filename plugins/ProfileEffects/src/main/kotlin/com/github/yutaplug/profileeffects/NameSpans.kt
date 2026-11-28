@@ -25,6 +25,70 @@ import kotlin.math.sqrt
 /** Marks the spans this plugin adds to names, so they can be found and removed. */
 internal interface StyledName
 
+/**
+ * The FallbackFont plugin's font spans. They cover characters the device (and so a name font) can't
+ * draw, and emoji, or all text when its text font is set. Android applies spans in the order they were
+ * added, so ours, added later, would replace their font; [raise] moves them back in front.
+ */
+internal object FallbackFonts {
+    private const val FONT_SPAN = "com.github.yutaplug.fallbackfont.FallbackFont\$FontSpan"
+
+    /** FallbackFont's FontSlot.TEXT, which a display name font should still beat. */
+    private const val TEXT_SLOT = 0
+
+    @Volatile private var slotField: java.lang.reflect.Field? = null
+
+    private fun slot(span: Any): Int? {
+        val field = slotField?.takeIf { it.declaringClass === span.javaClass } ?: try {
+            span.javaClass.getDeclaredField("slot").apply { isAccessible = true }.also { slotField = it }
+        } catch (_: Exception) {
+            return null
+        }
+        return try {
+            field.getInt(span)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Whether [span] is a FallbackFont span that applies over a name drawn [withFont] (a display name font). */
+    fun applies(span: Any, withFont: Boolean): Boolean {
+        if (span.javaClass.name != FONT_SPAN) return false
+        if (!withFont) return true
+        val slot = slot(span) ?: return false
+        return slot != TEXT_SLOT
+    }
+
+    /** Re-adds FallbackFont's spans that should win over a name font, so they apply after ours. */
+    fun raise(text: android.text.Spannable) {
+        for (span in text.getSpans(0, text.length, MetricAffectingSpan::class.java)) {
+            if (!applies(span, true)) continue
+            val start = text.getSpanStart(span)
+            val end = text.getSpanEnd(span)
+            val flags = text.getSpanFlags(span)
+            text.removeSpan(span)
+            text.setSpan(span, start, end, flags)
+        }
+    }
+
+    /** Runs [block] with the FallbackFont spans over [start]..[end] applied to [paint], then undoes them. */
+    inline fun <T> applying(text: Spanned, start: Int, end: Int, paint: TextPaint, withFont: Boolean, block: () -> T): T {
+        val typeface = paint.typeface
+        val fakeBold = paint.isFakeBoldText
+        val skew = paint.textSkewX
+        for (span in text.getSpans(start, end, MetricAffectingSpan::class.java)) {
+            if (applies(span, withFont)) span.updateMeasureState(paint)
+        }
+        try {
+            return block()
+        } finally {
+            paint.typeface = typeface
+            paint.isFakeBoldText = fakeBold
+            paint.textSkewX = skew
+        }
+    }
+}
+
 /** Evenly spaced gradient stops from 10% to 90%, as Discord places them. */
 private fun stopPositions(count: Int): FloatArray = FloatArray(count) { 0.1f + 0.8f * it / (count - 1) }
 
@@ -235,7 +299,39 @@ internal class OutlineSpan(
     override fun getSize(paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
         val p = styled(paint)
         if (fm != null) p.getFontMetricsInt(fm)
-        return ceil(p.measureText(text, start, end)).toInt()
+        return ceil(measure(text, start, end, p)).toInt()
+    }
+
+    /** The name's width, with FallbackFont's fonts for the characters they cover. */
+    private fun measure(text: CharSequence, start: Int, end: Int, p: TextPaint): Float {
+        val spanned = text as? Spanned ?: return p.measureText(text, start, end)
+        var width = 0f
+        var i = start
+        while (i < end) {
+            val next = spanned.nextSpanTransition(i, end, MetricAffectingSpan::class.java)
+            width += FallbackFonts.applying(spanned, i, next, p, typeface != null) { p.measureText(text, i, next) }
+            i = next
+        }
+        return width
+    }
+
+    /** Draws the name run by run, so FallbackFont's fonts still draw the characters they cover. */
+    private fun drawRuns(canvas: Canvas, text: CharSequence, start: Int, end: Int, x: Float, y: Float, p: TextPaint) {
+        val spanned = text as? Spanned
+        if (spanned == null) {
+            canvas.drawText(text, start, end, x, y, p)
+            return
+        }
+        var left = x
+        var i = start
+        while (i < end) {
+            val next = spanned.nextSpanTransition(i, end, MetricAffectingSpan::class.java)
+            FallbackFonts.applying(spanned, i, next, p, typeface != null) {
+                canvas.drawText(text, i, next, left, y, p)
+                left += p.measureText(text, i, next)
+            }
+            i = next
+        }
     }
 
     override fun draw(
@@ -252,7 +348,7 @@ internal class OutlineSpan(
         val p = styled(paint)
         val em = p.textSize
         val baseline = y.toFloat()
-        fun pass() = canvas.drawText(text, start, end, x, baseline, p)
+        fun pass() = drawRuns(canvas, text, start, end, x, baseline, p)
         fun stroke(width: Float, color: Int) {
             p.style = Paint.Style.STROKE
             p.strokeWidth = width
@@ -298,7 +394,7 @@ internal class OutlineSpan(
             NameStyle.EFFECT_POP -> {
                 // Behind: a copy 0.08em lower, filled with the top right of a 200% `to bottom left` gradient.
                 val drop = 0.08f * em
-                val width = p.measureText(text, start, end)
+                val width = measure(text, start, end, p)
                 val height = p.descent() - p.ascent()
                 val boxTop = baseline + drop + p.ascent()
                 val light = shades.light1
@@ -313,7 +409,7 @@ internal class OutlineSpan(
                     intArrayOf(light, light, main, main, light, main, main),
                     floatArrayOf(0f, 0.06f, 0.2f, 0.5f, 0.56f, 0.7f, 1f),
                 )
-                canvas.drawText(text, start, end, x, baseline + drop, p)
+                drawRuns(canvas, text, start, end, x, baseline + drop, p)
                 p.shader = null
                 // In front: white text with a very dark outline.
                 stroke(1.2f * density + 0.04f * em, shades.dark2)

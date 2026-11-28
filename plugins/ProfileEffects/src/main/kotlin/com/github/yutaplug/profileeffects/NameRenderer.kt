@@ -132,8 +132,10 @@ internal class NameRenderer(
             spannable.setSpan(span, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         if (spannable !== text) {
+            // FallbackFont re-adds its spans on setText, after ours.
             view.setText(spannable, TextView.BufferType.SPANNABLE)
         } else {
+            FallbackFonts.raise(spannable)
             view.requestLayout()
             view.invalidate()
         }

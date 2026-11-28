@@ -35,14 +35,16 @@ internal object NameFonts {
         "https://raw.githubusercontent.com/Omnibus-Type/MuseoModerno/037e64e09440633e52e66fef19f7625b95996bcb/fonts/ttf/"
     private const val PIXELIFY =
         "https://raw.githubusercontent.com/eifetx/Pixelify-Sans/39df74aba80df8157546034b878e8be1eb565ced/fonts/ttf/"
+    private const val SINISTRE =
+        "https://raw.githubusercontent.com/collletttivo/sinistre/3308f8b884a066951a4da38586abae3b247bf915/fonts/"
 
     private const val RETRY_AFTER = 5 * 60 * 1000L
     private const val MAX_FILE = 4 * 1024 * 1024
 
     /**
-     * [variable] is a Google Fonts variable font, set to [weight] on Android 8+ (older versions can't
-     * set font weights). Otherwise [static], a full URL to a file at Discord's weight, is used, and
-     * [file], the mirror's file, when neither works. [spacing] is Discord's letter spacing, in em.
+     * [variable] is a full URL to a variable font, set to [weight] on Android 8+ (older versions can't
+     * set font weights). Otherwise [static], a full URL to a file at Discord's weight (or the closest
+     * one published), is used, and [file], the mirror's file, when neither works. [spacing] is Discord's letter spacing, in em.
      * [scale] makes glyphs the size Discord's own file draws them: some of Discord's files have more
      * units per em than ours (Mainframe 1220, Monkey Bars 1100, Modern 1086 against 1000).
      */
@@ -62,7 +64,7 @@ internal object NameFonts {
         6 to Spec(
             "MuseoModerno.ttf",
             static = MUSEO_MODERNO + "MuseoModerno-Medium.ttf",
-            variable = "museomoderno/MuseoModerno%5Bwght%5D.ttf",
+            variable = GOOGLE + "museomoderno/MuseoModerno%5Bwght%5D.ttf",
             weight = 500,
             spacing = 0.01f,
             scale = 1000f / 1086f,
@@ -71,16 +73,24 @@ internal object NameFonts {
         8 to Spec( // 8Bit
             "Pixelify.ttf",
             static = PIXELIFY + "PixelifySans-Medium.ttf",
-            variable = "pixelifysans/PixelifySans%5Bwght%5D.ttf",
+            variable = GOOGLE + "pixelifysans/PixelifySans%5Bwght%5D.ttf",
             weight = 500,
             spacing = 0.02f,
         ),
-        10 to Spec("Sinistre.otf", spacing = 0.01f), // Vampyre, 400
+        // Vampyre: Discord's file is Sinistre's variable font at wght 110, between Regular (72) and
+        // Bold (142). No static file has that weight, so Android 7 and older get Bold.
+        10 to Spec(
+            "Sinistre.otf",
+            static = SINISTRE + "Sinistre-Bold.otf",
+            variable = SINISTRE + "SinistreVF.ttf",
+            weight = 110,
+            spacing = 0.01f,
+        ),
         12 to Spec("ZillaSlab.ttf", static = GOOGLE + "zillaslab/ZillaSlab-SemiBold.ttf", spacing = 0.03f), // Tempo, 600
         13 to Spec( // Monkey Bars
             "Playpen.ttf",
             static = PLAYPEN + "PlaypenSans-Bold.ttf",
-            variable = "playpensans/PlaypenSans%5Bwght%5D.ttf",
+            variable = GOOGLE + "playpensans/PlaypenSans%5Bwght%5D.ttf",
             weight = 700,
             scale = 1000f / 1100f,
         ),
@@ -153,7 +163,7 @@ internal object NameFonts {
         dir.listFiles()?.forEach { if (it.name.startsWith("bold-")) it.delete() }
         if (spec.variable != null && Build.VERSION.SDK_INT >= 26) {
             try {
-                val file = fetch(dir, GOOGLE + spec.variable, "variable-" + spec.file)
+                val file = fetch(dir, spec.variable, "variable-" + spec.file)
                 val typeface = Typeface.Builder(file).setFontVariationSettings("'wght' ${spec.weight}").build()
                 if (typeface != null) return typeface
             } catch (_: Exception) {

@@ -1,8 +1,13 @@
-version = "1.1.3"
+version = "1.1.4"
 description = "Backports Discord profile effects, profile frames, profile themes, role gradients, and display name fonts and colors."
 aliucord {
     changelog.set(
         """
+        # 1.1.4
+        * Show profile frames whose data Discord nests under variants or bundles, or whose layers use other asset IDs
+        * Log profile frames the plugin can't draw, with Discord's data, to the debug log
+        * Use FallbackFont's fonts for characters a display name font can't draw, including in Neon, Toon and Pop names
+        * Draw the Vampyre display name font at Discord's weight
         # 1.1.3
         * Fix the app crashing at launch on Android 7
         * Match Discord's look for every display name effect, including Prism and Gummy
