@@ -1,9 +1,12 @@
-version = "1.1.4"
+version = "1.1.5"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.1.5
+        * Twitch clips and TikTok videos play inline in Discord's player; Twitch live streams and VODs still open in the app or browser
+
         # 1.1.4
         * GIFs from X (Twitter) and FxTwitter links open in Discord's fullscreen viewer again instead of opening the tweet
 

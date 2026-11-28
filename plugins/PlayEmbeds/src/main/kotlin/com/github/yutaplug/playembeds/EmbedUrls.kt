@@ -18,11 +18,12 @@ internal data class HostedEmbed(
     val sourceEmbed: MessageEmbed? = null,
 )
 
-internal enum class HostedProvider { YOUTUBE, SOUNDCLOUD, SPOTIFY }
+internal enum class HostedProvider { YOUTUBE, SOUNDCLOUD, SPOTIFY, TWITCH, TIKTOK }
 
 /** Decides which URLs can play locally and which provider resolves them. */
 internal object EmbedUrls {
     var fxVideoResolver: FxVideoResolver? = null
+    var tikTokResolver: TikTokResolver? = null
     private const val MAX_REDIRECT_DEPTH = 4
 
     private val VIDEO_EXTENSIONS = setOf(
@@ -40,7 +41,7 @@ internal object EmbedUrls {
     private val GIF_EXTENSIONS = setOf("gif", "gifv")
     private val GIF_HOSTS = setOf("giphy.com", "klipy.com", "tenor.com")
     private val GIF_PROVIDER_NAMES = setOf("giphy", "klipy", "tenor")
-    private val HOSTED_PROVIDER_NAMES = setOf("youtube", "soundcloud", "spotify")
+    private val HOSTED_PROVIDER_NAMES = setOf("youtube", "soundcloud", "spotify", "twitch", "tiktok")
 
     fun embedLink(embed: MessageEmbed): EmbedLink? {
         if (isGifEmbed(embed) || isDirectLinkedMediaEmbed(embed)) return null
@@ -104,7 +105,7 @@ internal object EmbedUrls {
         val candidates = listOfNotNull(embed.l(), embed.m()?.c(), embed.m()?.b(), embed.g()?.b())
         for (url in candidates) {
             if (!isHttpUrl(url)) continue
-            val provider = hostedProvider(Uri.parse(url).host) ?: continue
+            val provider = hostedProvider(url) ?: continue
             return HostedEmbed(url, provider, embed.j(), embed)
         }
         return null
@@ -112,7 +113,7 @@ internal object EmbedUrls {
 
     fun hostedEmbed(url: String): HostedEmbed? {
         if (!isHttpUrl(url) || isGifUrl(url) || isMediaLink(url)) return null
-        val provider = hostedProvider(Uri.parse(url).host) ?: return null
+        val provider = hostedProvider(url) ?: return null
         return HostedEmbed(url, provider)
     }
 
@@ -139,14 +140,27 @@ internal object EmbedUrls {
         return extension in GIF_EXTENSIONS || GIF_HOSTS.any { isHost(uri.host, it) }
     }
 
-    private fun hostedProvider(host: String?): HostedProvider? = when {
-        isHost(host, "youtube.com") || isHost(host, "youtu.be") -> HostedProvider.YOUTUBE
-        isHost(host, "soundcloud.com") -> HostedProvider.SOUNDCLOUD
-        isHost(host, "spotify.com") || isHost(host, "spotify.link") -> HostedProvider.SPOTIFY
-        else -> null
+    /**
+     * Twitch and TikTok links only count when they're something that can play (a clip,
+     * a video); channels, live streams and profiles keep Discord's own behavior.
+     */
+    private fun hostedProvider(url: String): HostedProvider? {
+        val host = Uri.parse(url).host
+        return when {
+            isHost(host, "youtube.com") || isHost(host, "youtu.be") -> HostedProvider.YOUTUBE
+            isHost(host, "soundcloud.com") -> HostedProvider.SOUNDCLOUD
+            isHost(host, "spotify.com") || isHost(host, "spotify.link") -> HostedProvider.SPOTIFY
+            TwitchClipResolver.clipSlug(url) != null -> HostedProvider.TWITCH
+            tikTokResolver?.handles(url) == true -> HostedProvider.TIKTOK
+            else -> null
+        }
     }
 
-    private fun requiresHostedPlayer(url: String): Boolean = hostedProvider(Uri.parse(url).host) != null
+    /** URLs that are web players, never media files, whether or not they can be played. */
+    private fun requiresHostedPlayer(url: String): Boolean {
+        val host = Uri.parse(url).host
+        return hostedProvider(url) != null || isHost(host, "twitch.tv") || isHost(host, "tiktok.com")
+    }
 
     private fun isMediaUrl(url: String, hasEmbedVideo: Boolean): Boolean {
         val uri = Uri.parse(url)

@@ -9,9 +9,11 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
+import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URL
 import java.security.SecureRandom
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
@@ -194,7 +196,13 @@ internal class StreamServer(private val onComplete: (File) -> Unit) {
         }
     }
 
+    /** A remote file passed through as is, with request headers the player can't send itself. */
+    private class Proxy(val token: String, val url: String, val headers: Map<String, String>, val expires: Long) {
+        @Volatile var lastAccess = SystemClock.elapsedRealtime()
+    }
+
     private val sessions = ConcurrentHashMap<String, Session>()
+    private val proxies = ConcurrentHashMap<String, Proxy>()
     private val connections = Executors.newCachedThreadPool()
     private val fetchers = Executors.newFixedThreadPool(FETCH_THREADS)
     private val random = SecureRandom()
@@ -205,17 +213,37 @@ internal class StreamServer(private val onComplete: (File) -> Unit) {
     fun register(layout: Mp4Merge.Layout, expires: Long, partFile: File?, target: File?): String {
         val port = port()
         removeStale()
-        val token = java.lang.Long.toHexString(random.nextLong() and Long.MAX_VALUE) +
-            java.lang.Long.toHexString(random.nextLong() and Long.MAX_VALUE)
+        val token = newToken()
         sessions[token] = Session(token, layout, expires, partFile, target)
         return "http://$LOOPBACK_HOST:$port/yt/$token"
     }
+
+    /**
+     * Serve the remote file at [url] until [expires] (elapsedRealtime), fetched with
+     * [headers] (cookies, referer) that Discord's player has no way to send; returns its URL.
+     */
+    fun registerProxy(url: String, headers: Map<String, String>, expires: Long): String {
+        val port = port()
+        val now = SystemClock.elapsedRealtime()
+        proxies.values.filter { it.expires <= now }.forEach { proxies.remove(it.token, it) }
+        val overflow = proxies.size + 1 - MAX_SESSIONS
+        if (overflow > 0) proxies.values.sortedBy { it.lastAccess }.take(overflow).forEach { proxies.remove(it.token, it) }
+        val token = newToken()
+        proxies[token] = Proxy(token, url, headers, expires)
+        return "http://$LOOPBACK_HOST:$port/px/$token"
+    }
+
+    private fun newToken(): String =
+        java.lang.Long.toHexString(random.nextLong() and Long.MAX_VALUE) +
+            java.lang.Long.toHexString(random.nextLong() and Long.MAX_VALUE)
 
     /** Whether [uri] is one of this server's streams that can still play. */
     fun serves(uri: String): Boolean {
         val parsed = Uri.parse(uri)
         if (parsed.scheme != "http" || parsed.host != LOOPBACK_HOST || parsed.port != socket?.localPort) return false
-        val session = sessions[parsed.lastPathSegment.orEmpty()] ?: return false
+        val token = parsed.lastPathSegment.orEmpty()
+        proxies[token]?.let { return it.expires > SystemClock.elapsedRealtime() }
+        val session = sessions[token] ?: return false
         return !session.closed && session.expires > SystemClock.elapsedRealtime()
     }
 
@@ -229,6 +257,7 @@ internal class StreamServer(private val onComplete: (File) -> Unit) {
         socket = null
         sessions.values.forEach { it.close() }
         sessions.clear()
+        proxies.clear()
         connections.shutdownNow()
         fetchers.shutdownNow()
     }
@@ -290,6 +319,14 @@ internal class StreamServer(private val onComplete: (File) -> Unit) {
                 if (firstSpace <= 0 || secondSpace <= firstSpace) return respond(out, "400 Bad Request")
                 val method = requestLine.substring(0, firstSpace)
                 val path = requestLine.substring(firstSpace + 1, secondSpace)
+                if (path.startsWith("/px/")) {
+                    val proxy = proxies[path.removePrefix("/px/")]
+                    if (proxy == null || proxy.expires <= SystemClock.elapsedRealtime()) {
+                        return respond(out, "404 Not Found")
+                    }
+                    proxy.lastAccess = SystemClock.elapsedRealtime()
+                    return forward(out, method, range, proxy)
+                }
                 val session = sessions[path.removePrefix("/yt/")]
                 if (session == null || session.closed) return respond(out, "404 Not Found")
                 session.lastAccess = SystemClock.elapsedRealtime()
@@ -329,6 +366,43 @@ internal class StreamServer(private val onComplete: (File) -> Unit) {
             }
         } catch (_: Throwable) {
             // The player closed the connection (a seek or release) or a segment failed.
+        }
+    }
+
+    /** Passes one request through to [proxy]'s file with its headers, and the response back. */
+    private fun forward(out: OutputStream, method: String, range: String?, proxy: Proxy) {
+        val connection = URL(proxy.url).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = FETCH_TIMEOUT_MS
+            connection.readTimeout = FETCH_TIMEOUT_MS
+            connection.requestMethod = if (method == "HEAD") "HEAD" else "GET"
+            connection.instanceFollowRedirects = true
+            proxy.headers.forEach { (name, value) -> connection.setRequestProperty(name, value) }
+            if (range != null) connection.setRequestProperty("Range", range)
+            val code = connection.responseCode
+            if (code < 200 || code > 299) return respond(out, if (code == 416) "416 Range Not Satisfiable" else "502 Bad Gateway")
+            val headers = StringBuilder()
+                .append("HTTP/1.1 ").append(if (code == 206) "206 Partial Content" else "200 OK").append("\r\n")
+                .append("Content-Type: ").append(connection.contentType ?: "video/mp4").append("\r\n")
+                .append("Accept-Ranges: bytes\r\n")
+            connection.getHeaderField("Content-Length")?.let { headers.append("Content-Length: ").append(it).append("\r\n") }
+            connection.getHeaderField("Content-Range")?.let { headers.append("Content-Range: ").append(it).append("\r\n") }
+            headers.append("Connection: close\r\n\r\n")
+            out.write(headers.toString().toByteArray(Charsets.US_ASCII))
+            if (method != "HEAD") {
+                connection.inputStream.use { input ->
+                    val buffer = ByteArray(PROXY_BUFFER)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        out.write(buffer, 0, read)
+                        proxy.lastAccess = SystemClock.elapsedRealtime()
+                    }
+                }
+            }
+            out.flush()
+        } finally {
+            connection.disconnect()
         }
     }
 
@@ -382,5 +456,6 @@ internal class StreamServer(private val onComplete: (File) -> Unit) {
         private const val MAX_MEMORY_PIECES = 6
         private const val MAX_SESSIONS = 6
         private const val MAX_LINE = 8 * 1024
+        private const val PROXY_BUFFER = 64 * 1024
     }
 }

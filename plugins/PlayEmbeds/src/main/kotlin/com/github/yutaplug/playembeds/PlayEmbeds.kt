@@ -101,6 +101,7 @@ class PlayEmbeds : Plugin() {
     private var youtube: YoutubeResolver? = null
     private var soundCloud: SoundCloudResolver? = null
     private var spotify: SpotifyResolver? = null
+    private var twitch: TwitchClipResolver? = null
     private var downloader: MediaDownloader? = null
 
     /** The video in a rotated fullscreen, and one that left it and waits for its embed row. */
@@ -128,6 +129,8 @@ class PlayEmbeds : Plugin() {
         youtube = YoutubeResolver(File(context.cacheDir, "playembeds-youtube"))
         soundCloud = SoundCloudResolver(File(context.cacheDir, "playembeds"))
         spotify = SpotifyResolver()
+        twitch = TwitchClipResolver()
+        EmbedUrls.tikTokResolver = TikTokResolver()
         downloader = MediaDownloader(context.applicationContext)
         NativePlayers.init()
         allowLoopbackCleartext()
@@ -562,6 +565,8 @@ class PlayEmbeds : Plugin() {
         HostedProvider.YOUTUBE -> youtube
         HostedProvider.SOUNDCLOUD -> soundCloud
         HostedProvider.SPOTIFY -> spotify
+        HostedProvider.TWITCH -> twitch
+        HostedProvider.TIKTOK -> EmbedUrls.tikTokResolver
     }
 
     private fun playHosted(view: View, embed: HostedEmbed): Boolean {
@@ -572,7 +577,7 @@ class PlayEmbeds : Plugin() {
     }
 
     /**
-     * YouTube, SoundCloud and Spotify links are webpages, not media files.
+     * YouTube, SoundCloud, Spotify, Twitch clip and TikTok links are webpages, not media files.
      * Resolve a progressive stream in the background, then play it inline
      * with Discord's ExoPlayer. Anything that can't be resolved opens externally.
      */
@@ -706,7 +711,8 @@ class PlayEmbeds : Plugin() {
                 attachWholeCardVideo(container, player, identity, media, fitVideo = true, reuse = reuse)
                     ?: attachPreviewVideo(container, player, identity, media, reuse)
             // Otherwise the whole card is replaced only when there's no large preview to play in.
-            provider == HostedProvider.YOUTUBE ->
+            provider == HostedProvider.YOUTUBE || provider == HostedProvider.TWITCH ||
+                provider == HostedProvider.TIKTOK ->
                 attachPreviewVideo(container, player, identity, media, reuse)
                     ?: attachWholeCardVideo(container, player, identity, media, fitVideo = false, reuse = reuse)
             else -> attachPreviewVideo(container, player, identity, media, reuse)
@@ -2714,11 +2720,15 @@ class PlayEmbeds : Plugin() {
         youtube?.close()
         soundCloud?.close()
         spotify?.close()
+        twitch?.close()
+        EmbedUrls.tikTokResolver?.close()
         downloader?.close()
         downloader = null
         youtube = null
         soundCloud = null
         spotify = null
+        twitch = null
+        EmbedUrls.tikTokResolver = null
         configuredEmbeds.clear()
         embedLinks.clear()
         hostedEmbeds.clear()
