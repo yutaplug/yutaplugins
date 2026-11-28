@@ -10,6 +10,7 @@ import android.widget.TextView
 import com.discord.api.role.GuildRole
 import com.discord.stores.StoreStream
 import com.discord.utilities.guilds.RoleUtils
+import java.text.BreakIterator
 import java.util.WeakHashMap
 
 /**
@@ -26,8 +27,11 @@ internal class NameRenderer(
         val guildId: Long?,
         val roles: List<Long>?,
         val roleColors: Boolean,
-        /** In the friend list, the DM list or a DM, where colors follow [Prefs.nameColorsInLists]. */
-        val list: Boolean,
+        /**
+         * Whether the style's colors and effect show here. Discord shows them only on profiles, the
+         * selected DM, the DM header and DM member lists (and on hover on desktop); elsewhere only the font.
+         */
+        val colors: Boolean,
         /** The user object the view was bound with, which carries the style even when the store lacks the user. */
         val model: Any?,
     )
@@ -76,10 +80,10 @@ internal class NameRenderer(
         guildId: Long?,
         roles: List<Long>?,
         roleColors: Boolean,
-        list: Boolean = false,
+        colors: Boolean,
         model: Any? = null,
     ) {
-        val target = Target(userId, guildId?.takeIf { it > 0 }, roles, roleColors, list, model)
+        val target = Target(userId, guildId?.takeIf { it > 0 }, roles, roleColors, colors, model)
         targets[view] = target
         try {
             style(view, target)
@@ -113,8 +117,8 @@ internal class NameRenderer(
         // As on Discord's current apps, a colored role wins over the display name style's colors;
         // the style still supplies the font.
         val role = if (target.roleColors) colorRole(target) else null
-        // The friend and DM lists can show only the font, keeping Discord's own text color.
-        val colorsShown = prefs.nameColors && (!target.list || prefs.nameColorsInLists)
+        // Where Discord shows only the font, names without a colored role keep the normal text color.
+        val colorsShown = prefs.nameColors && target.colors
         val styleColors = style?.colors?.takeIf { colorsShown && it.isNotEmpty() }
         if (role == null && styleColors != null) {
             effectSpans(view, style.effectId, styleColors, typeface, fontScale, fontSpacing, name, density, spans)
@@ -169,7 +173,21 @@ internal class NameRenderer(
             }
 
             NameStyle.EFFECT_NEON, NameStyle.EFFECT_TOON, NameStyle.EFFECT_POP -> {
-                out.add(Triple(0, end, OutlineSpan(effect, first, typeface, fontScale, fontSpacing, density)))
+                // One span per character, so a name that doesn't fit is cut short instead of becoming "…".
+                val characters = BreakIterator.getCharacterInstance()
+                characters.setText(name)
+                var index = characters.first()
+                while (index < end) {
+                    val next = characters.next().takeIf { it != BreakIterator.DONE } ?: end
+                    out.add(
+                        Triple(
+                            index,
+                            next,
+                            OutlineSpan(effect, first, typeface, fontScale, fontSpacing, density, index, end, view),
+                        ),
+                    )
+                    index = next
+                }
             }
 
             NameStyle.EFFECT_GUMMY -> {

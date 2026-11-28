@@ -271,7 +271,13 @@ internal class NameSpan(
 
 /**
  * Neon, Toon and Pop: these outline the text (`-webkit-text-stroke` with `paint-order: stroke
- * fill`), so the name is drawn several times. A replacement span can, but it doesn't wrap.
+ * fill`), so the name is drawn several times, which needs a replacement span.
+ *
+ * Android gives a replacement span's whole width to its first character, so one span over the
+ * whole name can't be cut short: a name that doesn't fit became just "…". Instead each character
+ * (grapheme) gets its own span and measures only itself, so the name ellipsizes and wraps like
+ * normal text. The first one on each line then draws that line's whole visible part of the name
+ * (with the "…" if it was cut), so the outline, glow and gradients still run across the name.
  */
 internal class OutlineSpan(
     private val effect: Int,
@@ -280,9 +286,30 @@ internal class OutlineSpan(
     private val scale: Float,
     private val spacing: Float,
     private val density: Float,
+    /** Where this span's character starts in the name. */
+    private val offset: Int,
+    private val nameLength: Int,
+    /** The view, to find which part of the name is on this span's line. */
+    view: TextView?,
 ) : ReplacementSpan(), StyledName {
     private val shades = Shades(main)
     private val work = TextPaint()
+    private val view = view?.let { WeakReference(it) }
+
+    /**
+     * The part of the name this span draws: the rest of the name on its line when it is the first
+     * character there, null when an earlier character already drew it, or just its own character
+     * when the line can't be found.
+     */
+    private fun run(start: Int, end: Int): IntArray? {
+        val nameStart = start - offset
+        val layout = view?.get()?.layout
+        if (nameStart < 0 || layout == null || start >= layout.text.length) return intArrayOf(start, end)
+        val line = layout.getLineForOffset(start)
+        val runStart = max(nameStart, layout.getLineStart(line))
+        if (start != runStart) return null
+        return intArrayOf(runStart, min(nameStart + nameLength, layout.getLineEnd(line)))
+    }
 
     private fun styled(paint: Paint): TextPaint {
         work.set(paint)
@@ -345,6 +372,11 @@ internal class OutlineSpan(
         bottom: Int,
         paint: Paint,
     ) {
+        val run = run(start, end) ?: return
+        drawName(canvas, text, run[0], run[1], x, y, paint)
+    }
+
+    private fun drawName(canvas: Canvas, text: CharSequence, start: Int, end: Int, x: Float, y: Int, paint: Paint) {
         val p = styled(paint)
         val em = p.textSize
         val baseline = y.toFloat()

@@ -1,8 +1,14 @@
-version = "1.1.4"
+version = "1.1.5"
 description = "Backports Discord profile effects, profile frames, profile themes, role gradients, and display name fonts and colors."
 aliucord {
     changelog.set(
         """
+        # 1.1.5
+        * Show display name colors where Discord does: profiles, the DM header, the selected DM and DM member lists; elsewhere names keep only their font
+        * Names in servers no longer show display name colors when the member has no colored role
+        * Fix long Neon, Toon and Pop names showing as "…" instead of being cut short
+        * Fix display name styles missing from the member list in DMs
+        * Remove the "Display name colors in lists and DMs" setting
         # 1.1.4
         * Show profile frames whose data Discord nests under variants or bundles, or whose layers use other asset IDs
         * Log profile frames the plugin can't draw, with Discord's data, to the debug log

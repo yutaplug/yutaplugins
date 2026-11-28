@@ -13,7 +13,6 @@ internal class Prefs(private val settings: SettingsAPI) {
     val roleGradients get() = settings.getBool(ROLE_GRADIENTS, true)
     val nameFonts get() = settings.getBool(NAME_FONTS, true)
     val nameColors get() = settings.getBool(NAME_COLORS, true)
-    val nameColorsInLists get() = settings.getBool(NAME_COLORS_IN_LISTS, true)
 
     companion object {
         const val EFFECTS = "effects"
@@ -22,7 +21,6 @@ internal class Prefs(private val settings: SettingsAPI) {
         const val ROLE_GRADIENTS = "roleGradients"
         const val NAME_FONTS = "nameFonts"
         const val NAME_COLORS = "nameColors"
-        const val NAME_COLORS_IN_LISTS = "nameColorsInLists"
     }
 }
 
@@ -46,12 +44,7 @@ class ProfileEffectsSettings(private val settings: SettingsAPI) : SettingsPage()
         toggle(
             Prefs.NAME_COLORS,
             "Display name colors",
-            "Show display name colors and effects (gradient, glow, neon, toon, pop, prism, gummy).",
-        )
-        toggle(
-            Prefs.NAME_COLORS_IN_LISTS,
-            "Display name colors in lists and DMs",
-            "Show display name colors in the friend list, the DM list and DMs. When off, those names keep the normal text color but still use their font. Profiles always show colors.",
+            "Show display name colors and effects (gradient, glow, neon, toon, pop, prism, gummy). As on Discord, they show on profiles, the selected DM, the DM header and DM member lists; elsewhere names keep only their font.",
         )
     }
 

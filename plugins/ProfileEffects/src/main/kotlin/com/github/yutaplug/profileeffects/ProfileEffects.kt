@@ -186,8 +186,8 @@ class ProfileEffects : Plugin() {
                 val author = message.author ?: return@Hook
                 val member = entry.author
                 val guild = member?.guildId?.takeIf { it > 0 } ?: message.guildId
-                // Messages without a guild are in DMs, which follow the DM color setting.
-                names?.apply(view, author.id, guild, member?.roles, true, guild == null, author)
+                // As on Discord, chat names show only the style's font, in servers and DMs alike.
+                names?.apply(view, author.id, guild, member?.roles, true, false, author)
             },
         )
         // Reply previews: the replied-to author's name above the message. configureReplyAuthor is a
@@ -211,7 +211,7 @@ class ProfileEffects : Plugin() {
                 }
                 val (user, member, message) = reply
                 val guild = member?.guildId?.takeIf { it > 0 } ?: message.guildId
-                names.apply(view, user.id, guild, member?.roles, true, guild == null, user)
+                names.apply(view, user.id, guild, member?.roles, true, false, user)
             },
         )
         patcher.patch(
@@ -222,7 +222,9 @@ class ProfileEffects : Plugin() {
                 val member = call.args[0] as ChannelMembersListAdapter.Item.Member
                 val holder = call.thisObject as ChannelMembersListViewHolderMember
                 val view = usernameText(holder.itemView) ?: return@Hook
-                names?.apply(view, member.userId, member.guildId, null, true)
+                // DM and group DM member lists have no guild (null) and show the colors, as on Discord.
+                val guildId: Long? = member.guildId
+                names?.apply(view, member.userId, guildId, null, true, guildId == null || guildId <= 0)
             },
         )
 
@@ -237,7 +239,8 @@ class ProfileEffects : Plugin() {
                 val item = call.args[1] as? ChannelListItemPrivate ?: return@Hook
                 val binding = dmBinding[call.thisObject] as WidgetChannelsListItemChannelPrivateBinding
                 val recipient = ChannelUtils.a(item.channel)
-                styleListName(binding.f, recipient?.id, recipient)
+                // As on Discord, the colors show only on the selected DM; the others keep just the font.
+                styleListName(binding.f, recipient?.id, recipient, item.selected)
             },
         )
 
@@ -306,7 +309,7 @@ class ProfileEffects : Plugin() {
                     listTokens.remove(title)
                     names?.forget(title)
                 } else {
-                    styleListName(title, recipient.id, recipient)
+                    styleListName(title, recipient.id, recipient, true)
                 }
             },
         )
@@ -316,18 +319,18 @@ class ProfileEffects : Plugin() {
      * Aliucord's RNAPI replaces these names with the global name in hooks that run after this
      * plugin's, so style them once the bind (and every hook on it) has finished.
      */
-    private fun styleListName(view: TextView, userId: Long?, model: Any? = null) {
+    private fun styleListName(view: TextView, userId: Long?, model: Any? = null, colors: Boolean = false) {
         val names = names ?: return
         if (userId == null) {
             // Cancel a style still queued from this row's previous (one-on-one) DM.
             listTokens.remove(view)
-            names.apply(view, 0, null, null, false, true)
+            names.apply(view, 0, null, null, false, false)
             return
         }
         val token = Any()
         listTokens[view] = token
         view.post {
-            if (listTokens[view] === token && this.names === names) names.apply(view, userId, null, null, false, true, model)
+            if (listTokens[view] === token && this.names === names) names.apply(view, userId, null, null, false, colors, model)
         }
     }
 
@@ -337,7 +340,7 @@ class ProfileEffects : Plugin() {
         val nameView = header.findViewById<View>(Utils.getResId("user_profile_header_primary_name", "id")) ?: return
         val text = usernameText(nameView) ?: return
         // Discord 126.21 never colors profile names by role, so only display name styles apply here.
-        names?.apply(text, userId, guildId, null, false, false, model)
+        names?.apply(text, userId, guildId, null, false, true, model)
     }
 
     private fun usernameText(root: View): TextView? = root.findViewById(Utils.getResId("username_text", "id"))
