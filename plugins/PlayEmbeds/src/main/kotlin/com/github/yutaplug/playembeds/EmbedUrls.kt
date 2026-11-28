@@ -51,7 +51,8 @@ internal object EmbedUrls {
     fun genericVideoUrl(embed: MessageEmbed): String? {
         if (isGifEmbed(embed)) return null
         if (isDirectLinkedMediaEmbed(embed) || EmbedResourceUtils.INSTANCE.isInlineEmbed(embed)) return null
-        val video = embed.m() ?: return fxVideoResolver?.cached(embed.l())
+        fxLookupUrl(embed)?.let { return fxVideoResolver?.cached(it) }
+        val video = embed.m() ?: return null
         val providerName = embed.g()?.a()?.lowercase(Locale.ROOT)
         if (providerName in HOSTED_PROVIDER_NAMES) return null
 
@@ -63,6 +64,18 @@ internal object EmbedUrls {
         return listOfNotNull(video.b(), video.c()).firstNotNullOfOrNull { url ->
             resolveEmbeddedMediaUrl(url, allowExtensionless && url != embed.l())
         }
+    }
+
+    /**
+     * The URL [FxVideoResolver] looks the video up from: the embed's link when it has
+     * no video, or X's HTML player page Discord now puts in `video.url` (with no
+     * proxy URL), which ExoPlayer can't read. Null when the embed's video plays as is.
+     */
+    fun fxLookupUrl(embed: MessageEmbed): String? {
+        val resolver = fxVideoResolver ?: return null
+        val video = embed.m()
+        val url = if (video == null) embed.l() else video.c()?.takeIf { video.b() == null }
+        return url?.takeIf(resolver::handles)
     }
 
     private fun resolveEmbeddedMediaUrl(url: String, allowExtensionless: Boolean, depth: Int = 0): String? {

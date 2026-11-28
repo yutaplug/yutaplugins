@@ -1,9 +1,12 @@
-version = "1.1.2"
+version = "1.1.3"
 description = "Plays direct video and audio link embeds in Discord's built-in media player."
 
 aliucord {
     changelog.set(
         """
+        # 1.1.3
+        * X (Twitter) videos play inline instead of failing with a playback error; tweets without a playable video open in the app or browser
+
         # 1.1.2
         * Embeds pause when you leave the chat for another screen (like user settings), open a link, or minimize the app
 

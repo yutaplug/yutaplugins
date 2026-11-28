@@ -5,12 +5,23 @@ import com.aliucord.Http
 import org.json.JSONObject
 import java.util.Locale
 
-/** Resolves missing FxEmbed video metadata without changing Discord's message model. */
+/**
+ * Resolves a tweet's mp4 through the FxTwitter API, for embeds whose video Discord
+ * can't play: FxEmbed links without video metadata, and X embeds whose video is
+ * X's HTML player page (`twitter.com/i/videos/tweet/{id}`) with no proxy URL.
+ */
 internal class FxVideoResolver : CachedResolver<String>() {
     override fun key(url: String): String? {
         val uri = Uri.parse(url)
-        if (uri.scheme != "https" || uri.host?.lowercase(Locale.ROOT) !in FX_HOSTS) return null
-        val match = STATUS_PATH.matchEntire(uri.path.orEmpty()) ?: return null
+        if (uri.scheme != "https") return null
+        val host = uri.host?.lowercase(Locale.ROOT) ?: return null
+        val path = uri.path.orEmpty()
+        if (host in X_HOSTS) {
+            val match = PLAYER_PATH.matchEntire(path) ?: return null
+            return "${match.groupValues[1]}:1"
+        }
+        if (host !in FX_HOSTS) return null
+        val match = STATUS_PATH.matchEntire(path) ?: return null
         val index = match.groupValues[2].takeIf { it.isNotEmpty() } ?: "1"
         return "${match.groupValues[1]}:$index"
     }
@@ -39,6 +50,8 @@ internal class FxVideoResolver : CachedResolver<String>() {
 
     private companion object {
         val FX_HOSTS = setOf("fxtwitter.com", "www.fxtwitter.com", "fixupx.com", "www.fixupx.com")
+        val X_HOSTS = setOf("twitter.com", "www.twitter.com", "mobile.twitter.com", "x.com", "www.x.com")
         val STATUS_PATH = Regex("^/[^/]+/status/([0-9]+)(?:/video/([1-9][0-9]*))?/?$")
+        val PLAYER_PATH = Regex("^/i/videos/(?:tweet/)?([0-9]+)/?$")
     }
 }

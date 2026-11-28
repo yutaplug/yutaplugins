@@ -278,11 +278,12 @@ class PlayEmbeds : Plugin() {
                 }
                 val link = EmbedUrls.embedLink(entry.embed)
                 if (link == null) {
-                    if (entry.embed.m() == null) {
+                    val fxUrl = EmbedUrls.fxLookupUrl(entry.embed)
+                    if (fxUrl != null) {
                         val root = WeakReference(item.itemView)
                         val embed = entry.embed
                         val rowKey = entry.message.id to entry.embedIndex
-                        EmbedUrls.fxVideoResolver?.resolve(embed.l()) { video ->
+                        EmbedUrls.fxVideoResolver?.resolve(fxUrl) { video ->
                             val view = root.get()
                             if (video != null && view != null && configuredEmbeds[view] === embed &&
                                 embedContainers(view).any { embedRowKeys[it] == rowKey }
@@ -312,6 +313,10 @@ class PlayEmbeds : Plugin() {
             PreHook { frame ->
                 val embed = frame.args.getOrNull(1) as? MessageEmbed ?: return@PreHook
                 val container = findHostedContainer(embed) ?: return@PreHook
+                if (playPendingFxVideo(container, embed)) {
+                    frame.setResult(null)
+                    return@PreHook
+                }
                 if (EmbedUrls.genericVideoUrl(embed) != null) {
                     if (playInlineVideo(container, embed)) frame.setResult(null)
                     return@PreHook
@@ -368,6 +373,10 @@ class PlayEmbeds : Plugin() {
                     ?: viewGroupField(frame.thisObject)
                     ?: return@PreHook
                 val container = findHostedContainer(source)
+                if (container != null && playPendingFxVideo(container, embed)) {
+                    frame.setResult(null)
+                    return@PreHook
+                }
                 if (container != null && EmbedUrls.genericVideoUrl(embed) != null) {
                     if (playInlineVideo(container, embed)) {
                         frame.setResult(null)
@@ -609,6 +618,31 @@ class PlayEmbeds : Plugin() {
         val quality = youtubeQualityChoices[embed.url] ?: youtubeQuality
         showLoading(container)
         youtubeResolver.resolve(embed.url, quality, done)
+        return true
+    }
+
+    /**
+     * An X video whose mp4 FxTwitter hasn't returned yet: wait for it with a spinner
+     * and play it then, instead of letting Discord load X's HTML player page.
+     * When there's no mp4, open the tweet. False when the embed doesn't need this.
+     */
+    private fun playPendingFxVideo(container: ViewGroup, embed: MessageEmbed): Boolean {
+        val fxUrl = EmbedUrls.fxLookupUrl(embed) ?: return false
+        val resolver = EmbedUrls.fxVideoResolver ?: return false
+        if (resolver.cached(fxUrl) != null) return false
+        if (loadingIndicators[container] != null) return true
+        val rowKey = embedRowKeys[container]
+        val containerRef = WeakReference(container)
+        showLoading(container)
+        resolver.resolve(fxUrl) { video ->
+            val target = containerRef.get() ?: return@resolve
+            hideLoading(target)
+            if (!target.isAttachedToWindow || embedRowKeys[target] != rowKey) return@resolve
+            if (video == null || !playInlineVideo(target, embed)) {
+                DebugLog.log("x video: no mp4 for $fxUrl, opening the tweet")
+                openExternally(target.context, embed.l() ?: fxUrl)
+            }
+        }
         return true
     }
 
