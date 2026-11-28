@@ -32,6 +32,8 @@ import com.github.yutaplug.fixes.serversheet.ServerSheetFix
 import com.github.yutaplug.fixes.settings.SettingsFix
 import com.github.yutaplug.fixes.updater.UpdaterFix
 import com.github.yutaplug.fixes.validuser.ValidUserFix
+import com.github.yutaplug.fixes.videodecoder.VideoDecoderFix
+import com.github.yutaplug.fixes.voiceself.VoiceSelfFix
 import com.github.yutaplug.fixes.voice.VoiceFix
 
 @AliucordPlugin(requiresRestart = true)
@@ -63,6 +65,8 @@ class Fixes : Plugin() {
         NewBadgesFix(),
         AttachmentPreviewFix(),
         VoiceFix(),
+        VideoDecoderFix(),
+        VoiceSelfFix(),
     )
 
     internal val markdown: MarkdownFix get() = fixes.first { it is MarkdownFix } as MarkdownFix

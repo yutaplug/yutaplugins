@@ -1,6 +1,6 @@
 import org.gradle.kotlin.dsl.support.serviceOf
 
-version = "1.0.14"
+version = "1.1.0"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -15,6 +15,14 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.1.0
+        * Videos loading forever: new fix for videos that never start playing (often tall, high-resolution screen recordings). When the phone's first video decoder can't play a video, the others are tried, like on newer Discord
+        * Voice and video calls: soundboard. Sounds played by others in your voice channel are heard, and the soundboard button in the call controls opens a picker of sounds to play, with search and a preview button on each sound: Discord's default sounds, the server's own, and every other server's (marked, since those need Nitro)
+        * Voice and video calls: voice channel statuses are shown in the channel list and under the channel name in calls, with custom emojis. Tap the channel name at the top of the call screen to set yours; the emoji button adds emojis
+        * Yourself in voice channels: new fix that shows you in a voice channel's member list when you're in it on another device, like newer Discord
+        * GitHub updater: changelogs show the date each version was released
+        * Markdown: ```diff code blocks are highlighted like on desktop, with added lines in green and removed lines in red
+
         # 1.0.14
         * Voice and video calls: new fix that makes voice calls, server voice channels, camera video and screen sharing work again, with the end-to-end encryption (DAVE) Discord now requires. Type /davevoice in a call to see its status
 

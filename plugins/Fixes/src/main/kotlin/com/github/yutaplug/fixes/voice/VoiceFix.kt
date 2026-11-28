@@ -22,8 +22,12 @@ internal class VoiceFix :
         "DaveVoice",
         "Voice and video calls",
         "Makes voice calls, server voice channels, camera video and screen sharing work again, with the " +
-            "end-to-end encryption (DAVE) Discord now requires. /davevoice shows the connection status.",
+            "end-to-end encryption (DAVE) Discord now requires. Also adds the soundboard (its button is in the call " +
+            "controls) and voice channel statuses (set yours by tapping the channel name at the top of the call " +
+            "screen). /davevoice shows the connection status.",
     ) {
+    private var channelStatus: ChannelStatus? = null
+    private var soundboard: Soundboard? = null
     private val gateways: MutableMap<b.a.q.n0.a, VoiceGateway> = Collections.synchronizedMap(WeakHashMap())
     private val connecting = ThreadLocal<Boolean>()
 
@@ -96,9 +100,16 @@ internal class VoiceFix :
             val text = if (list.isEmpty()) "Not in a call." else list.joinToString("\n\n") { it.status() }
             CommandsAPI.CommandResult("```\n$text\n```", null, false)
         }
+
+        channelStatus = ChannelStatus(patcher, logger).also { it.start() }
+        soundboard = Soundboard(patcher, logger, resources).also { it.start() }
     }
 
     override fun stop(context: Context) {
+        channelStatus?.stop()
+        channelStatus = null
+        soundboard?.stop()
+        soundboard = null
         plugin.commandsApi.unregisterCommand(COMMAND)
         val list = synchronized(gateways) { ArrayList(gateways.values).also { gateways.clear() } }
         for (g in list) g.close()

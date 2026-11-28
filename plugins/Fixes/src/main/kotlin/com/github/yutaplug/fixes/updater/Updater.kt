@@ -274,10 +274,12 @@ internal object Updater {
                     update.changelog ?: "* No changelog was published for this version."
                 }
                 if (single) {
-                    body.append(text)
+                    body.append(if (update.isCore) text else ReleaseDates.dated(update.name, text) ?: text)
                     media = update.media
                 } else {
-                    body.append("# ").append(update.name).append(' ').append(update.to).append('\n')
+                    body.append("# ").append(update.name).append(' ').append(update.to)
+                    if (!update.isCore) ReleaseDates.dateOf(update.name, update.to)?.let { body.append(" · ").append(it) }
+                    body.append('\n')
                     body.append(bulletsOnly(text)).append("\n\n")
                 }
             }

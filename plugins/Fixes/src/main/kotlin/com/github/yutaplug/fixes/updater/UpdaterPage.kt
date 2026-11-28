@@ -343,7 +343,7 @@ class UpdaterPage : SettingsPage() {
         buttons.add(
             UpdaterUi.button(context, "Changelog", Kind.SECONDARY) {
                 val body = update.newChangelog ?: update.build.changelog
-                showChangelog(it.context, "${update.name} ${update.build.version}", update.build.changelogMedia, body, update.repo)
+                showChangelog(it.context, update.name, "${update.name} ${update.build.version}", update.build.changelogMedia, body, update.repo)
             },
         )
         if (installed == null && !installing) {
@@ -482,15 +482,25 @@ class UpdaterPage : SettingsPage() {
         return androidx.core.content.ContextCompat.getDrawable(context, value.resourceId)
     }
 
-    private fun showChangelog(context: Context, title: String, media: String?, changelog: String?, repo: String?) {
-        val body = changelog?.takeIf { it.trim().isNotEmpty() } ?: "* No changelog was published for this version."
+    private fun showChangelog(context: Context, name: String, title: String, media: String?, changelog: String?, repo: String?) {
         val github = Updater.repoUrl(repo)
         val footer = if (github == null) {
             emptyArray()
         } else {
             arrayOf(ChangelogUtils.FooterAction(R.e.ic_account_github_white_24dp, github))
         }
-        ChangelogUtils.show(context, title, media, body, *footer)
+        // Looking up the versions' release dates can take a moment the first time.
+        Utils.threadPool.execute {
+            val body = ReleaseDates.dated(name, changelog)?.takeIf { it.trim().isNotEmpty() }
+                ?: "* No changelog was published for this version."
+            Utils.mainThread.post {
+                try {
+                    ChangelogUtils.show(context, title, media, body, *footer)
+                } catch (e: Throwable) {
+                    Updater.logger.error("Could not show the changelog", e)
+                }
+            }
+        }
     }
 
     private fun addProblems(context: Context, result: CheckResult?) {
@@ -549,7 +559,7 @@ class UpdaterPage : SettingsPage() {
                 isClickable = true
                 setOnClickListener {
                     val title = "${plugin.name} ${plugin.version}"
-                    showChangelog(it.context, title, plugin.changelogMedia, plugin.changelog, plugin.repo)
+                    showChangelog(it.context, plugin.name, title, plugin.changelogMedia, plugin.changelog, plugin.repo)
                 }
             }
             val top = LinearLayout(context).apply {

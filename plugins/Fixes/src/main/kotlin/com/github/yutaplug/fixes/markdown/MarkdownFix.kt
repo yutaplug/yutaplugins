@@ -145,8 +145,13 @@ internal class MarkdownFix :
             PreHook { frame ->
                 val node = frame.thisObject as CodeNode<BasicRenderContext>
                 val context = frame.args[1] as? BasicRenderContext ?: return@PreHook
-                if (!node.a.equals("ansi", ignoreCase = true)) return@PreHook
-                AnsiCodeBlocks.render(node, frame.args[0] as SpannableStringBuilder, context)
+                val language = node.a?.lowercase() ?: return@PreHook
+                val builder = frame.args[0] as SpannableStringBuilder
+                when (language) {
+                    "ansi" -> AnsiCodeBlocks.render(node, builder, context)
+                    in DiffCodeBlocks.languages -> DiffCodeBlocks.render(node, builder, context)
+                    else -> return@PreHook
+                }
                 frame.result = null
             },
         )
