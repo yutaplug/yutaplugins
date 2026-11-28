@@ -27,6 +27,18 @@ class LogcatSettings(private val plugin: Logcat) : SettingsPage() {
         setActionBarTitle("Logcat")
         setActionBarSubtitle("Discord's own log output")
 
+        section("Share")
+        note(
+            "Discord tokens, Authorization headers and other credentials, emails, URL query strings (signed " +
+                "CDN links, upload IDs) and IP addresses other than loopback are redacted. Still check the log " +
+                "before posting it publicly: messages and names in it are not removed.",
+        )
+        action("Copy log", "Copy the most recent part of the log to the clipboard. Use Share log for all of it.") { copy() }
+        action("Save to Downloads", "Save the whole log as a text file") { save() }
+        action("Share log", "Send the whole log as a text file to another app") { share() }
+        action("Clear log", "Remove everything captured so far") { confirmClear() }
+
+        divider()
         section("Capture")
         statusView = note("")
         note(
@@ -67,7 +79,9 @@ class LogcatSettings(private val plugin: Logcat) : SettingsPage() {
                 CheckedSetting.ViewType.SWITCH,
                 "Record network timings",
                 "Add how long Discord's DNS lookups, connections, uploads and media downloads take to the log, " +
-                    "as ${NetworkTimings.TAG} lines. Discord doesn't log these itself. Useful when media is slow.",
+                    "plus video loading and video player states (buffering, stalls, errors), as " +
+                    "${NetworkTimings.TAG} lines. Discord doesn't log these itself. Useful when media is slow " +
+                    "or videos load forever.",
             ).apply {
                 isChecked = plugin.networkTimings
                 setOnCheckedListener {
@@ -83,18 +97,6 @@ class LogcatSettings(private val plugin: Logcat) : SettingsPage() {
                 "measurement, restart Discord, reproduce the problem, then share the log, or set Tags to " +
                 "${NetworkTimings.TAG} to see only these lines.",
         )
-
-        divider()
-        section("Share")
-        note(
-            "Discord tokens, Authorization headers and other credentials, emails, URL query strings (signed " +
-                "CDN links, upload IDs) and IP addresses other than loopback are redacted. Still check the log " +
-                "before posting it publicly: messages and names in it are not removed.",
-        )
-        action("Copy log", "Copy the most recent part of the log to the clipboard. Use Share log for all of it.") { copy() }
-        action("Save to Downloads", "Save the whole log as a text file") { save() }
-        action("Share log", "Send the whole log as a text file to another app") { share() }
-        action("Clear log", "Remove everything captured so far") { confirmClear() }
 
         divider()
         section("Filter")

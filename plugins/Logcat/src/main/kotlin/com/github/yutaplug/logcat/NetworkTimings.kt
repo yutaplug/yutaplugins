@@ -5,6 +5,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import com.aliucord.Http
 import com.aliucord.Logger
@@ -13,6 +15,7 @@ import de.robv.android.xposed.XC_MethodHook
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
+import java.lang.reflect.Field
 import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -43,6 +46,8 @@ internal class NetworkTimings(private val patcher: PatcherAPI, private val logge
         hook("HTTP requests (OkHttp)") { hookOkHttpRequests() }
         hook("Image downloads (Fresco)") { hookFresco() }
         hook("Aliucord Http (UploadSize uploads)") { hookAliucordHttp() }
+        hook("Video downloads (ExoPlayer)") { hookVideoHttp() }
+        hook("Video player") { hookVideoPlayer() }
         DiagLog.add("Started. Hooks: ${hooked.joinToString()}" + if (failed.isEmpty()) "" else "; failed: ${failed.joinToString()}")
     }
 
@@ -50,6 +55,9 @@ internal class NetworkTimings(private val patcher: PatcherAPI, private val logge
         if (!running) return
         running = false
         patcher.unpatchAll()
+        watchdog.removeCallbacksAndMessages(null)
+        synchronized(videoLoads) { videoLoads.clear() }
+        synchronized(players) { players.clear() }
         hooked.clear()
         failed.clear()
     }
@@ -352,6 +360,237 @@ internal class NetworkTimings(private val patcher: PatcherAPI, private val logge
         )
     }
 
+    private class VideoLoad(val label: String, val opened: Long) {
+        var lastBytes = 0L
+        var lastProgress = opened
+        var stalled = false
+    }
+
+    private val videoLoads = java.util.WeakHashMap<Any, VideoLoad>()
+    private val watchdog = Handler(Looper.getMainLooper())
+
+    private val dataSource by lazy { Class.forName("b.i.a.c.e3.r") }
+    private val dataSpecField by lazy { field(dataSource, "m") }
+    private val codeField by lazy { field(dataSource, "q") }
+    private val lengthField by lazy { field(dataSource, "r") }
+    private val bytesField by lazy { field(dataSource, "s") }
+
+    private fun field(cls: Class<*>, name: String): Field = cls.getDeclaredField(name).apply { isAccessible = true }
+
+    private fun bytesRead(source: Any): Long = try {
+        bytesField.getLong(source)
+    } catch (e: Throwable) {
+        -1L
+    }
+
+    /** "host/shape @offset" for a DataSpec; other hosts are named only as such. */
+    private fun videoLabel(spec: Any?): String {
+        if (spec == null) return "?"
+        val uri = spec.javaClass.getDeclaredField("a").get(spec) as? Uri
+        val position = spec.javaClass.getDeclaredField("f").getLong(spec)
+        val host = uri?.host
+        val where = when {
+            uri == null -> "?"
+            uri.scheme == "file" || uri.scheme == "content" -> "(local file)"
+            DiagLog.isDiscordHost(host) -> host + DiagLog.pathShape(host!!, uri.pathSegments ?: emptyList())
+            else -> "(non-Discord host)"
+        }
+        return if (position > 0) "$where from ${DiagLog.size(position)}" else where
+    }
+
+    /**
+     * ExoPlayer's DefaultHttpDataSource (`b.i.a.c.e3.r`), which Discord's video player downloads through (behind
+     * its cache). `open` connects and reads the headers, `read` streams the body, `close` ends the load. A
+     * watchdog reports loads that stop receiving data, since a stalled read never throws and only shows as
+     * endless buffering.
+     */
+    private fun hookVideoHttp() {
+        val dataSpec = Class.forName("b.i.a.c.e3.n")
+        timed(dataSource.getDeclaredMethod("a", dataSpec)) { param, ms ->
+            val source = param.thisObject
+            val label = videoLabel(param.args[0])
+            val code = codeField.getInt(source)
+            val error = param.throwable
+            if (error != null) {
+                synchronized(DiagLog) { DiagLog.stats.requestFailures++ }
+                val status = if (code != 0) "HTTP $code" else DiagLog.describe(error)
+                DiagLog.add("VIDEO open $label FAILED after ${ms}ms ($status)")
+                return@timed
+            }
+            val length = lengthField.getLong(source)
+            DiagLog.add("VIDEO open $label $code, ${DiagLog.size(length)} to read, headers after ${ms}ms")
+            synchronized(videoLoads) { videoLoads[source] = VideoLoad(label, SystemClock.elapsedRealtime()) }
+            scheduleWatchdog()
+        }
+
+        patcher.patch(
+            dataSource.getDeclaredMethod("close"),
+            object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    safe {
+                        val source = param.thisObject
+                        val load = synchronized(videoLoads) { videoLoads.remove(source) } ?: return@safe
+                        val ms = SystemClock.elapsedRealtime() - load.opened
+                        val bytes = bytesRead(source)
+                        val length = lengthField.getLong(source)
+                        synchronized(DiagLog) {
+                            val stats = DiagLog.stats
+                            stats.downloads++
+                            if (bytes > 0) stats.downloadBytes += bytes
+                            stats.downloadMs += ms
+                        }
+                        val of = if (length > 0) " of ${DiagLog.size(length)}" else ""
+                        DiagLog.add(
+                            "VIDEO closed ${load.label}: read ${DiagLog.size(bytes)}$of in ${ms}ms" +
+                                DiagLog.speed(bytes, ms),
+                        )
+                    }
+                }
+            },
+        )
+
+        // Read errors (a dropped or reset connection mid-download).
+        patcher.patch(
+            dataSource.getDeclaredMethod("read", ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType),
+            object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val error = param.throwable ?: return
+                    safe {
+                        val load = synchronized(videoLoads) { videoLoads[param.thisObject] }
+                        val label = load?.label ?: videoLabel(dataSpecField.get(param.thisObject))
+                        synchronized(DiagLog) { DiagLog.stats.requestFailures++ }
+                        DiagLog.add(
+                            "VIDEO read $label FAILED after ${DiagLog.size(bytesRead(param.thisObject))} " +
+                                "(${DiagLog.describe(error)})",
+                        )
+                    }
+                }
+            },
+        )
+    }
+
+    private fun scheduleWatchdog() {
+        watchdog.removeCallbacksAndMessages(null)
+        watchdog.postDelayed({ checkStalls() }, WATCHDOG_MS)
+    }
+
+    private fun checkStalls() {
+        if (!running) return
+        val now = SystemClock.elapsedRealtime()
+        val open = synchronized(videoLoads) { videoLoads.entries.map { it.key to it.value } }
+        for ((source, load) in open) {
+            val bytes = bytesRead(source)
+            if (bytes > load.lastBytes) {
+                if (load.stalled) {
+                    DiagLog.add("VIDEO ${load.label} receiving data again after ${now - load.lastProgress}ms")
+                }
+                load.lastBytes = bytes
+                load.lastProgress = now
+                load.stalled = false
+            } else if (!load.stalled && now - load.lastProgress >= STALL_MS) {
+                load.stalled = true
+                DiagLog.add(
+                    "VIDEO ${load.label} STALLED: no data for ${now - load.lastProgress}ms, " +
+                        "${DiagLog.size(bytes)} read so far",
+                )
+            }
+        }
+        if (open.isNotEmpty()) watchdog.postDelayed({ checkStalls() }, WATCHDOG_MS)
+    }
+
+    private class PlayerState {
+        var state = 0
+        var since = SystemClock.elapsedRealtime()
+    }
+
+    private val players = java.util.WeakHashMap<Any, PlayerState>()
+
+    /** Discord's ExoPlayer listener (`b.a.p.k`): playback state changes, play/pause and playback errors. */
+    private fun hookVideoPlayer() {
+        val listener = Class.forName("b.a.p.k")
+
+        patcher.patch(
+            listener.getDeclaredMethod("y", Int::class.javaPrimitiveType),
+            object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    safe {
+                        val state = param.args[0] as Int
+                        val now = SystemClock.elapsedRealtime()
+                        val player = synchronized(players) { players.getOrPut(param.thisObject) { PlayerState() } }
+                        if (player.state == state) return@safe
+                        val previous = player.state
+                        val took = now - player.since
+                        player.state = state
+                        player.since = now
+                        val after = if (previous != 0) " after ${took}ms ${stateName(previous).toLowerCase(Locale.US)}" else ""
+                        DiagLog.add("PLAYER ${stateName(state)}$after")
+                    }
+                }
+            },
+        )
+
+        patcher.patch(
+            listener.getDeclaredMethod("j0", Boolean::class.javaPrimitiveType),
+            object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    DiagLog.add(if (param.args[0] as Boolean) "PLAYER playing" else "PLAYER not playing")
+                }
+            },
+        )
+
+        patcher.patch(
+            listener.getDeclaredMethod("s", com.google.android.exoplayer2.PlaybackException::class.java),
+            object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    safe {
+                        val error = param.args[0] as com.google.android.exoplayer2.PlaybackException
+                        val code = error.errorCode
+                        val cause = error.cause?.let { ", cause ${DiagLog.describe(it)}" } ?: ""
+                        DiagLog.add("PLAYER ERROR $code ${errorName(code)}$cause")
+                    }
+                }
+            },
+        )
+    }
+
+    private fun stateName(state: Int) = when (state) {
+        1 -> "IDLE"
+        2 -> "BUFFERING"
+        3 -> "READY"
+        4 -> "ENDED"
+        else -> "STATE $state"
+    }
+
+    /** ExoPlayer's PlaybackException error codes (2.15). */
+    private fun errorName(code: Int) = when (code) {
+        1000 -> "unspecified"
+        1001 -> "remote error"
+        1002 -> "behind live window"
+        1003 -> "timeout"
+        1004 -> "failed runtime check"
+        2000 -> "IO unspecified"
+        2001 -> "network connection failed"
+        2002 -> "network connection timeout"
+        2003 -> "invalid HTTP content type"
+        2004 -> "bad HTTP status"
+        2005 -> "file not found"
+        2006 -> "no permission"
+        2007 -> "cleartext not permitted"
+        2008 -> "read position out of range"
+        3001 -> "malformed container"
+        3002 -> "malformed manifest"
+        3003 -> "unsupported container"
+        3004 -> "unsupported manifest"
+        4001 -> "decoder init failed"
+        4002 -> "decoder query failed"
+        4003 -> "decoding failed"
+        4004 -> "format exceeds device capabilities"
+        4005 -> "format unsupported"
+        5001 -> "audio track init failed"
+        5002 -> "audio track write failed"
+        else -> "unknown"
+    }
+
     /** Device network state, without any addresses. */
     fun networkSummary(context: Context): List<String> {
         val out = ArrayList<String>()
@@ -447,5 +686,7 @@ internal class NetworkTimings(private val patcher: PatcherAPI, private val logge
 
     companion object {
         const val TAG = "NetTiming"
+        private const val WATCHDOG_MS = 5000L
+        private const val STALL_MS = 10000L
     }
 }
