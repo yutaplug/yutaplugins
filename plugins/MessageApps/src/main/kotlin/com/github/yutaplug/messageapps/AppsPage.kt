@@ -20,7 +20,7 @@ import com.facebook.drawee.view.SimpleDraweeView
 
 class AppsPage internal constructor(
     private val plugin: MessageApps,
-    private val target: MessageTarget,
+    private val target: CommandTarget,
     private val appCommands: List<MessageCommand>? = null,
 ) : AppFragment(Utils.getResId("widget_settings_authorized_apps", "layout")) {
     private val main = Handler(Looper.getMainLooper())
@@ -153,7 +153,11 @@ class AppsPage internal constructor(
             matching.forEach { command -> addRow(command, command.name, true) { send(command) } }
         }
         status.visibility = if (matching.isEmpty()) View.VISIBLE else View.GONE
-        status.text = if (query.isNotEmpty()) "No matching commands." else "No message commands available here."
+        status.text = if (query.isNotEmpty()) "No matching commands." else if (target.commandType == 2) {
+            "No user commands available here."
+        } else {
+            "No message commands available here."
+        }
     }
 
     private fun addRow(command: MessageCommand, label: String, execute: Boolean, action: () -> Unit) {

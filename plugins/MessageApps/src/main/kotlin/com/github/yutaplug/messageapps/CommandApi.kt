@@ -8,11 +8,19 @@ import com.discord.utilities.SnowflakeUtils
 import com.discord.utilities.rest.RestAPI
 import org.json.JSONObject
 
-internal data class MessageTarget(
+// commandType is the application command type: 2 for user commands, 3 for message commands.
+internal data class CommandTarget(
     val channelId: Long,
     val guildId: Long,
-    val messageId: Long,
-)
+    val targetId: Long,
+    val commandType: Int,
+) {
+    companion object {
+        fun message(channelId: Long, guildId: Long, messageId: Long) = CommandTarget(channelId, guildId, messageId, 3)
+
+        fun user(channelId: Long, guildId: Long, userId: Long) = CommandTarget(channelId, guildId, userId, 2)
+    }
+}
 
 internal class CommandRateLimit(val retryAt: Long?) : Exception("Discord is temporarily rate limiting apps.")
 
@@ -29,7 +37,7 @@ internal data class MessageCommand(val raw: JSONObject, val app: JSONObject) {
 }
 
 internal class CommandApi(private val expectedToken: String, private val enabled: () -> Boolean) {
-    fun load(target: MessageTarget): List<MessageCommand> {
+    fun load(target: CommandTarget): List<MessageCommand> {
         val indexes = mutableListOf<Pair<Boolean, JSONObject>>()
         if (target.guildId != 0L) {
             indexes.add(false to request("/guilds/${target.guildId}/application-command-index"))
@@ -60,7 +68,7 @@ internal class CommandApi(private val expectedToken: String, private val enabled
             }
             for (i in 0 until commandArray.length()) {
                 val command = commandArray.getJSONObject(i)
-                if (command.optInt("type", 1) != 3) continue
+                if (command.optInt("type", 1) != target.commandType) continue
                 val app = apps[command.getString("application_id")] ?: continue
                 val installations = command.optJSONArray("integration_types")
                 if (userInstalled &&
@@ -86,7 +94,7 @@ internal class CommandApi(private val expectedToken: String, private val enabled
     private fun available(
         command: JSONObject,
         app: JSONObject,
-        target: MessageTarget,
+        target: CommandTarget,
         userInstalled: Boolean,
     ): Boolean {
         val channel = StoreStream.getChannels().getChannel(target.channelId) ?: return false
@@ -118,7 +126,7 @@ internal class CommandApi(private val expectedToken: String, private val enabled
         return allowed(commandPermissions, target, parent?.k(), appAllowed)
     }
 
-    private fun allowed(overrides: JSONObject?, target: MessageTarget, parentId: Long?, fallback: Boolean): Boolean {
+    private fun allowed(overrides: JSONObject?, target: CommandTarget, parentId: Long?, fallback: Boolean): Boolean {
         if (overrides == null) return fallback
         val channels = overrides.optJSONObject("channels")
         val channelAllowed = when {
@@ -142,15 +150,15 @@ internal class CommandApi(private val expectedToken: String, private val enabled
         return roles.optBoolean(target.guildId.toString(), fallback)
     }
 
-    fun execute(target: MessageTarget, command: MessageCommand) {
+    fun execute(target: CommandTarget, command: MessageCommand) {
         val session = StoreApplicationInteractions.`access$getSessionId$p`(StoreStream.getInteractions())
         check(!session.isNullOrEmpty()) { "Discord is reconnecting. Try again when connected." }
         val data = JSONObject()
             .put("id", command.id)
             .put("version", command.raw.getString("version"))
             .put("name", command.raw.optString("name_default", command.raw.getString("name")))
-            .put("type", 3)
-            .put("target_id", target.messageId.toString())
+            .put("type", target.commandType)
+            .put("target_id", target.targetId.toString())
             .put("application_command", command.raw)
         val payload = JSONObject()
             .put("type", 2)
