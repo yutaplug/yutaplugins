@@ -1,8 +1,10 @@
-version = "1.1.5"
+version = "1.1.6"
 description = "Backports Discord profile effects, profile frames, profile themes, role gradients, and display name fonts and colors."
 aliucord {
     changelog.set(
         """
+        # 1.1.6
+        * Chat names that don't fit next to their timestamp are drawn slightly smaller instead of being cut short
         # 1.1.5
         * Show display name colors where Discord does: profiles, the DM header, the selected DM and DM member lists; elsewhere names keep only their font
         * Names in servers no longer show display name colors when the member has no colored role

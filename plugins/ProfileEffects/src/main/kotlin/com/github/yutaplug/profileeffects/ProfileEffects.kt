@@ -188,6 +188,7 @@ class ProfileEffects : Plugin() {
                 val guild = member?.guildId?.takeIf { it > 0 } ?: message.guildId
                 // As on Discord, chat names show only the style's font, in servers and DMs alike.
                 names?.apply(view, author.id, guild, member?.roles, true, false, author)
+                nameFit.bind(view)
             },
         )
         // Reply previews: the replied-to author's name above the message. configureReplyAuthor is a
@@ -336,6 +337,9 @@ class ProfileEffects : Plugin() {
 
     private val listTokens = java.util.WeakHashMap<TextView, Any>()
 
+    /** Shrinks chat names a little instead of cutting them short. */
+    private val nameFit = NameFit()
+
     private fun styleHeaderName(header: UserProfileHeaderView, userId: Long, guildId: Long?, model: Any? = null) {
         val nameView = header.findViewById<View>(Utils.getResId("user_profile_header_primary_name", "id")) ?: return
         val text = usernameText(nameView) ?: return
@@ -462,6 +466,7 @@ class ProfileEffects : Plugin() {
         for (header in ArrayList(bindings.keys)) release(header)
         names?.clear()
         names = null
+        nameFit.clear()
         NameFonts.setListener(null)
         NameFonts.log = null
         NameStyles.onChange = null
