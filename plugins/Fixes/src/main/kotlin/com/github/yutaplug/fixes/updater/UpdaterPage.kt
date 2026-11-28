@@ -640,6 +640,66 @@ class UpdaterPage : SettingsPage() {
             "Installs Aliucord updates found on startup, then asks to restart.",
             Updater.autoCore,
         ) { Updater.settings?.setBool(Updater.AUTO_CORE, it) }
+        restartPromptRow(context)
+    }
+
+    private val restartPrompts = listOf(
+        Updater.RESTART_DIALOG to "Dialog",
+        Updater.RESTART_BAR to "Bar at the bottom",
+        Updater.RESTART_OFF to "Don't ask",
+    )
+
+    /**
+     * A settings row built like Discord's own: a `UiKit_Settings_Item` label with the current
+     * choice on the right in `UiKit_Settings_Item_Compound_Right`, as in Account settings.
+     */
+    private fun restartPromptRow(context: Context) {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isFocusable = true
+            val attribute = android.util.TypedValue()
+            if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, attribute, true) &&
+                attribute.resourceId != 0
+            ) {
+                background = context.getDrawable(attribute.resourceId)
+            }
+        }
+        row.addView(
+            TextView(context, null, 0, R.i.UiKit_Settings_Item_Icon).apply {
+                text = "Ask to restart after updating"
+                background = null
+            },
+            LinearLayout.LayoutParams(0, -2, 1f),
+        )
+        val value = TextView(context, null, 0, R.i.UiKit_Settings_Item_Compound_Right).apply {
+            text = restartPrompts.firstOrNull { it.first == Updater.restartPrompt }?.second ?: restartPrompts[0].second
+        }
+        row.addView(value, LinearLayout.LayoutParams(-2, -2))
+        row.setOnClickListener {
+            val current = Updater.restartPrompt
+            val dialog = SelectDialog().apply {
+                title = "Ask to restart after updating"
+                items = restartPrompts.map { (key, label) -> (if (key == current) "✓ " else "") + label }.toTypedArray()
+                onResultListener = { which ->
+                    val (key, label) = restartPrompts[which]
+                    Updater.settings?.setString(Updater.RESTART_PROMPT, key)
+                    value.text = label
+                }
+            }
+            Updater.fragmentManager(it.context)?.let { manager -> dialog.show(manager, "UpdaterRestartPrompt") }
+        }
+        addView(row)
+        addView(
+            UpdaterUi.subtext(
+                context,
+                "How to ask once updates are installed: a dialog, a bar at the bottom of the screen like " +
+                    "Aliucord's own updater, or not at all (restart later, or with Restart now here).",
+            ).apply {
+                val pad = UpdaterUi.dp(context, 16)
+                setPadding(pad, 0, pad, UpdaterUi.dp(context, 12))
+            },
+        )
     }
 
     private fun switch(context: Context, title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {

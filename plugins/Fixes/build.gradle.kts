@@ -1,6 +1,6 @@
 import org.gradle.kotlin.dsl.support.serviceOf
 
-version = "1.1.3"
+version = "1.1.4"
 description = "Fixes essential features of Discord 126.21. Each fix can be turned on or off in the plugin settings."
 
 android {
@@ -15,6 +15,9 @@ aliucord {
     author("js6pak", 0L, hyperlink = false)
     changelog.set(
         """
+        # 1.1.4
+        * GitHub updater: new "Ask to restart after updating" setting. Choose a dialog, a bar at the bottom of the screen like Aliucord's own updater, or no prompt at all
+
         # 1.1.3
         * GitHub updater: new "Show a popup after updating" setting, to turn off the "Successfully updated" popup shown after restarting
 

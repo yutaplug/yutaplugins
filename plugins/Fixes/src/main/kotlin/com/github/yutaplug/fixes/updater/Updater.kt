@@ -3,6 +3,7 @@ package com.github.yutaplug.fixes.updater
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.view.View
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import com.aliucord.Logger
@@ -12,6 +13,7 @@ import com.aliucord.api.SettingsAPI
 import com.aliucord.fragments.ConfirmDialog
 import com.aliucord.utils.ChangelogUtils
 import com.github.yutaplug.fixes.OpenActivities
+import com.google.android.material.snackbar.Snackbar
 import com.lytefast.flexinput.R
 import java.util.Collections
 import java.util.concurrent.CopyOnWriteArrayList
@@ -28,6 +30,14 @@ internal object Updater {
 
     /** Whether to show the "Successfully updated" popup after restarting (default on). */
     const val UPDATED_POPUP = "updater_updatedPopup"
+
+    /** How to ask to restart once updates are installed: [RESTART_DIALOG] (default), [RESTART_BAR] or [RESTART_OFF]. */
+    const val RESTART_PROMPT = "updater_restartPrompt"
+    const val RESTART_DIALOG = "dialog"
+    const val RESTART_BAR = "bar"
+    const val RESTART_OFF = "off"
+
+    val restartPrompt: String get() = settings?.getString(RESTART_PROMPT, RESTART_DIALOG) ?: RESTART_DIALOG
 
     /** Whether tapping the "updates available" popup installs them (default on) instead of opening the Updater. */
     const val POPUP_INSTALLS = "updater_popupInstalls"
@@ -216,6 +226,13 @@ internal object Updater {
     /** Asks to restart once updates are installed. */
     fun promptRestart(context: Context?, done: List<Installed>) {
         if (done.isEmpty()) return
+        when (restartPrompt) {
+            RESTART_OFF -> return
+            RESTART_BAR -> {
+                restartBar(context)
+                return
+            }
+        }
         val all = installed.values.toList().ifEmpty { done }
         val description = if (all.size == 1) {
             val only = all[0]
@@ -234,6 +251,29 @@ internal object Updater {
             .setOnOkListener { Utils.restartAliucord(it.context) }
             .show(manager, "UpdaterRestart")
         relabel(dialog, 0)
+    }
+
+    /**
+     * A bar at the bottom of the screen with a Restart button, like Aliucord's own updater. Not
+     * [Utils.promptRestart]: that one uses [Utils.appActivity], which can be a closed screen.
+     */
+    private fun restartBar(context: Context?) {
+        var c = context
+        while (c is ContextWrapper && c !is Activity) c = c.baseContext
+        val activity = (c as? Activity)?.takeIf { !it.isFinishing && !it.isDestroyed } ?: OpenActivities.front()
+        val view = activity?.findViewById<View>(android.R.id.content)
+        if (view == null) {
+            Utils.showToast("Updates installed. Restart to start using them.")
+            return
+        }
+        try {
+            Snackbar.make(view, "Updates installed. Restart now?", Snackbar.LENGTH_INDEFINITE)
+                .setAction("Restart") { Utils.restartAliucord(it.context) }
+                .show()
+        } catch (e: Throwable) {
+            logger.error("Could not show the restart bar", e)
+            Utils.showToast("Updates installed. Restart to start using them.")
+        }
     }
 
     /** ConfirmDialog always says "OK"; its buttons only exist once it has been shown. */
